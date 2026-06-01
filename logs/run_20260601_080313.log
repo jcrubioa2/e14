@@ -1,0 +1,11 @@
+
+[pass 0: main] starting (concurrency=8, rate=15.0) ...
+[pass 0] done=485 failed=0 skipped=120556
+[pass 1] no failures left — stopping retries.
+
+=== FINAL SUMMARY ===
+  manifest totals: {'done': 121041}
+  total on disk: 22.86 GB
+  elapsed: 8.0 min
+  per-acta log: logs/results.jsonl
+  ✓ no failures outstanding

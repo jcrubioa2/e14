@@ -1,0 +1,7 @@
+
+[pass 0: main] starting (concurrency=160, rate=250.0) ...
+[pass 0] done=120505 failed=367 skipped=0
+  failure reasons:
+       367  fetch error: connection: Failed to perform, curl: (28) Opera
+
+[pass 1: retry] starting (concurrency=160, rate=250.0) ...

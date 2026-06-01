@@ -1,0 +1,17 @@
+[project]
+name = "e14-scraper"
+version = "0.1.0"
+description = "Resumable scraper for official Registraduria E-14 actas (2026 Colombian presidential election)"
+requires-python = ">=3.11"
+dependencies = [
+    "curl_cffi>=0.7",   # Chrome TLS impersonation to pass Akamai bot management
+    "requests>=2.31",   # used only by the optional GraphQL/SigV4 fallback (auth.py/api.py)
+    "tenacity>=8.2",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+e14 = "e14.cli:main"
+
+[tool.setuptools]
+packages = ["e14"]
