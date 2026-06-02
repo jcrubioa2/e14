@@ -86,9 +86,10 @@ class AlibabaQwenVisionReviewer:
         image_paths: list[str],
         metadata: dict,
         thinking_budget: int | None = None,
+        prompt_text: str | None = None,
     ) -> VLMReviewResult:
         budget = self.thinking_budget if thinking_budget is None else thinking_budget
-        content: list[dict] = [{"type": "text", "text": VOTE_FIELD_REVIEW_PROMPT}]
+        content: list[dict] = [{"type": "text", "text": prompt_text or VOTE_FIELD_REVIEW_PROMPT}]
         if metadata:
             context = ", ".join(f"{k}={v}" for k, v in metadata.items() if v is not None)
             if context:

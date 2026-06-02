@@ -19,7 +19,11 @@ class VLMReviewResult:
 
 class VisionReviewer(Protocol):
     def review_vote_field(
-        self, image_paths: list[str], metadata: dict, thinking_budget: int | None = None
+        self,
+        image_paths: list[str],
+        metadata: dict,
+        thinking_budget: int | None = None,
+        prompt_text: str | None = None,
     ) -> VLMReviewResult:
         ...
 

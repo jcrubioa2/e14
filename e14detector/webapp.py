@@ -14,10 +14,12 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from . import config
 from .community import CommunityStore, PollConfig, field_key_of, verify_turnstile, voter_token
 from .schemas import FieldClassification
 from .vlm.base import VisionReviewer
 from .vlm.factory import build_reviewer
+from .vlm.prompt import VOTE_FIELD_APPEAL_PROMPT
 
 STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.DIGIT_SHAPE_ANOMALY)
 # /browse paginates over ACTAS (grouped), not individual crops.
@@ -234,6 +236,24 @@ def lookup_candidate_crop(conn: sqlite3.Connection, field_key: str) -> str | Non
     return row_["raw_crop_path"]
 
 
+def lookup_candidate_appeal(conn: sqlite3.Connection, field_key: str) -> tuple[str, bool] | None:
+    """Resolve a field key to (raw_crop_path, is_gemma_seed) for the appeal path."""
+    parsed = parse_field_key(field_key)
+    if parsed is None:
+        return None
+    document_id, page, row, section = parsed
+    row_ = conn.execute(
+        f"SELECT raw_crop_path, CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END AS algo_flagged "
+        "FROM vote_fields vf "
+        "WHERE document_id=? AND page_number=? AND row_number=? "
+        "AND COALESCE(section,'')=? AND row_type='candidate' LIMIT 1",
+        (document_id, page, row, section),
+    ).fetchone()
+    if row_ is None or not row_["raw_crop_path"]:
+        return None
+    return row_["raw_crop_path"], bool(row_["algo_flagged"])
+
+
 def _client_ip(request: Request) -> str:
     """Best-effort client IP, honoring a single proxy hop (Fly/Cloudflare)."""
     fwd = request.headers.get("x-forwarded-for")
@@ -296,6 +316,27 @@ def create_app(
 
     def schedule_adjudication(field_key: str, crop_path: Path, votes_at_call: int) -> None:
         task = asyncio.create_task(asyncio.to_thread(adjudicate, field_key, crop_path, votes_at_call))
+        app.state._bg_tasks.add(task)
+        task.add_done_callback(app.state._bg_tasks.discard)
+
+    def adjudicate_appeal(field_key: str, crop_path: Path, votes_at_call: int) -> None:
+        """Neutral-prompt re-read of a strange crop; CLEAN un-publishes it."""
+        appeal_prompt = config.APPEAL_PROMPT or VOTE_FIELD_APPEAL_PROMPT
+        try:
+            result = get_reviewer().review_vote_field(
+                [str(crop_path)], metadata={}, prompt_text=appeal_prompt
+            )
+            cleared = result.classification not in STRANGE_CLASSES
+            try:
+                digest = hashlib.sha256(Path(crop_path).read_bytes()).hexdigest()
+            except OSError:
+                digest = None
+            community.record_appeal_verdict(field_key, cleared, votes_at_call, digest)
+        except Exception:
+            community.release_appeal(field_key)
+
+    def schedule_appeal(field_key: str, crop_path: Path, votes_at_call: int) -> None:
+        task = asyncio.create_task(asyncio.to_thread(adjudicate_appeal, field_key, crop_path, votes_at_call))
         app.state._bg_tasks.add(task)
         task.add_done_callback(app.state._bg_tasks.discard)
 
@@ -471,11 +512,17 @@ def create_app(
             if page == 1 and not department and not q:
                 hotlist = _build_hotlist(db)
         pub_counts = _published_count_by_doc()
+        # Appeals that reversed a Gemma seed: subtract them so a cleared false positive
+        # stops inflating the acta's flagged count.
+        cleared_by_doc: dict[str, int] = {}
+        for key in community.cleared_keys():
+            d = key.rsplit(":", 3)[0]
+            cleared_by_doc[d] = cleared_by_doc.get(d, 0) + 1
         actas = [
             {
                 "doc": r,
                 "n_candidates": r["n_candidates"],
-                "n_flagged": r["n_flagged"] or 0,
+                "n_flagged": max(0, (r["n_flagged"] or 0) - cleared_by_doc.get(r["document_id"], 0)),
                 "n_published": pub_counts.get(r["document_id"], 0),
             }
             for r in doc_rows
@@ -519,10 +566,16 @@ def create_app(
         for fr in frows:
             fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
             crops.append({"row": fr, "field_key": fkey, "algo_flagged": bool(fr["algo_flagged"])})
-        published = community.published_among([c["field_key"] for c in crops])
+        keys = [c["field_key"] for c in crops]
+        published = community.published_among(keys)
+        cleared = community.cleared_among(keys)
         for c in crops:
-            c["published"] = c["field_key"] in published
-        flagged = any(c["algo_flagged"] for c in crops)
+            c["cleared"] = c["field_key"] in cleared
+            # Shown as strange = a Gemma seed or a live-published crop, UNLESS an appeal
+            # already cleared it. Only such crops expose the "Se ve normal" button.
+            c["published"] = c["field_key"] in published and not c["cleared"]
+            c["strange"] = (c["algo_flagged"] or c["published"]) and not c["cleared"]
+        flagged = any(c["strange"] for c in crops)
         # Issue a stable session id so a subsequent flag POST has an identity.
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         response = templates.TemplateResponse(
@@ -574,6 +627,50 @@ def create_app(
             schedule_adjudication(field_key, crop_path, votes_at_call)
 
         # Never leak the count or whether a review fired — the counter is private.
+        return _flag_response({"ok": True}, 200, sid, new_sid)
+
+    @app.post("/api/appeal")
+    async def api_appeal(request: Request, payload: dict = Body(...)):
+        """"Se ve normal": challenge a crop currently shown as strange.
+
+        Symmetric to /api/flag. Eligibility (the crop must currently be shown strange)
+        is checked here so the crowd cannot open an appeal on an ordinary crop. Crossing
+        the appeal threshold only *triggers* a neutral re-read; the model decides.
+        """
+        field_key = str(payload.get("field_key", ""))
+        if not field_key:
+            raise HTTPException(status_code=400, detail="field_key required")
+
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        token = voter_token(poll_cfg.voter_salt, _client_ip(request), sid)
+
+        if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        if not verify_turnstile(poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)):
+            return _flag_response({"ok": False, "error": "captcha_failed"}, 403, sid, new_sid)
+
+        with conn() as db:
+            looked = lookup_candidate_appeal(db, field_key)
+        if not looked:
+            raise HTTPException(status_code=404, detail="unknown field")
+        crop_rel, is_seed = looked
+        # Only crops currently shown as strange (Gemma seed or live-published) are
+        # appealable. Already-cleared crops are no longer strange, so they are not.
+        strange_now = is_seed or (field_key in community.published_among([field_key]))
+        if not strange_now or field_key in community.cleared_among([field_key]):
+            raise HTTPException(status_code=409, detail="field is not marked strange")
+        try:
+            crop_path = resolve_crop_path(crop_rel, output_dir)
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(status_code=404, detail="crop unavailable")
+
+        community.record_appeal(field_key, token)
+        votes_at_call = community.try_claim_appeal(
+            field_key, poll_cfg.appeal_threshold, poll_cfg.appeal_rescale_step
+        )
+        if votes_at_call is not None:
+            schedule_appeal(field_key, crop_path, votes_at_call)
         return _flag_response({"ok": True}, 200, sid, new_sid)
 
     return app

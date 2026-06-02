@@ -77,6 +77,13 @@ OPENROUTER_BASE_URL = os.environ.get("E14_OPENROUTER_BASE_URL", "https://openrou
 OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "qwen/qwen-2.5-vl-7b-instruct")
 # Cap the answer length (a CLEAN/DIRTY verdict is tiny) to cut latency + output cost.
 OPENROUTER_MAX_TOKENS = int(os.environ.get("E14_OPENROUTER_MAX_TOKENS", "40"))
+# OpenRouter provider-routing sort. For our tiny CLEAN/DIRTY answer, time-to-first-
+# token dominates, so "latency" beats "throughput" (which optimizes tokens/sec we
+# don't use, and was picking slow/flaky hosts). Accepts "latency"|"throughput"|"price".
+OPENROUTER_SORT = os.environ.get("E14_OPENROUTER_SORT", "latency")
+# Optional comma-separated provider allow-list (e.g. "deepinfra,nebius"). When set,
+# OpenRouter is pinned to these hosts (order = the list). Empty = let OpenRouter pick.
+OPENROUTER_PROVIDERS = [p.strip() for p in os.environ.get("E14_OPENROUTER_PROVIDERS", "").split(",") if p.strip()]
 
 # --- Public community-flag poll --------------------------------------------
 # The public report lets anyone flag a candidate crop. Crossing the threshold only
@@ -86,6 +93,14 @@ OPENROUTER_MAX_TOKENS = int(os.environ.get("E14_OPENROUTER_MAX_TOKENS", "40"))
 # real anomaly forever. STRANGE is terminal/published.
 POLL_THRESHOLD = int(os.environ.get("E14_POLL_THRESHOLD", "5"))
 POLL_RESCALE_STEP = int(os.environ.get("E14_POLL_RESCALE_STEP", "5"))
+# Appeal path ("Se ve normal"): distinct normal-votes that trigger a NEUTRAL-prompt
+# re-read of a crop currently shown as strange. A clean re-read un-publishes it; a
+# still-strange one keeps it and re-opens only after another APPEAL_RESCALE_STEP.
+APPEAL_THRESHOLD = int(os.environ.get("E14_APPEAL_THRESHOLD", str(POLL_THRESHOLD)))
+APPEAL_RESCALE_STEP = int(os.environ.get("E14_APPEAL_RESCALE_STEP", str(POLL_RESCALE_STEP)))
+# Optional override of the neutral appeal prompt (env). Empty = use the built-in
+# balanced VOTE_FIELD_APPEAL_PROMPT. Set this to tune leniency without a redeploy.
+APPEAL_PROMPT = os.environ.get("E14_APPEAL_PROMPT", "")
 # Fraction of documents to pre-screen with the LLM (Gemma) in the national bulk
 # pass. CV is dropped; cropping runs on all files, Gemma only on this sample.
 LLM_SAMPLE_RATE = float(os.environ.get("E14_LLM_SAMPLE_RATE", "0.05"))

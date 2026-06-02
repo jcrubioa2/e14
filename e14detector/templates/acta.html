@@ -66,6 +66,10 @@
     .flag { height: 36px; border: 1px solid var(--accent); border-radius: 6px; background: #fff; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 14px; }
     .flag:hover { background: #f0f6ff; }
     .flag[disabled] { cursor: default; color: var(--muted); border-color: var(--line); background: var(--bg); }
+    .normal { height: 36px; border: 1px solid #1a7f37; border-radius: 6px; background: #fff; color: #1a7f37; cursor: pointer; font-size: 13px; padding: 0 14px; margin-top: 6px; display: block; width: 100%; }
+    .normal:hover { background: #eaf6ec; }
+    .normal[disabled] { cursor: default; color: var(--muted); border-color: var(--line); background: var(--bg); }
+    .act .hint { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; }
     @media (max-width: 720px) { .who, .status, .act { width: auto; } .act { text-align: left; } table.rows td { display: block; border-top: none; padding: 4px 12px; } tr { display: block; border-top: 1px solid var(--line); padding: 8px 0; } }
   </style>
 </head>
@@ -92,14 +96,20 @@
     <table class="rows">
       {% for it in crops %}
       {% set r = it.row %}
-      <tr class="{% if it.published or it.algo_flagged %}flagged{% endif %}">
+      <tr class="{% if it.strange %}flagged{% endif %}">
         <td class="who"><b>Candidato {{ r.candidate_number or r.row_number }}</b>{{ r.candidate_name or "" }}</td>
         <td><img class="crop" loading="lazy" src="/crop?path={{ r.raw_crop_path|urlencode }}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
         <td class="status">
           {% if it.published %}<span class="chip people">marcada como sospechosa</span>
-          {% elif it.algo_flagged %}<span class="chip seed">para revisar</span>{% endif %}
+          {% elif it.strange %}<span class="chip seed">para revisar</span>{% endif %}
         </td>
-        <td class="act"><button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button></td>
+        <td class="act">
+          <button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button>
+          {% if it.strange %}
+          <button class="normal" data-field-key="{{ it.field_key }}">Se ve normal</button>
+          <span class="hint">&iquest;Crees que esta casilla est&aacute; bien? Av&iacute;sanos y se vuelve a revisar.</span>
+          {% endif %}
+        </td>
       </tr>
       {% else %}
       <tr><td class="muted">Esta acta no tiene casillas para revisar.</td></tr>
@@ -119,6 +129,23 @@
             body: JSON.stringify({ field_key: btn.dataset.fieldKey, turnstile_token: token }),
           });
           if (res.ok) { btn.textContent = '¡Gracias! Reportado'; }
+          else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }
+          else { btn.textContent = 'No se pudo enviar'; btn.disabled = false; }
+        } catch (e) { btn.textContent = 'Error de red'; btn.disabled = false; }
+      });
+    });
+    // "Se ve normal" — the appeal path: challenge a crop shown as strange.
+    document.querySelectorAll('.normal').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const token = window.getToken ? await window.getToken() : null;
+        try {
+          const res = await fetch('/api/appeal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ field_key: btn.dataset.fieldKey, turnstile_token: token }),
+          });
+          if (res.ok) { btn.textContent = '¡Gracias! Se revisar&aacute; de nuevo'; }
           else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }
           else { btn.textContent = 'No se pudo enviar'; btn.disabled = false; }
         } catch (e) { btn.textContent = 'Error de red'; btn.disabled = false; }

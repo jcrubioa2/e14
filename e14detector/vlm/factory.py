@@ -10,6 +10,22 @@ from .base import VisionReviewer
 from .mock_provider import MockVisionReviewer
 
 
+def _openrouter_routing() -> dict:
+    """Build the OpenRouter ``provider`` routing hint from config.
+
+    Sort by latency (TTFT dominates a tiny verdict). Optionally pin a provider
+    allow-list, disabling fallbacks so we stay on the fast host(s) we chose.
+    """
+    routing: dict = {"sort": config.OPENROUTER_SORT}
+    if config.OPENROUTER_PROVIDERS:
+        # PREFER the fast hosts, but keep fallback ON so a 429/cold host rolls to the
+        # next one instead of hard-failing (measured: pinning a fast host ~3-5s vs the
+        # ~13s routing roulette; single-host-no-fallback hard-fails under burst).
+        routing["order"] = config.OPENROUTER_PROVIDERS
+        routing["allow_fallbacks"] = True
+    return routing
+
+
 def build_reviewer(provider: str | None = None) -> VisionReviewer:
     name = (provider or config.VLM_PROVIDER or "mock").lower()
     if name == "qwen" and config.QWEN_API_KEY:
@@ -40,6 +56,6 @@ def build_reviewer(provider: str | None = None) -> VisionReviewer:
             # A CLEAN/DIRTY verdict is tiny — cap output and route OpenRouter to the
             # fastest provider, since Gemma there is otherwise slow.
             max_tokens=config.OPENROUTER_MAX_TOKENS,
-            provider_routing={"sort": "throughput"},
+            provider_routing=_openrouter_routing(),
         )
     return MockVisionReviewer()

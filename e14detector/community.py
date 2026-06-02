@@ -46,8 +46,26 @@ CREATE TABLE IF NOT EXISTS field_state (
     last_adjudicated_votes INTEGER NOT NULL DEFAULT 0,
     published INTEGER NOT NULL DEFAULT 0,
     image_hash TEXT,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Appeal path ("Se ve normal"): a separate tally of normal-votes that can
+    -- challenge a crop shown as strange. ``appeal_cleared`` suppresses it once a
+    -- neutral re-read comes back CLEAN; ``appeal_state`` (NONE|PENDING) de-dups
+    -- concurrent appeal triggers without touching ``vlm_state``.
+    last_appealed_votes INTEGER NOT NULL DEFAULT 0,
+    appeal_state TEXT NOT NULL DEFAULT 'NONE',
+    appeal_cleared INTEGER NOT NULL DEFAULT 0
 );
+
+-- "Se ve normal" votes. Kept in their own table (not mixed into ``flags``) so the
+-- two directions never share a tally and the suspicious flow is untouched.
+CREATE TABLE IF NOT EXISTS appeals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    field_key TEXT NOT NULL,
+    voter_token TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(field_key, voter_token)
+);
+CREATE INDEX IF NOT EXISTS idx_appeals_field ON appeals(field_key);
 
 CREATE TABLE IF NOT EXISTS rate_buckets (
     voter_token TEXT PRIMARY KEY,
@@ -104,6 +122,8 @@ class PollConfig:
 
     threshold: int = 5
     rescale_step: int = 5
+    appeal_threshold: int = 5
+    appeal_rescale_step: int = 5
     rate_refill_per_min: float = 10.0
     rate_bucket: float = 20.0
     turnstile_secret: str = ""
@@ -115,6 +135,8 @@ class PollConfig:
         return cls(
             threshold=config.POLL_THRESHOLD,
             rescale_step=config.POLL_RESCALE_STEP,
+            appeal_threshold=config.APPEAL_THRESHOLD,
+            appeal_rescale_step=config.APPEAL_RESCALE_STEP,
             rate_refill_per_min=config.RATE_REFILL_PER_MIN,
             rate_bucket=config.RATE_BUCKET,
             turnstile_secret=config.TURNSTILE_SECRET,
@@ -142,7 +164,19 @@ class CommunityStore:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add appeal columns to a pre-existing field_state (deployed DBs)."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(field_state)")}
+        for col, ddl in (
+            ("last_appealed_votes", "INTEGER NOT NULL DEFAULT 0"),
+            ("appeal_state", "TEXT NOT NULL DEFAULT 'NONE'"),
+            ("appeal_cleared", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE field_state ADD COLUMN {col} {ddl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -167,6 +201,27 @@ class CommunityStore:
     def distinct_votes(self, field_key: str) -> int:
         with self._lock:
             return self._distinct_votes(field_key)
+
+    # -- appeal votes ("Se ve normal") --------------------------------------
+    def record_appeal(self, field_key: str, token: str) -> bool:
+        """Insert one normal-vote; True only if new (dedup per identity)."""
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO appeals (field_key, voter_token, created_at) VALUES (?,?,?)",
+                (field_key, token, _now_iso()),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def _distinct_appeals(self, field_key: str) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(DISTINCT voter_token) c FROM appeals WHERE field_key=?",
+            (field_key,),
+        ).fetchone()["c"]
+
+    def distinct_appeals(self, field_key: str) -> int:
+        with self._lock:
+            return self._distinct_appeals(field_key)
 
     # -- adjudication state --------------------------------------------------
     def _upsert_state(self, field_key: str, **fields) -> None:
@@ -230,6 +285,87 @@ class CommunityStore:
                 (_now_iso(), field_key),
             )
             self.conn.commit()
+
+    def try_claim_appeal(
+        self, field_key: str, threshold: int, rescale_step: int
+    ) -> int | None:
+        """Decide whether to fire a NEUTRAL re-read of a strange crop, and claim it.
+
+        Eligibility that the field is *currently shown as strange* is enforced by the
+        caller (a Gemma seed lives in the read-only results DB, not here). This only
+        gates on the appeal tally and de-dups concurrent triggers via ``appeal_state``.
+        Returns the distinct normal-vote count at claim time, or ``None``.
+        """
+        with self._lock:
+            votes = self._distinct_appeals(field_key)
+            row = self.conn.execute(
+                "SELECT appeal_state, last_appealed_votes, appeal_cleared "
+                "FROM field_state WHERE field_key=?",
+                (field_key,),
+            ).fetchone()
+            astate = row["appeal_state"] if row else "NONE"
+            last = row["last_appealed_votes"] if row else 0
+            cleared = (row["appeal_cleared"] if row else 0)
+            if astate == "PENDING" or cleared:
+                return None  # in flight, or already cleared (terminal for the appeal)
+            if last == 0 and votes < threshold:
+                return None
+            if last > 0 and votes < last + rescale_step:
+                return None  # re-appealable only after another step of fresh votes
+            self._upsert_state(field_key, appeal_state="PENDING")
+            self.conn.commit()
+            return votes
+
+    def record_appeal_verdict(
+        self, field_key: str, cleared: bool, votes_at_call: int, image_hash: str | None = None
+    ) -> None:
+        """Persist a neutral re-read. ``cleared`` => suppress the strange mark."""
+        with self._lock:
+            fields = dict(
+                appeal_state="NONE",
+                last_appealed_votes=votes_at_call,
+                appeal_cleared=1 if cleared else 0,
+            )
+            if image_hash:
+                fields["image_hash"] = image_hash
+            if cleared:
+                # If a live adjudication had published it, un-publish too, and leave it
+                # CLEAN so the suspicious flow's "clean is re-eligible" rule still applies.
+                fields["published"] = 0
+                fields["vlm_state"] = "CLEAN"
+            self._upsert_state(field_key, **fields)
+            self.conn.commit()
+
+    def release_appeal(self, field_key: str) -> None:
+        """Roll an appeal PENDING claim back after a failed re-read, so it can retry."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE field_state SET appeal_state='NONE', updated_at=? "
+                "WHERE field_key=? AND appeal_state='PENDING'",
+                (_now_iso(), field_key),
+            )
+            self.conn.commit()
+
+    def cleared_among(self, field_keys: list[str]) -> set[str]:
+        """Subset of the given keys an appeal cleared (suppress the strange mark)."""
+        if not field_keys:
+            return set()
+        with self._lock:
+            placeholders = ",".join("?" for _ in field_keys)
+            rows = self.conn.execute(
+                f"SELECT field_key FROM field_state WHERE appeal_cleared=1 "
+                f"AND field_key IN ({placeholders})",
+                field_keys,
+            ).fetchall()
+        return {r["field_key"] for r in rows}
+
+    def cleared_keys(self) -> list[str]:
+        """All field keys an appeal has cleared (few — only reversed false positives)."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT field_key FROM field_state WHERE appeal_cleared=1"
+            ).fetchall()
+        return [r["field_key"] for r in rows]
 
     def state_of(self, field_key: str) -> sqlite3.Row | None:
         with self._lock:

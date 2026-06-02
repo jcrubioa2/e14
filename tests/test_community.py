@@ -61,6 +61,58 @@ def test_clean_is_re_eligible_not_terminal(tmp_path: Path) -> None:
     store.close()
 
 
+def test_appeal_clears_then_is_terminal(tmp_path: Path) -> None:
+    """A neutral re-read that comes back CLEAN suppresses the strange mark."""
+    store = CommunityStore(tmp_path / "c.sqlite")
+    for i in range(2):
+        store.record_appeal("k", f"v{i}")
+    assert store.try_claim_appeal("k", threshold=3, rescale_step=2) is None  # 2 < 3
+    store.record_appeal("k", "v2")
+    votes = store.try_claim_appeal("k", threshold=3, rescale_step=2)
+    assert votes == 3
+    # Concurrent appeal must not double-fire while PENDING.
+    store.record_appeal("k", "v3")
+    assert store.try_claim_appeal("k", 3, 2) is None
+    store.record_appeal_verdict("k", cleared=True, votes_at_call=votes)
+    assert store.cleared_among(["k"]) == {"k"}
+    assert store.cleared_keys() == ["k"]
+    # Cleared is terminal for the appeal: more normal-votes never re-fire it.
+    store.record_appeal("k", "v4")
+    store.record_appeal("k", "v5")
+    assert store.try_claim_appeal("k", 3, 2) is None
+    store.close()
+
+
+def test_appeal_still_strange_is_re_appealable(tmp_path: Path) -> None:
+    """If the re-read stays strange, the crop is re-appealable after another step."""
+    store = CommunityStore(tmp_path / "c.sqlite")
+    for i in range(3):
+        store.record_appeal("k", f"v{i}")
+    votes = store.try_claim_appeal("k", 3, 2)
+    store.record_appeal_verdict("k", cleared=False, votes_at_call=votes)  # still strange
+    assert store.cleared_among(["k"]) == set()
+    # One more normal-vote: below last+step (3+2=5), no re-fire.
+    store.record_appeal("k", "v3")
+    assert store.try_claim_appeal("k", 3, 2) is None
+    # Climb to 5 -> re-read again; this time CLEAN -> cleared.
+    store.record_appeal("k", "v4")
+    votes2 = store.try_claim_appeal("k", 3, 2)
+    assert votes2 == 5
+    store.record_appeal_verdict("k", cleared=True, votes_at_call=votes2)
+    assert store.cleared_among(["k"]) == {"k"}
+    store.close()
+
+
+def test_appeal_and_suspicious_tallies_are_independent(tmp_path: Path) -> None:
+    """Suspicious votes and normal-votes never share a counter."""
+    store = CommunityStore(tmp_path / "c.sqlite")
+    store.record_flag("k", "a")
+    store.record_appeal("k", "a")  # same identity, opposite direction: both count
+    assert store.distinct_votes("k") == 1
+    assert store.distinct_appeals("k") == 1
+    store.close()
+
+
 def test_rate_limit_token_bucket(tmp_path: Path) -> None:
     store = CommunityStore(tmp_path / "c.sqlite")
     # Bucket of 2, negligible refill: third immediate call is denied.
@@ -88,11 +140,12 @@ class _FakeReviewer:
     def __init__(self, classification: FieldClassification) -> None:
         self.classification = classification
 
-    def review_vote_field(self, image_paths, metadata, thinking_budget=None) -> VLMReviewResult:
+    def review_vote_field(self, image_paths, metadata, thinking_budget=None, prompt_text=None) -> VLMReviewResult:
+        self.last_prompt_text = prompt_text  # so a test can assert the neutral prompt was used
         return VLMReviewResult(self.classification, 0.9, None, {}, "stub")
 
 
-def _build_app(tmp_path: Path, reviewer: _FakeReviewer):
+def _build_app(tmp_path: Path, reviewer: _FakeReviewer, seed_strange: bool = False):
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     crop = output_dir / "crops" / "c.png"
@@ -109,9 +162,17 @@ def _build_app(tmp_path: Path, reviewer: _FakeReviewer):
     )
     store.commit()
     store.close()
+    if seed_strange:
+        # Mark the field as a Gemma seed so it is shown strange and is appealable.
+        import sqlite3 as _sq
+        c = _sq.connect(db)
+        c.execute("UPDATE vote_fields SET vlm_classification='SUSPICIOUS_OVERLAP' WHERE document_id='doc1'")
+        c.commit()
+        c.close()
 
-    poll = PollConfig(threshold=3, rescale_step=2, rate_refill_per_min=10_000,
-                      rate_bucket=10_000, turnstile_secret="", voter_salt="t")
+    poll = PollConfig(threshold=3, rescale_step=2, appeal_threshold=3, appeal_rescale_step=2,
+                      rate_refill_per_min=10_000, rate_bucket=10_000,
+                      turnstile_secret="", voter_salt="t")
     app = create_app(results_db=db, output_dir=output_dir,
                      community_db=tmp_path / "community.sqlite", reviewer=reviewer, poll=poll)
     return app
@@ -119,6 +180,11 @@ def _build_app(tmp_path: Path, reviewer: _FakeReviewer):
 
 async def _flag(client: httpx.AsyncClient, field_key: str, ip: str) -> httpx.Response:
     return await client.post("/api/flag", json={"field_key": field_key},
+                             headers={"x-forwarded-for": ip})
+
+
+async def _appeal(client: httpx.AsyncClient, field_key: str, ip: str) -> httpx.Response:
+    return await client.post("/api/appeal", json={"field_key": field_key},
                              headers={"x-forwarded-for": ip})
 
 
@@ -162,6 +228,52 @@ def test_flag_flow_clean_then_strange_via_re_eligibility(tmp_path: Path) -> None
             assert "marcada como sospechosa" in detail
             summary = (await client.get("/browse")).text
             assert "marcada por la gente" in summary
+
+    asyncio.run(run())
+
+
+def test_appeal_flow_clears_a_gemma_false_positive(tmp_path: Path) -> None:
+    """End-to-end: a Gemma-seeded strange crop, appealed past threshold, is cleared
+    by a neutral re-read and disappears from the public 'para revisar' basis."""
+    reviewer = _FakeReviewer(FieldClassification.CLEAN)  # neutral re-read says CLEAN
+    app = _build_app(tmp_path, reviewer, seed_strange=True)
+    fkey = field_key_of("doc1", 1, 1, None)
+    community = app.state.community
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            # Initially the seed is shown strange and exposes the "Se ve normal" button.
+            before = (await client.get("/acta/doc1")).text
+            assert "para revisar" in before
+            assert '<button class="normal"' in before
+
+            # 3 distinct "Se ve normal" votes -> neutral re-read -> CLEAN -> cleared.
+            for i in range(3):
+                assert (await _appeal(client, fkey, f"10.0.0.{i}")).json() == {"ok": True}
+            await _drain(app)
+            assert community.cleared_among([fkey]) == {fkey}
+            # The neutral appeal prompt (not the fraud-priming one) was used.
+            assert reviewer.last_prompt_text and "dirty game" not in reviewer.last_prompt_text
+
+            # The crop is no longer shown strange; the appeal button is gone.
+            after = (await client.get("/acta/doc1")).text
+            assert "para revisar" not in after
+            assert '<button class="normal"' not in after
+
+    asyncio.run(run())
+
+
+def test_appeal_rejected_on_non_strange_field(tmp_path: Path) -> None:
+    """The crowd cannot open an appeal on an ordinary (non-strange) crop."""
+    app = _build_app(tmp_path, _FakeReviewer(FieldClassification.CLEAN), seed_strange=False)
+    fkey = field_key_of("doc1", 1, 1, None)
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            res = await _appeal(client, fkey, "10.0.0.1")
+            assert res.status_code == 409  # not marked strange
 
     asyncio.run(run())
 
