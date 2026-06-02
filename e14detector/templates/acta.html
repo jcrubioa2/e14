@@ -121,7 +121,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ field_key: btn.dataset.fieldKey, form_token: window.__formToken, website: hp ? hp.value : '' }),
           });
-          if (res.ok) { btn.textContent = '¡Gracias! Se revisar&aacute; de nuevo'; }
+          if (res.ok) { btn.textContent = '¡Gracias! Se revisará de nuevo'; }
           else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }
           else { btn.textContent = 'No se pudo enviar'; btn.disabled = false; }
         } catch (e) { btn.textContent = 'Error de red'; btn.disabled = false; }
