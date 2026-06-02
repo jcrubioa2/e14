@@ -490,6 +490,31 @@ def test_admin_poll_is_token_gated_and_shows_activity(tmp_path: Path, monkeypatc
     asyncio.run(run())
 
 
+def test_admin_review_runs_on_demand_and_can_record(tmp_path: Path, monkeypatch) -> None:
+    from e14detector import config as _config
+    app = _build_app(tmp_path, _FakeReviewer(FieldClassification.SUSPICIOUS_OVERLAP))
+    fk = field_key_of("doc1", 1, 1, None)
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            monkeypatch.setattr(_config, "ADMIN_TOKEN", "")
+            assert (await client.get(f"/admin/review?field_key={fk}")).status_code == 404
+            monkeypatch.setattr(_config, "ADMIN_TOKEN", "k")
+            assert (await client.get(f"/admin/review?key=bad&field_key={fk}")).status_code == 403
+            # Debug run: returns the verdict, does NOT record.
+            j = (await client.get(f"/admin/review?key=k&field_key={fk}")).json()
+            assert j["classification"] == "SUSPICIOUS_OVERLAP" and j["strange"] is True
+            assert j["recorded"] is False
+            assert app.state.community.state_of(fk) is None
+            # record=1 applies the verdict to the poll.
+            j2 = (await client.get(f"/admin/review?key=k&field_key={fk}&record=1")).json()
+            assert j2["recorded"] is True
+            assert app.state.community.state_of(fk)["vlm_state"] == "STRANGE"
+
+    asyncio.run(run())
+
+
 def test_pending_among_reflects_in_flight_review(tmp_path: Path) -> None:
     """A casilla shows 'en revisión' (PENDING) only while its VLM check is in flight."""
     c = CommunityStore(tmp_path / "c.sqlite")

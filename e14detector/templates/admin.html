@@ -59,7 +59,10 @@
         <td>{% if r.appeal_state != "NONE" %}{{ r.appeal_state }}{% endif %}</td>
         <td>{% if r.appeal_cleared %}s&iacute;{% endif %}</td>
         <td class="muted">{{ r.image_hash }}</td>
-        <td><a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver &rarr;</a></td>
+        <td style="white-space:nowrap">
+          <a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a> &middot;
+          <a href="/admin/review?key={{ key|urlencode }}&field_key={{ r.field_key|urlencode }}&prompt=confirm" target="_blank" rel="noopener">probar IA</a>
+        </td>
       </tr>
       {% else %}
       <tr><td colspan="11" class="muted">Sin actividad de la comunidad todav&iacute;a.</td></tr>

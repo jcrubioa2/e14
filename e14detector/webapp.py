@@ -29,7 +29,7 @@ from .community import (
 from .schemas import FieldClassification
 from .vlm.base import VisionReviewer
 from .vlm.factory import build_reviewer
-from .vlm.prompt import VOTE_FIELD_APPEAL_PROMPT, VOTE_FIELD_CONFIRM_PROMPT
+from .vlm.prompt import VOTE_FIELD_APPEAL_PROMPT, VOTE_FIELD_CONFIRM_PROMPT, VOTE_FIELD_SCREEN_PROMPT
 
 STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.DIGIT_SHAPE_ANOMALY)
 # /browse paginates over ACTAS (grouped), not individual crops.
@@ -688,6 +688,55 @@ def create_app(
         return templates.TemplateResponse(
             request, "admin.html", {"rows": rows, "summary": summary, "key": key},
         )
+
+    @app.get("/admin/review")
+    async def admin_review(
+        request: Request, key: str = "", field_key: str = "",
+        prompt: str = "confirm", model: str = "", record: int = 0,
+    ):
+        # Operator-only: run a VLM read on any crop on demand (debugging). Optionally a
+        # different model/prompt than the live poll, and optionally record the verdict.
+        if not config.ADMIN_TOKEN:
+            raise HTTPException(status_code=404, detail="not found")
+        if key != config.ADMIN_TOKEN:
+            raise HTTPException(status_code=403, detail="forbidden")
+        with conn() as db:
+            looked = lookup_candidate_appeal(db, field_key)
+        if not looked:
+            raise HTTPException(status_code=404, detail="unknown field")
+        crop_rel, _ = looked
+        prompt_text = {
+            "confirm": VOTE_FIELD_CONFIRM_PROMPT,
+            "appeal": config.APPEAL_PROMPT or VOTE_FIELD_APPEAL_PROMPT,
+            "screen": VOTE_FIELD_SCREEN_PROMPT,
+        }.get(prompt, VOTE_FIELD_CONFIRM_PROMPT)
+        reviewer = (
+            build_reviewer("openrouter", model=model, max_tokens=config.LIVE_MAX_TOKENS)
+            if model else get_reviewer()
+        )
+        local, is_temp = _obtain_crop(crop_rel)
+        try:
+            result = await asyncio.to_thread(
+                reviewer.review_vote_field, [str(local)], {}, prompt_text
+            )
+        finally:
+            if is_temp:
+                local.unlink(missing_ok=True)
+        strange = result.classification in STRANGE_CLASSES
+        recorded = False
+        if record:  # force the poll verdict (e.g. re-review after a model change)
+            community.record_verdict(field_key, strange, community.distinct_votes(field_key), None)
+            recorded = True
+        return {
+            "field_key": field_key,
+            "model": model or config.OPENROUTER_MODEL,
+            "prompt": prompt,
+            "classification": result.classification.value,
+            "confidence": result.confidence,
+            "strange": strange,
+            "recorded": recorded,
+            "raw": result.raw_json,
+        }
 
     @app.get("/robots.txt")
     async def robots():
