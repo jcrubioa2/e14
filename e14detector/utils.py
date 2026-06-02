@@ -11,7 +11,7 @@ from .schemas import DocumentMetadata
 
 FILENAME_RE = re.compile(
     r"^E14_(?P<corp>[A-Z]+)_(?P<dep>\d{2})_(?P<muni>\d{3})_"
-    r"(?P<zona>\d{3})_(?P<puesto>\d{2})_(?P<mesa>\d{3})_"
+    r"(?P<zona>\d{3})_(?P<puesto>[A-Z0-9]{2})_(?P<mesa>\d{3})_"
     r"(?P<variant>[a-z]+)\.pdf$"
 )
 

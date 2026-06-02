@@ -15,6 +15,15 @@ class UtilsTests(TestCase):
         self.assertEqual(meta.mesa, "003")
         self.assertEqual(meta.metadata_source, "filename")
 
+    def test_parse_alphanumeric_puesto(self) -> None:
+        # Special "zona 099 / puesto A1" tables have an alphanumeric puesto.
+        meta = parse_document_metadata(Path("E14_PRE_01_001_099_A1_002_delegados.pdf"))
+        self.assertEqual(meta.department_code, "01")
+        self.assertEqual(meta.zone, "099")
+        self.assertEqual(meta.puesto, "A1")
+        self.assertEqual(meta.mesa, "002")
+        self.assertEqual(meta.metadata_source, "filename")
+
     def test_parse_unknown_filename_degrades_cleanly(self) -> None:
         meta = parse_document_metadata(Path("example.pdf"))
         self.assertEqual(meta.document_id, "example")
