@@ -111,32 +111,32 @@ Ranking goal: flagged seeds first, **and the most-voted actas floated to the top
 
 ## Resume checklist
 
-### Phase 0 — housekeeping
-- [ ] Reboot done; confirm 12 cores at higher clock (`nproc`, `lscpu | grep MHz`).
-- [ ] Decide on the confirm-tier code: **keep + add `vlm-confirm` CLI subcommand** (recommended) or revert.
-- [ ] Commit whatever we keep so the tree is clean before the long run.
+### Phase 0 — housekeeping ✅ DONE (2026-06-02)
+- [x] Confirm-tier kept + wired as `vlm-confirm` CLI subcommand.
+- [x] Tree committed clean; runtime `logs/` etc. gitignored.
 
 ### Phase 1 — one-time scale plumbing (do while crops bake; safe — pilot keeps working)
-- [ ] Provision Tigris: `fly storage create` (gives bucket + S3 creds as Fly secrets).
-- [ ] Add a `raw_crop_path → CDN URL` mapping; webapp templates emit `<img src="https://<cdn>/…">`
-      instead of `/crop` (keep `/crop` as fallback). One small change in `webapp.py` + `acta.html`/`browse.html`.
-- [ ] Move the **national** `results.sqlite` to the Fly **volume** path (e.g. `/data/results.sqlite`),
-      not baked into the image. Wire `cmd_serve` / asgi to read it from there.
-- [ ] Confirm the per-request `conn()` reopen picks up a replaced/updated DB file.
+- [x] `raw_crop_path → CDN URL` mapping: `crop_cdn_url`/`crop_key` in webapp, `acta.html` emits
+      `<img src="<CDN>/crops/…">` when `E14_CDN_BASE_URL` is set, else `/crop`. Shipped to pilot.
+- [x] Crop uploader: `e14detector publish-crops` (boto3, incremental via manifest). [`docs`]
+- [ ] **Provision Tigris** (USER): `flyctl storage create -a e14-poll -n e14-crops --public -y`
+      → capture printed AWS_* creds into local `.env`; then `pip install -e ".[publish]"`.
+- [ ] Set `flyctl secrets set E14_CDN_BASE_URL=https://<bucket>.fly.storage.tigris.dev -a e14-poll`.
+- [ ] Move the **national** `results.sqlite` to the Fly **volume**: set `E14_RESULTS_DB=/data/results.sqlite`
+      and `E14_OUTPUT_DIR=/data` (asgi already reads both from env). Confirm per-request reopen sees swaps.
 
 ### Phase 2 — national crop run (region-ordered, resumable)
-- [ ] (Optional) wipe partial: `rm -rf data/detector_national`.
-- [ ] Launch crop-only over all actas (region order), 12 workers, detached:
-      `nohup .venv/bin/e14detector process --input-dir data/actas --output-dir data/detector_national --crop-only --workers 12 > logs/national_crop.log 2>&1 &`
-- [ ] Monitor: `find data/detector_national/crops -name '*candidate*' | wc -l` (target ~1.58M).
+- [x] Launched 2026-06-02 (pid 37071, resumed from ~500): `process --crop-only --workers 12`,
+      logging to `logs/national_crop.log`. Directory walk = naturally department-grouped.
+- [ ] Monitor to ~1.58M: `find data/detector_national/crops -name '*candidate*' | wc -l`.
 
-### Phase 3 — the hourly publisher loop (the "progressive" engine)
-- [ ] Script that, every ~hour:
-  1. Seed-pass new sampled actas → Gemma `vlm_classification` (only NULL rows in the sample).
-  2. Confirm-tier (Claude) over the newly-flagged crops → demote false positives.
-  3. Upload those actas' candidate crops → Tigris.
-  4. Ship the **new rows** to the Fly volume DB (incremental) → live within the hour.
-- [ ] Could run via `/loop` (Claude Code) or a plain `cron`/`while` loop on the PC.
+### Phase 3 — the publisher loop (the "progressive" engine) — NEXT
+- [x] (3) Upload candidate crops → Tigris: `publish-crops` (incremental).
+- [ ] (1) Seed-pass new sampled actas (Gemma `vlm-review --sample-rate`, or local-Claude `label-*`).
+- [ ] (2) Confirm-tier (`vlm-confirm`) over newly-flagged crops → demote false positives.
+- [ ] (4) **Ship new DB rows to the Fly volume** — DESIGN DECISION PENDING (see open questions):
+      sftp the sqlite via `flyctl ssh`, vs upload DB to Tigris + app-side pull/swap. Start simple.
+- [ ] Glue: a `cron`/`while` loop (or `/loop`) that runs the above each ~hour.
 
 ### Phase 4 — verify & harden
 - [ ] Watch the site grow each hour from a small first batch.
