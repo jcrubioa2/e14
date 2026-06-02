@@ -9,10 +9,20 @@ from e14detector import dbsync
 
 
 def _make_db(path: Path, rows: int) -> None:
+    """A minimal results DB with the served tables (documents + vote_fields) the snapshot copies."""
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
-    con.execute("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT)")
-    con.executemany("INSERT INTO t (v) VALUES (?)", [(f"r{i}",) for i in range(rows)])
+    con.execute("CREATE TABLE IF NOT EXISTS documents (document_id TEXT PRIMARY KEY, source_path TEXT, "
+                "department_code TEXT, municipality_code TEXT, zone TEXT, puesto TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, "
+                "row_type TEXT, raw_crop_path TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS cv_features (id INTEGER PRIMARY KEY, features_json TEXT)")  # must NOT be copied
+    start = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]  # cumulative, unique ids
+    con.executemany("INSERT INTO documents (document_id, source_path) VALUES (?, ?)",
+                    [(f"d{i}", f"d{i}.pdf") for i in range(start, start + rows)])
+    con.executemany("INSERT INTO vote_fields (document_id, row_type, raw_crop_path) VALUES (?, 'candidate', ?)",
+                    [(f"d{i}", f"crops/c{i}.png") for i in range(start, start + rows)])
+    con.execute("INSERT INTO cv_features (features_json) VALUES ('x')")
     con.commit()
     con.close()
 
@@ -35,7 +45,7 @@ def test_snapshot_is_consistent_and_hashable(tmp_path: Path) -> None:
     digest = dbsync.make_snapshot(src, snap)
     assert len(digest) == 64 and snap.exists()
     con = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
-    assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 5
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 5
     con.close()
 
 
@@ -50,7 +60,7 @@ def test_refresh_round_trip_and_idempotence(tmp_path: Path) -> None:
     got = dbsync.refresh_db_once(base, dest, timeout=10)
     assert got == digest and dest.exists()
     con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
-    assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 3
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 3
     con.close()
 
     # No pointer change -> no-op.
@@ -62,7 +72,7 @@ def test_refresh_round_trip_and_idempotence(tmp_path: Path) -> None:
     assert digest2 != digest
     assert dbsync.refresh_db_once(base, dest, timeout=10) == digest2
     con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
-    assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 10
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 10
     con.close()
 
 
@@ -85,7 +95,7 @@ def test_refresh_handles_gzipped_snapshot(tmp_path: Path) -> None:
     dest = tmp_path / "served" / "results.sqlite"
     assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) == digest
     con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
-    assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 6
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 6
     con.close()
 
 
@@ -106,7 +116,7 @@ def test_refresh_rejects_corrupt_snapshot_and_keeps_served_file(tmp_path: Path) 
         dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10)
     # The previously-served file is untouched and still valid.
     con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
-    assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 4
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 4
     con.close()
     assert not list(dest.parent.glob("*.incoming"))  # temp cleaned up
 

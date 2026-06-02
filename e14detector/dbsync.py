@@ -44,16 +44,16 @@ def _sha256(path: Path) -> str:
 def make_snapshot(src_db: Path, dest: Path) -> str:
     """Write a consistent single-file (non-WAL) snapshot of ``src_db``; return its sha256.
 
-    ``VACUUM INTO`` takes a read transaction, so it is safe to run while the crop/seed
-    writer is active (WAL lets readers proceed), and the output is a clean DELETE-journal
-    DB — exactly what the read-only reader needs (no -wal/-shm dependency).
+    ``VACUUM INTO`` takes a read transaction (safe while the crop writer is active under
+    WAL) and produces a compact DELETE-journal DB — exactly what the read-only reader
+    needs, and smaller than a table-by-table copy.
     """
     src_db = Path(src_db)
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         dest.unlink()
-    con = sqlite3.connect(f"file:{src_db.resolve()}?mode=ro", uri=True, timeout=60.0)
+    con = sqlite3.connect(f"file:{src_db.resolve()}?mode=ro", uri=True, timeout=120.0)
     try:
         con.execute("VACUUM INTO ?", (str(dest),))
     finally:
