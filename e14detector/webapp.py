@@ -165,13 +165,15 @@ def _summary(conn: sqlite3.Connection, min_confidence: float) -> dict[str, Any]:
 
 
 def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    # Group by code only and take the non-null name (MAX skips NULLs): some docs carry the
+    # code without a name, which would otherwise show a duplicate "code-only" option.
     return conn.execute(
         """
-        SELECT department_code, department_name
+        SELECT department_code, MAX(department_name) AS department_name
         FROM documents
-        WHERE department_code IS NOT NULL OR department_name IS NOT NULL
-        GROUP BY department_code, department_name
-        ORDER BY department_code, department_name
+        WHERE department_code IS NOT NULL AND department_code <> ''
+        GROUP BY department_code
+        ORDER BY department_code
         """
     ).fetchall()
 
@@ -180,10 +182,10 @@ def _municipios(conn: sqlite3.Connection, department: str | None) -> list[sqlite
     if not department:
         return []
     return conn.execute(
-        "SELECT municipality_code, municipality_name FROM documents "
+        "SELECT municipality_code, MAX(municipality_name) AS municipality_name FROM documents "
         "WHERE (department_code=? OR department_name=?) "
-        "AND (municipality_code IS NOT NULL OR municipality_name IS NOT NULL) "
-        "GROUP BY municipality_code, municipality_name ORDER BY municipality_code, municipality_name",
+        "AND municipality_code IS NOT NULL AND municipality_code <> '' "
+        "GROUP BY municipality_code ORDER BY municipality_code",
         (department, department),
     ).fetchall()
 
