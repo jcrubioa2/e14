@@ -22,6 +22,7 @@ primary_region = 'dfw'
   E14_RESULTS_DB = '/data/results.sqlite'
   E14_OUTPUT_DIR = '/data'
   E14_CDN_BASE_URL = 'https://e14-crops.fly.storage.tigris.dev'
+  E14_SITE_URL = 'https://veeduria-ciudadana-elecciones-colombia-2026.com'
 
 [[mounts]]
   source = 'data'

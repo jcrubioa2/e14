@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from . import config
@@ -555,6 +555,11 @@ def create_app(
         task.add_done_callback(app.state._bg_tasks.discard)
 
     @app.get("/")
+    async def home():
+        # The public landing is the poll (/browse); the analyst dashboard lives at /panel.
+        return RedirectResponse("/browse", status_code=308)
+
+    @app.get("/panel")
     async def dashboard(
         request: Request,
         department: str | None = None,
@@ -622,6 +627,40 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=403, detail="crop path outside output_dir") from exc
         return FileResponse(resolved)
+
+    @app.get("/robots.txt")
+    async def robots():
+        body = (
+            "User-agent: *\n"
+            "Allow: /browse\n"
+            "Allow: /acta/\n"
+            "Disallow: /panel\n"
+            "Disallow: /doc/\n"
+            "Disallow: /api/\n"
+            "Disallow: /crop\n"
+            f"Sitemap: {config.SITE_URL}/sitemap.xml\n"
+        )
+        return PlainTextResponse(body)
+
+    @app.get("/sitemap.xml")
+    async def sitemap():
+        # Entry points + one URL per department (drill-down covers the rest); not every
+        # acta — there are >100k and crawlers reach them via links.
+        with conn() as db:
+            deps = _departments(db)
+        from urllib.parse import quote as _quote
+        locs = [f"{config.SITE_URL}/browse", f"{config.SITE_URL}/browse?review=1"]
+        for d in deps:
+            code = d["department_code"] or d["department_name"]
+            if code:
+                locs.append(f"{config.SITE_URL}/browse?department={_quote(str(code))}")
+        body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            + "".join(f"<url><loc>{loc}</loc></url>" for loc in locs)
+            + "</urlset>"
+        )
+        return Response(body, media_type="application/xml")
 
     @app.get("/api/flagged")
     async def api_flagged(
@@ -811,6 +850,18 @@ def create_app(
                 "page": page,
                 "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
                 "total": total_actas,
+                "site_url": config.SITE_URL,
+                "canonical": config.SITE_URL + ("/browse?review=1" if review else "/browse"),
+                "page_title": (
+                    "Todas las actas para revisar — Veeduría ciudadana elecciones 2026"
+                    if review else
+                    "Veeduría ciudadana de las actas E-14 — elecciones Colombia 2026"
+                ),
+                "meta_description": (
+                    "Revisa las actas E-14 de las elecciones presidenciales de Colombia 2026. "
+                    "Mira los votos escritos a mano en cada mesa y reporta lo que se vea alterado. "
+                    "Veeduría ciudadana, abierta a todos."
+                ),
             },
         )
 
@@ -864,6 +915,10 @@ def create_app(
         form_token = (
             issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
         )
+        loc = " · ".join(
+            x for x in (doc["department_name"] or doc["department_code"],
+                        doc["municipality_name"], f"mesa {doc['mesa']}" if doc["mesa"] else None) if x
+        ) or doc["document_id"]
         response = templates.TemplateResponse(
             request,
             "acta.html",
@@ -872,6 +927,13 @@ def create_app(
                 "crops": crops,
                 "flagged": flagged,
                 "form_token": form_token,
+                "site_url": config.SITE_URL,
+                "canonical": f"{config.SITE_URL}/acta/{doc['document_id']}",
+                "page_title": f"Acta E-14 — {loc} | Veeduría ciudadana 2026",
+                "meta_description": (
+                    f"Acta E-14 de {loc}. Revisa los votos escritos a mano de cada candidato "
+                    f"y reporta lo que se vea alterado. Veeduría ciudadana, elecciones Colombia 2026."
+                ),
             },
         )
         if "sid" not in request.cookies:

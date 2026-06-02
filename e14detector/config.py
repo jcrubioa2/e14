@@ -41,6 +41,10 @@ NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
 # badge regardless of the model verdict (the crowd signal stands on its own).
 HIGH_VOTE_THRESHOLD = int(os.environ.get("E14_HIGH_VOTE_THRESHOLD", "100"))
 
+# Canonical public base URL (no trailing slash) — used for SEO canonical links, Open
+# Graph URLs, robots.txt and sitemap.xml. Override per-deployment once the domain is live.
+SITE_URL = os.environ.get("E14_SITE_URL", "https://veeduria-ciudadana-elecciones-colombia-2026.com").rstrip("/")
+
 # Base URL of the crop CDN (Fly Tigris / S3). When set, the public page serves crops
 # from "<CDN>/crops/<file>" instead of the in-app /crop endpoint (which can't scale to
 # ~1.58M files). Unset (the pilot) keeps the baked-in crops served via /crop.

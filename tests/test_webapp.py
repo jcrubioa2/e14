@@ -241,7 +241,9 @@ def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_
                 "doc-unclear",
             }
 
-            dashboard = await client.get("/")
+            # The analyst dashboard moved to /panel; / now redirects to the public /browse.
+            assert (await client.get("/")).status_code == 308
+            dashboard = await client.get("/panel")
             assert dashboard.status_code == 200
             assert "doc-candidate" in dashboard.text
             assert "doc-unclear" in dashboard.text
