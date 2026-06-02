@@ -327,6 +327,7 @@ class DetectorStore:
         only_unlabeled: bool = True,
         only_flagged: bool = False,
         department: str | None = None,
+        document_id: str | None = None,
     ) -> list[sqlite3.Row]:
         """Candidate crops (id + identity + crop path) to hand to a local labeling pass."""
         where = ["vf.row_type='candidate'", "vf.raw_crop_path IS NOT NULL"]
@@ -335,6 +336,9 @@ class DetectorStore:
             where.append("vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY')")
         elif only_unlabeled:
             where.append("vf.vlm_classification IS NULL")
+        if document_id:
+            where.append("vf.document_id=?")
+            params.append(document_id)
         if department:
             where.append("(d.department_code=? OR d.department_name=?)")
             params.extend([department, department])

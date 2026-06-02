@@ -48,19 +48,27 @@ def export_label_queue(
     only_flagged: bool = False,
     include_labeled: bool = False,
     department: str | None = None,
+    document_id: str | None = None,
     shuffle: bool = False,
     seed: int = 0,
 ) -> tuple[Path, int]:
-    """Write the labeling queue + guide. Returns (queue_path, n_crops)."""
+    """Write the labeling queue + guide. Returns (queue_path, n_crops).
+
+    With ``document_id`` set, exports every candidate crop of that one acta (regardless of
+    prior verdict) — for (re)evaluating a specific table.
+    """
     review_dir = Path(output_dir) / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
+    # Targeting one acta means re-evaluating it, so include already-labeled crops.
+    only_unlabeled = not include_labeled and document_id is None
     store = DetectorStore(_results_db(output_dir))
     try:
         rows = list(
             store.candidate_crops_for_labeling(
-                only_unlabeled=not include_labeled,
+                only_unlabeled=only_unlabeled,
                 only_flagged=only_flagged,
                 department=department,
+                document_id=document_id,
             )
         )
     finally:

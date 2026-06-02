@@ -216,6 +216,7 @@ def cmd_label_export(args: argparse.Namespace) -> int:
         only_flagged=args.only_flagged,
         include_labeled=args.include_labeled,
         department=args.department,
+        document_id=args.document_id,
         shuffle=args.shuffle,
         seed=args.seed,
     )
@@ -363,6 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     label_export.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
     label_export.add_argument("--limit", type=int, help="cap the number of crops to label")
     label_export.add_argument("--department", help="restrict to one department (code or name)")
+    label_export.add_argument("--document-id", help="export just this one acta (re-evaluates it, incl. labeled)")
     label_export.add_argument(
         "--only-flagged", action="store_true",
         help="export only crops the screen already flagged (audit Gemma's positives)",
