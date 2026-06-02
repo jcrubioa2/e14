@@ -64,7 +64,7 @@
       <button class="filter" type="submit">Filtrar</button>
     </form>
 
-    <div class="muted" style="margin-bottom:10px">{{ total }} acta(s), p&aacute;gina {{ page }} de {{ pages }}. Las que tienen una posible alerta del sistema aparecen primero.</div>
+    <div class="muted" style="margin-bottom:10px">{{ total }} acta(s) &middot; p&aacute;gina {{ page }} de {{ pages }}. Abre cualquier acta para ver sus casillas y marcar lo que se vea raro.</div>
     <div class="list">
       {% for acta in actas %}
       {% set d = acta.doc %}
