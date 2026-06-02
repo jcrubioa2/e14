@@ -456,6 +456,20 @@ def test_flag_records_when_crop_is_not_on_local_disk(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_pending_among_reflects_in_flight_review(tmp_path: Path) -> None:
+    """A casilla shows 'en revisión' (PENDING) only while its VLM check is in flight."""
+    c = CommunityStore(tmp_path / "c.sqlite")
+    fk = field_key_of("doc1", 1, 1, None)
+    for i in range(3):
+        c.record_flag(fk, f"v{i}")
+    assert c.pending_among([fk]) == set()           # nothing claimed yet
+    assert c.try_claim_adjudication(fk, 3, 2) == 3   # threshold crossed -> PENDING
+    assert c.pending_among([fk]) == {fk}
+    c.record_verdict(fk, strange=False, votes_at_call=3, image_hash=None)
+    assert c.pending_among([fk]) == set()            # resolved -> no longer pending
+    c.close()
+
+
 def test_turnstile_enabled_rejects_missing_token(tmp_path: Path) -> None:
     """When Turnstile is enabled, a flag without a token is rejected; disabled => ignored."""
     output_dir = tmp_path / "out"

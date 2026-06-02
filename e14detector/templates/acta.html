@@ -74,6 +74,7 @@
     .chip.people { border-color: #b42318; color: #fff; background: #b42318; }
     .chip.seed { border-color: #d4a72c; color: #7a5c00; background: #fff8e1; }
     .chip.alta { border-color: #c2410c; color: #fff; background: #c2410c; }
+    .chip.rev { border-color: #0969da; color: #0969da; background: #ddf4ff; }
     table.rows { width: 100%; border-collapse: collapse; }
     table.rows td { border-top: 1px solid var(--line); padding: 10px 12px; vertical-align: middle; }
     tr.flagged { background: #fff7f6; }
@@ -124,7 +125,8 @@
         <td><img class="crop" loading="lazy" src="{% if it.crop_url %}{{ it.crop_url }}{% else %}/crop?path={{ r.raw_crop_path|urlencode }}{% endif %}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
         <td class="status">
           {% if it.published %}<span class="chip people">marcada como sospechosa</span>
-          {% elif it.strange %}<span class="chip seed">para revisar</span>{% endif %}
+          {% elif it.strange %}<span class="chip seed">para revisar</span>
+          {% elif it.pending %}<span class="chip rev">en revisi&oacute;n</span>{% endif %}
           {% if it.high_voted %}<span class="chip alta">muy reportada por la comunidad</span>{% endif %}
         </td>
         <td class="act">
@@ -154,7 +156,13 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ field_key: btn.dataset.fieldKey, form_token: window.__formToken, website: hp ? hp.value : '', turnstile_token: token }),
           });
-          if (res.ok) { btn.textContent = '¡Gracias! Reportado'; }
+          if (res.ok) {
+            btn.textContent = '✓ ¡Gracias! Tu reporte cuenta';
+            const hint = document.createElement('div');
+            hint.className = 'hint';
+            hint.textContent = 'Si más personas coinciden, esta casilla se revisa automáticamente.';
+            btn.insertAdjacentElement('afterend', hint);
+          }
           else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }
           else { btn.textContent = 'No se pudo enviar'; btn.disabled = false; }
         } catch (e) { btn.textContent = 'Error de red'; btn.disabled = false; }

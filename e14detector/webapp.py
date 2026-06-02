@@ -944,6 +944,7 @@ def create_app(
         keys = [c["field_key"] for c in crops]
         published = community.published_among(keys)
         cleared = community.cleared_among(keys)
+        pending = community.pending_among(keys)
         high_voted = community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)
         for c in crops:
             c["cleared"] = c["field_key"] in cleared
@@ -951,6 +952,8 @@ def create_app(
             # already cleared it. Only such crops expose the "Se ve normal" button.
             c["published"] = c["field_key"] in published and not c["cleared"]
             c["strange"] = (c["algo_flagged"] or c["published"]) and not c["cleared"]
+            # The crowd crossed the threshold and a review is running (state feedback).
+            c["pending"] = c["field_key"] in pending and not c["strange"]
             # Independent crowd signal: flagged by many people, shown even if the model
             # called it clean (and even if no appeal cleared it).
             c["high_voted"] = c["field_key"] in high_voted

@@ -455,6 +455,20 @@ class CommunityStore:
             ).fetchall()
         return {r["field_key"] for r in rows}
 
+    def pending_among(self, field_keys: list[str]) -> set[str]:
+        """Subset whose VLM review is in flight (the crowd crossed the threshold) — shown
+        as 'en revisión' so contributors see their collective report triggered a check."""
+        if not field_keys:
+            return set()
+        with self._lock:
+            placeholders = ",".join("?" for _ in field_keys)
+            rows = self.conn.execute(
+                f"SELECT field_key FROM field_state WHERE vlm_state='PENDING' "
+                f"AND field_key IN ({placeholders})",
+                field_keys,
+            ).fetchall()
+        return {r["field_key"] for r in rows}
+
     # -- rate limit ----------------------------------------------------------
     def allow(self, token: str, refill_per_min: float, bucket: float) -> bool:
         """Token-bucket rate limit per voter. Returns False when exhausted."""
