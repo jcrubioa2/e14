@@ -472,10 +472,14 @@ def create_app(
                     except Exception as exc:  # noqa: BLE001 — never let sync crash serving
                         print(f"db-sync: {exc}", flush=True)
 
-            try:  # initial pull so data is present at boot (bounded)
-                await asyncio.wait_for(_pull(), timeout=180)
-            except Exception as exc:  # noqa: BLE001
-                print(f"db-sync (initial): {exc}", flush=True)
+            # Block on an initial pull ONLY if there's no DB to serve yet. If the volume
+            # already has one, serve it immediately and refresh in the background — no
+            # 30s startup stall (decompressing the snapshot) on every deploy/restart.
+            if not results_db.exists():
+                try:
+                    await asyncio.wait_for(_pull(), timeout=180)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"db-sync (initial): {exc}", flush=True)
             sync_task = asyncio.create_task(_sync_loop())
         yield
         if sync_task is not None:

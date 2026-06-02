@@ -119,6 +119,11 @@ CREATE TABLE IF NOT EXISTS runtime_runs (
     python_version TEXT,
     status TEXT
 );
+
+-- The public app groups/filters vote_fields by document_id + row_type and looks crops up
+-- by raw_crop_path on every request; without these it full-scans a multi-million-row table.
+CREATE INDEX IF NOT EXISTS idx_vf_doc_type ON vote_fields(document_id, row_type);
+CREATE INDEX IF NOT EXISTS idx_vf_crop ON vote_fields(raw_crop_path);
 """
 
 
