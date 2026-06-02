@@ -651,6 +651,44 @@ def create_app(
             raise HTTPException(status_code=403, detail="crop path outside output_dir") from exc
         return FileResponse(resolved)
 
+    @app.get("/admin/poll")
+    async def admin_poll(request: Request, key: str = ""):
+        # Operator-only: private vote counts + AI verdicts. Off unless a token is configured.
+        if not config.ADMIN_TOKEN:
+            raise HTTPException(status_code=404, detail="not found")
+        if key != config.ADMIN_TOKEN:
+            raise HTTPException(status_code=403, detail="forbidden")
+        rows = community.admin_overview()
+        with conn() as db:
+            for r in rows:
+                parsed = parse_field_key(r["field_key"])
+                if not parsed:
+                    continue
+                doc_id, page, row, section = parsed
+                meta = db.execute(
+                    "SELECT d.department_name, d.municipality_name, d.mesa, vf.candidate_name "
+                    "FROM documents d LEFT JOIN vote_fields vf ON vf.document_id=d.document_id "
+                    "AND vf.page_number=? AND vf.row_number=? AND COALESCE(vf.section,'')=? "
+                    "AND vf.row_type='candidate' WHERE d.document_id=? LIMIT 1",
+                    (page, row, section, doc_id),
+                ).fetchone()
+                r["document_id"] = doc_id
+                r["acta"] = " · ".join(x for x in (
+                    meta["department_name"], meta["municipality_name"],
+                    f"mesa {meta['mesa']}" if meta and meta["mesa"] else None) if meta and x) if meta else doc_id
+                r["candidate"] = (meta["candidate_name"] if meta else None) or f"fila {row}"
+        summary = {
+            "fields": len(rows),
+            "votes": sum(r["votes"] for r in rows),
+            "pending": sum(r["vlm_state"] == "PENDING" for r in rows),
+            "strange": sum(r["published"] for r in rows),
+            "clean": sum(r["vlm_state"] == "CLEAN" for r in rows),
+            "cleared": sum(r["appeal_cleared"] for r in rows),
+        }
+        return templates.TemplateResponse(
+            request, "admin.html", {"rows": rows, "summary": summary, "key": key},
+        )
+
     @app.get("/robots.txt")
     async def robots():
         body = (
@@ -658,6 +696,7 @@ def create_app(
             "Allow: /browse\n"
             "Allow: /acta/\n"
             "Disallow: /panel\n"
+            "Disallow: /admin\n"
             "Disallow: /doc/\n"
             "Disallow: /api/\n"
             "Disallow: /crop\n"

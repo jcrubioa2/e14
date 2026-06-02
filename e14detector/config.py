@@ -147,6 +147,10 @@ TURNSTILE_SITEKEY = os.environ.get("E14_TURNSTILE_SITEKEY", "")
 # Explicit master switch: Turnstile only works on the real owned domain (not *.fly.dev),
 # so keep it off until the custom domain serves and the widget is configured for it.
 TURNSTILE_ENABLED = os.environ.get("E14_TURNSTILE_ENABLED", "").lower() in ("1", "true", "yes")
+
+# Operator-only poll dashboard (/admin/poll): private vote counts + AI verdicts. Disabled
+# (404) unless this token is set; access requires ?key=<token>.
+ADMIN_TOKEN = os.environ.get("E14_ADMIN_TOKEN", "")
 # Salt for the daily, rotating voter-identity hash (privacy: no raw IPs stored).
 VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
 # In-app bot check (replaces Turnstile when there is no owned domain). The acta page

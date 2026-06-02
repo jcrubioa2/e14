@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Panel de votación (operador)</title>
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ink:#202124; --accent:#0969da; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); }
+    header, main { max-width: 1200px; margin: 0 auto; padding: 16px 20px; }
+    header { background: var(--bg); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    .cards { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+    .card { border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:13px; color:var(--muted); }
+    .card b { display:block; font-size:20px; color:var(--ink); }
+    table { width:100%; border-collapse: collapse; font-size:13px; }
+    th, td { border-bottom:1px solid var(--line); padding:7px 8px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; position:sticky; top:0; background:#fff; }
+    td.num { text-align:right; font-variant-numeric: tabular-nums; }
+    a { color: var(--accent); text-decoration:none; }
+    .tag { display:inline-block; border-radius:999px; padding:1px 8px; font-size:11px; border:1px solid var(--line); }
+    .s-STRANGE { background:#fff1f0; color:var(--bad); border-color:#f1a7a0; }
+    .s-PENDING { background:#ddf4ff; color:var(--accent); border-color:#9ccbf0; }
+    .s-CLEAN { background:#eaf6ec; color:#1a7f37; border-color:#aedcb8; }
+    .s-NONE { color:var(--muted); }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Panel de votación &mdash; operador</h1>
+    <div class="muted">Datos privados (conteos + veredictos de IA). No indexado. Casillas con actividad de la comunidad.</div>
+    <div class="cards">
+      <div class="card">campos<b>{{ summary.fields }}</b></div>
+      <div class="card">votos totales<b>{{ summary.votes }}</b></div>
+      <div class="card">en revisi&oacute;n<b>{{ summary.pending }}</b></div>
+      <div class="card">sospechosas (publicadas)<b>{{ summary.strange }}</b></div>
+      <div class="card">IA: limpias<b>{{ summary.clean }}</b></div>
+      <div class="card">apelaciones aceptadas<b>{{ summary.cleared }}</b></div>
+    </div>
+  </header>
+  <main>
+    <table>
+      <thead><tr>
+        <th>Acta</th><th>Candidato</th><th>Votos</th><th>IA</th><th>Disp&oacute; a</th>
+        <th>Public.</th><th>Apel.</th><th>Apel. estado</th><th>Limpiada</th><th>hash</th><th></th>
+      </tr></thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.acta }}</td>
+        <td>{{ r.candidate }}</td>
+        <td class="num">{{ r.votes }}</td>
+        <td><span class="tag s-{{ r.vlm_state }}">{{ r.vlm_state }}</span></td>
+        <td class="num">{{ r.triggered_at_votes or "" }}</td>
+        <td>{% if r.published %}s&iacute;{% endif %}</td>
+        <td class="num">{{ r.appeals or "" }}</td>
+        <td>{% if r.appeal_state != "NONE" %}{{ r.appeal_state }}{% endif %}</td>
+        <td>{% if r.appeal_cleared %}s&iacute;{% endif %}</td>
+        <td class="muted">{{ r.image_hash }}</td>
+        <td><a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver &rarr;</a></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="11" class="muted">Sin actividad de la comunidad todav&iacute;a.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

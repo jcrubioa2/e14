@@ -456,6 +456,40 @@ def test_flag_records_when_crop_is_not_on_local_disk(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_admin_poll_is_token_gated_and_shows_activity(tmp_path: Path, monkeypatch) -> None:
+    from e14detector import config as _config
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = output_dir / "crops" / "c.png"
+    crop.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (24, 16), (255, 255, 255)).save(crop)
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf",
+                                           department_name="ANTIOQUIA", municipality_name="MEDELLIN", mesa="003"))
+    store.insert_vote_field(VoteField(document_id="doc1", page_number=1, row_type="candidate",
+                                      row_number=1, candidate_name="Cand A", raw_crop_path=str(crop)))
+    store.commit(); store.close()
+    community = CommunityStore(tmp_path / "community.sqlite")
+    fk = field_key_of("doc1", 1, 1, None)
+    community.record_flag(fk, "v1"); community.record_flag(fk, "v2")
+    community.close()
+    app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "community.sqlite")
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            monkeypatch.setattr(_config, "ADMIN_TOKEN", "")
+            assert (await client.get("/admin/poll")).status_code == 404          # disabled
+            monkeypatch.setattr(_config, "ADMIN_TOKEN", "s3cret")
+            assert (await client.get("/admin/poll")).status_code == 403          # no key
+            assert (await client.get("/admin/poll?key=wrong")).status_code == 403
+            ok = await client.get("/admin/poll?key=s3cret")
+            assert ok.status_code == 200
+            assert "Cand A" in ok.text and "MEDELLIN" in ok.text  # private data shown
+
+    asyncio.run(run())
+
+
 def test_pending_among_reflects_in_flight_review(tmp_path: Path) -> None:
     """A casilla shows 'en revisión' (PENDING) only while its VLM check is in flight."""
     c = CommunityStore(tmp_path / "c.sqlite")

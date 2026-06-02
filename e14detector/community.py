@@ -455,6 +455,33 @@ class CommunityStore:
             ).fetchall()
         return {r["field_key"] for r in rows}
 
+    def admin_overview(self) -> list[dict]:
+        """Operator view: every field with any poll activity, with its private vote count,
+        AI verdict/state, and appeal state. Sorted by votes desc."""
+        with self._lock:
+            votes = {r["field_key"]: r["n"] for r in self.conn.execute(
+                "SELECT field_key, COUNT(DISTINCT voter_token) n FROM flags GROUP BY field_key")}
+            appeals = {r["field_key"]: r["n"] for r in self.conn.execute(
+                "SELECT field_key, COUNT(DISTINCT voter_token) n FROM appeals GROUP BY field_key")}
+            states = {r["field_key"]: dict(r) for r in self.conn.execute("SELECT * FROM field_state")}
+        rows = []
+        for k in set(votes) | set(states) | set(appeals):
+            s = states.get(k, {})
+            rows.append({
+                "field_key": k,
+                "votes": votes.get(k, 0),
+                "appeals": appeals.get(k, 0),
+                "vlm_state": s.get("vlm_state", "NONE"),
+                "published": bool(s.get("published")),
+                "triggered_at_votes": s.get("last_adjudicated_votes", 0),
+                "appeal_state": s.get("appeal_state", "NONE"),
+                "appeal_cleared": bool(s.get("appeal_cleared")),
+                "image_hash": (s.get("image_hash") or "")[:12],
+                "updated_at": s.get("updated_at"),
+            })
+        rows.sort(key=lambda r: (-r["votes"], r["field_key"]))
+        return rows
+
     def pending_among(self, field_keys: list[str]) -> set[str]:
         """Subset whose VLM review is in flight (the crowd crossed the threshold) — shown
         as 'en revisión' so contributors see their collective report triggered a check."""
