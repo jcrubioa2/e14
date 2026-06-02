@@ -74,9 +74,16 @@ VLM_CONCURRENCY = int(os.environ.get("E14_VLM_CONCURRENCY", "16"))
 # the shared Qwen adapter with those payload fields suppressed (see vlm/factory.py).
 OPENROUTER_API_KEY = os.environ.get("E14_OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = os.environ.get("E14_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "qwen/qwen-2.5-vl-7b-instruct")
-# Cap the answer length (a CLEAN/DIRTY verdict is tiny) to cut latency + output cost.
+# Two models by role. The LIVE poll path (upvote/downvote) values accuracy over speed,
+# so it uses a heavier (thinking) model; the proactive 5%% pre-screen values speed + cost,
+# so it uses a fast cheap model. Both ride OpenRouter (OpenAI-compatible).
+OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "qwen/qwen3-vl-8b-thinking")
+SCREEN_MODEL = os.environ.get("E14_SCREEN_MODEL", "google/gemini-2.5-flash-lite")
+# Output caps. A thinking model needs room to reason before the JSON, so the live cap is
+# generous; the screen model only emits the tiny JSON. 0 = uncapped.
 OPENROUTER_MAX_TOKENS = int(os.environ.get("E14_OPENROUTER_MAX_TOKENS", "40"))
+LIVE_MAX_TOKENS = int(os.environ.get("E14_LIVE_MAX_TOKENS", "1500"))
+SCREEN_MAX_TOKENS = int(os.environ.get("E14_SCREEN_MAX_TOKENS", "200"))
 # OpenRouter provider-routing sort. For our tiny CLEAN/DIRTY answer, time-to-first-
 # token dominates, so "latency" beats "throughput" (which optimizes tokens/sec we
 # don't use, and was picking slow/flaky hosts). Accepts "latency"|"throughput"|"price".

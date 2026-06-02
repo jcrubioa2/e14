@@ -1,36 +1,50 @@
-"""Prompt text for optional VLM inspection."""
+"""Prompts for VLM inspection of vote-count crops.
+
+Design rule: the DEFINITION of DIRTY vs CLEAN (``_RUBRIC``) is **identical** across
+every path, so "strange" means the same thing whether a crop was caught by the
+proactive pre-screen, confirmed after an upvote, or re-read after a downvote. If the
+bar differed between paths the system would be incoherent and gameable (publish under
+a loose bar, never clear under a strict one). Only a one-line *framing* differs per
+path, and each adjudication framing leans AGAINST the action it triggers — adding
+hysteresis so neither a "suspicious" mob nor a "looks normal" mob can move a verdict
+by sheer volume; the model must independently see (or not see) the overlap.
+"""
 from __future__ import annotations
 
-VOTE_FIELD_REVIEW_PROMPT = """We are detecting anomalies in the handwritten number on the RIGHT side of this crop. \
-It is a poll count with at most 3 digits. The poll judge fills any missing digit position with \
-a placeholder character — an asterisk (*), a dash (-) or a dot (.) — and the real digits should \
-be clear, separate numbers.
+# The shared rubric — same wording everywhere. Only the lead-in sentence changes.
+_RUBRIC = """It is a poll count with at most 3 digits. The poll judge fills any unused digit \
+position with a plain placeholder mark — an asterisk (*), a dash (-) or a dot (.). A row made \
+only of these marks just means a low or zero count and is completely normal.
 
-A common dirty game is writing a NUMBER ON TOP OF a placeholder to inflate the count. Check \
-carefully for any sign of a digit overlapping, covering or merging with a placeholder mark.
+Answer with ONLY one word — CLEAN or DIRTY — and nothing else.
+CLEAN = ordinary separate digits and/or plain placeholder marks, with no overlap.
+DIRTY = a real digit is written ON TOP OF a placeholder mark (clearly overlapping or merged \
+with it), or other clear tampering."""
 
-Answer with ONLY a compact JSON object and nothing else:
-{"verdict": "DIRTY" or "CLEAN", "confidence": a number from 0 to 1}
-"DIRTY" = you see a digit overlapping a placeholder, or any other tampering. \
-"CLEAN" = ordinary digits and/or plain placeholder marks, no overlap."""
+# 1) Proactive 5% pre-screen — no human prior, so read it plainly (no lean). This SEEDS
+#    the public basis, where false positives are most costly; it must not hunt for fraud.
+VOTE_FIELD_SCREEN_PROMPT = (
+    "Read the handwritten number on the RIGHT side of this crop and decide whether it is "
+    "ordinary or shows tampering. Do not assume foul play.\n\n" + _RUBRIC
+)
 
+# 2) Upvote confirmation — the crowd already pushed toward "suspicious" and we are about to
+#    PUBLISH. Lean skeptical of the report so a mob cannot get a clean crop published.
+VOTE_FIELD_CONFIRM_PROMPT = (
+    "Some reviewers flagged the handwritten number on the RIGHT side of this crop as possibly "
+    "altered, but such reports are often mistaken. Judge it independently and only call it "
+    "DIRTY if you yourself can clearly see a digit written over a placeholder.\n\n" + _RUBRIC
+)
 
-# Neutral re-evaluation prompt used by the community APPEAL path ("Se ve normal").
-# It deliberately does NOT prime the model toward fraud ("a common dirty game is…"),
-# because that priming is what manufactures false positives on plain placeholder
-# dots. It is balanced, NOT lenient: a real digit written on top of a placeholder
-# still reads DIRTY, so vote-stuffing cannot launder a genuine overlap. The judge of
-# an appeal is still the model — the crowd only triggers the re-read.
-VOTE_FIELD_APPEAL_PROMPT = """Read the handwritten poll count on the RIGHT side of this crop. \
-It has at most 3 digits. Any unused digit position is filled by the poll judge with a plain \
-placeholder mark — an asterisk (*), a dash (-) or a dot (.). These placeholder marks are normal \
-and expected; a row of them alone just means a low or zero count and is perfectly ordinary.
+# 3) Downvote appeal — the crowd pushed toward "normal" and we are about to UN-publish. Lean
+#    careful so a mob cannot launder a genuine overlap; but a plain row of placeholder dots
+#    still reads CLEAN (there is no digit), which is exactly how a real false positive clears.
+VOTE_FIELD_APPEAL_PROMPT = (
+    "The handwritten number on the RIGHT side of this crop was marked as possibly altered; some "
+    "viewers believe it is actually normal. Before clearing it, look carefully and only call it "
+    "CLEAN if you are confident no real digit is written over a placeholder.\n\n" + _RUBRIC
+)
 
-Do not assume foul play. Decide plainly: are these ordinary separate digits and/or plain \
-placeholder marks, or is a real digit genuinely written ON TOP OF a placeholder (clearly \
-overlapping or merged with it)?
-
-Answer with ONLY a compact JSON object and nothing else:
-{"verdict": "DIRTY" or "CLEAN", "confidence": a number from 0 to 1}
-"DIRTY" = a digit clearly overlaps/covers a placeholder mark. \
-"CLEAN" = ordinary digits and/or plain placeholder marks, no overlap."""
+# Default used by the adapter when a caller passes no explicit prompt: the neutral screen
+# read (the safe, no-lean default). Live paths pass CONFIRM/APPEAL explicitly.
+VOTE_FIELD_REVIEW_PROMPT = VOTE_FIELD_SCREEN_PROMPT

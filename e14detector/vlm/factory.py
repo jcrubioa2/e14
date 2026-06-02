@@ -26,7 +26,16 @@ def _openrouter_routing() -> dict:
     return routing
 
 
-def build_reviewer(provider: str | None = None) -> VisionReviewer:
+_UNSET = object()
+
+
+def build_reviewer(
+    provider: str | None = None,
+    model: str | None = None,
+    max_tokens=_UNSET,
+) -> VisionReviewer:
+    """Build a reviewer. ``model``/``max_tokens`` override the config defaults so a
+    single process can mint different reviewers per role (fast screen vs heavy live)."""
     name = (provider or config.VLM_PROVIDER or "mock").lower()
     if name == "qwen" and config.QWEN_API_KEY:
         from .alibaba_qwen_provider import AlibabaQwenVisionReviewer
@@ -34,7 +43,7 @@ def build_reviewer(provider: str | None = None) -> VisionReviewer:
         return AlibabaQwenVisionReviewer(
             api_key=config.QWEN_API_KEY,
             base_url=config.QWEN_BASE_URL,
-            model=config.QWEN_MODEL,
+            model=model or config.QWEN_MODEL,
             timeout_seconds=config.QWEN_TIMEOUT_SECONDS,
             thinking_budget=config.QWEN_THINKING_BUDGET,
             max_image_px=config.QWEN_MAX_IMAGE_PX,
@@ -42,20 +51,20 @@ def build_reviewer(provider: str | None = None) -> VisionReviewer:
     if name == "openrouter" and config.OPENROUTER_API_KEY:
         # Reuse the OpenAI-compatible adapter, but suppress the DashScope-only
         # ``response_format`` / ``enable_thinking`` payload fields that OpenRouter
-        # rejects with a 400.
+        # rejects with a 400. A 0/None max_tokens means uncapped (thinking models
+        # need room to reason before emitting the JSON verdict).
         from .alibaba_qwen_provider import AlibabaQwenVisionReviewer
 
+        mt = config.OPENROUTER_MAX_TOKENS if max_tokens is _UNSET else max_tokens
         return AlibabaQwenVisionReviewer(
             api_key=config.OPENROUTER_API_KEY,
             base_url=config.OPENROUTER_BASE_URL,
-            model=config.OPENROUTER_MODEL,
+            model=model or config.OPENROUTER_MODEL,
             timeout_seconds=config.QWEN_TIMEOUT_SECONDS,
             max_image_px=config.QWEN_MAX_IMAGE_PX,
             send_thinking=False,
             send_response_format=False,
-            # A CLEAN/DIRTY verdict is tiny — cap output and route OpenRouter to the
-            # fastest provider, since Gemma there is otherwise slow.
-            max_tokens=config.OPENROUTER_MAX_TOKENS,
+            max_tokens=(mt or None),
             provider_routing=_openrouter_routing(),
         )
     return MockVisionReviewer()

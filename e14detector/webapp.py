@@ -19,7 +19,7 @@ from .community import CommunityStore, PollConfig, field_key_of, verify_turnstil
 from .schemas import FieldClassification
 from .vlm.base import VisionReviewer
 from .vlm.factory import build_reviewer
-from .vlm.prompt import VOTE_FIELD_APPEAL_PROMPT
+from .vlm.prompt import VOTE_FIELD_APPEAL_PROMPT, VOTE_FIELD_CONFIRM_PROMPT
 
 STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.DIGIT_SHAPE_ANOMALY)
 # /browse paginates over ACTAS (grouped), not individual crops.
@@ -291,8 +291,10 @@ def create_app(
     app.state._bg_tasks: set[asyncio.Task] = set()
 
     def get_reviewer() -> VisionReviewer:
+        # The live poll path values accuracy over speed and uses a (thinking) model, so
+        # give it a generous output cap rather than the tiny screen cap.
         if app.state.reviewer is None:
-            app.state.reviewer = build_reviewer()
+            app.state.reviewer = build_reviewer(max_tokens=config.LIVE_MAX_TOKENS)
         return app.state.reviewer
 
     def conn() -> sqlite3.Connection:
@@ -301,9 +303,15 @@ def create_app(
         return _connect(results_db)
 
     def adjudicate(field_key: str, crop_path: Path, votes_at_call: int) -> None:
-        """Blocking VLM second opinion; runs on a worker thread (never the loop)."""
+        """Blocking VLM second opinion on an upvoted crop; runs on a worker thread.
+
+        Uses the CONFIRM prompt: the crowd already pushed toward "suspicious", so the
+        model is asked to judge independently (skeptical of the report) before we publish.
+        """
         try:
-            result = get_reviewer().review_vote_field([str(crop_path)], metadata={})
+            result = get_reviewer().review_vote_field(
+                [str(crop_path)], metadata={}, prompt_text=VOTE_FIELD_CONFIRM_PROMPT
+            )
             strange = result.classification in STRANGE_CLASSES
             try:
                 digest = hashlib.sha256(Path(crop_path).read_bytes()).hexdigest()

@@ -26,6 +26,21 @@ class VLMJsonTests(TestCase):
         self.assertEqual(result.confidence, 0.8)
         self.assertIsNone(result.read_value)
 
+    def test_parse_bare_word_clean(self) -> None:
+        result = parse_vlm_json("CLEAN")
+        self.assertEqual(result.classification, FieldClassification.CLEAN)
+        self.assertEqual(result.confidence, 1.0)
+
+    def test_parse_bare_word_dirty(self) -> None:
+        result = parse_vlm_json("DIRTY")
+        self.assertEqual(result.classification, FieldClassification.SUSPICIOUS_OVERLAP)
+
+    def test_parse_word_after_thinking_preamble_takes_last(self) -> None:
+        # A thinking model may mention both words; the FINAL answer must win.
+        text = "It could look DIRTY at first, but the dots are plain placeholders. CLEAN"
+        result = parse_vlm_json(text)
+        self.assertEqual(result.classification, FieldClassification.CLEAN)
+
     def test_mock_provider_returns_review_result(self) -> None:
         reviewer = MockVisionReviewer(FieldClassification.CLEAN)
         result = reviewer.review_vote_field(["crop.png"], {"document_id": "doc"})

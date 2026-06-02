@@ -131,7 +131,13 @@ def run_vlm_review(
     "drop CV, Gemma on N%% of files" mode.
     """
     store = DetectorStore(Path(output_dir) / "results" / "results.sqlite")
-    reviewer = build_reviewer(provider)
+    # The proactive pre-screen wants the fast/cheap screen model; only override the
+    # model when the resolved provider is OpenRouter (qwen/mock keep their own model).
+    resolved = (provider or config.VLM_PROVIDER or "mock").lower()
+    if resolved == "openrouter":
+        reviewer = build_reviewer(provider, model=config.SCREEN_MODEL, max_tokens=config.SCREEN_MAX_TOKENS)
+    else:
+        reviewer = build_reviewer(provider)
     workers = concurrency or config.VLM_CONCURRENCY
     totals = {"reviewed": 0, "cached": 0, "failed": 0}
 
