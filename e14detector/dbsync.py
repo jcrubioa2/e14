@@ -137,6 +137,16 @@ def publish_db(
         digest = _sha256(snap)
         size = snap.stat().st_size
         key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite"
+        # Skip re-uploading an identical DB (nothing changed since the last cycle).
+        try:
+            cur = json.loads(client.get_object(Bucket=bucket, Key=POINTER_KEY)["Body"].read())
+            if cur.get("sha256") == digest:
+                if verbose:
+                    print("publish-db: unchanged since last publish; skipping upload", flush=True)
+                return {"key": key, "sha256": digest, "size": size,
+                        "kept": kept if only_uploaded else None, "skipped": True}
+        except Exception:
+            pass  # no pointer yet, or client without get_object — just publish
         if verbose:
             print(f"publish-db: snapshot {size/1e6:.1f} MB sha={digest[:12]} -> {bucket}/{key}", flush=True)
         # Immutable content-addressed object (safe to cache forever) ...
