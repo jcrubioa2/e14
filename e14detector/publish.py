@@ -12,7 +12,7 @@ Credentials come from the standard S3 env (set on your machine from `fly storage
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from .storage import DetectorStore
@@ -52,11 +52,18 @@ def _load_manifest(manifest: Path) -> set[str]:
     return set()
 
 
-def _default_client():
+def _default_client(workers: int = 16):
     import boto3  # local-only dep; imported lazily so the lean serve image never needs it
+    from botocore.config import Config
 
     endpoint = os.environ.get("AWS_ENDPOINT_URL_S3") or os.environ.get("AWS_ENDPOINT_URL")
-    return boto3.client("s3", endpoint_url=endpoint)
+    # Size the connection pool to the worker count (default pool is 10, which throttles
+    # many small concurrent PUTs), and retry transient errors.
+    cfg = Config(
+        max_pool_connections=max(workers * 2, 16),
+        retries={"max_attempts": 5, "mode": "adaptive"},
+    )
+    return boto3.client("s3", endpoint_url=endpoint, config=cfg)
 
 
 def publish_crops(
@@ -94,27 +101,47 @@ def publish_crops(
         return totals
 
     if client is None:
-        client = _default_client()
+        client = _default_client(workers)
     manifest.parent.mkdir(parents=True, exist_ok=True)
 
-    def _upload(local: Path, key: str) -> str:
+    def _upload(local: Path, key: str) -> None:
         client.upload_file(str(local), bucket, key, ExtraArgs={"ContentType": "image/png"})
-        return key
 
+    # Bounded in-flight window: submit a few per worker, then submit one more for each
+    # completion. Keeps memory flat at any scale and lets the manifest track uploads
+    # closely (so a resume after interruption re-does almost nothing).
+    window = max(workers * 4, 32)
+    items = iter(pending)
+    total = len(pending)
     with manifest.open("a", encoding="utf-8") as mf, ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_upload, p, k): k for (p, k) in pending}
-        for n, fut in enumerate(as_completed(futures), start=1):
-            key = futures[fut]
-            try:
-                fut.result()
-            except Exception as exc:
-                totals["failed"] += 1
-                if verbose:
-                    print(f"publish-crops: FAILED {key}: {exc}", flush=True)
-                continue
-            mf.write(key + "\n")
-            mf.flush()
-            totals["uploaded"] += 1
-            if verbose and n % 500 == 0:
-                print(f"publish-crops: {n}/{len(pending)} uploaded", flush=True)
+        inflight: dict = {}
+
+        def _submit_next() -> bool:
+            item = next(items, None)
+            if item is None:
+                return False
+            local, key = item
+            inflight[ex.submit(_upload, local, key)] = key
+            return True
+
+        for _ in range(window):
+            if not _submit_next():
+                break
+        while inflight:
+            done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            for fut in done:
+                key = inflight.pop(fut)
+                try:
+                    fut.result()
+                except Exception as exc:
+                    totals["failed"] += 1
+                    if verbose:
+                        print(f"publish-crops: FAILED {key}: {exc}", flush=True)
+                else:
+                    mf.write(key + "\n")
+                    mf.flush()
+                    totals["uploaded"] += 1
+                    if verbose and totals["uploaded"] % 500 == 0:
+                        print(f"publish-crops: {totals['uploaded']}/{total} uploaded", flush=True)
+                _submit_next()
     return totals

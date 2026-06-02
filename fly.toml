@@ -16,6 +16,12 @@ primary_region = 'dfw'
   E14_POLL_THRESHOLD = '5'
   E14_TURNSTILE_SITEKEY = '0x4AAAAAADdWyvx9OVxuUDFw'
   E14_VLM_PROVIDER = 'openrouter'
+  # National rollout: serve the results DB from the volume (kept in sync from Tigris),
+  # and crops from the public CDN. The reader pulls db/latest.json and atomic-swaps.
+  E14_DB_SYNC = '1'
+  E14_RESULTS_DB = '/data/results.sqlite'
+  E14_OUTPUT_DIR = '/data'
+  E14_CDN_BASE_URL = 'https://e14-crops.fly.storage.tigris.dev'
 
 [[mounts]]
   source = 'data'

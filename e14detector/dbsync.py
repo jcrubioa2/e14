@@ -66,14 +66,54 @@ def _s3_client():
     return boto3.client("s3", endpoint_url=endpoint)
 
 
+def _prune_to_uploaded(work_db: Path, uploaded: set[str]) -> tuple[int, int]:
+    """Drop documents whose candidate crops aren't all uploaded yet (the safe frontier).
+
+    Returns (kept_documents, dropped_documents). Lets the publisher run continuously
+    alongside the crop run without ever showing an acta whose crop 404s.
+    """
+    from collections import defaultdict
+
+    from .webapp import crop_key  # local-only path; lazy so the reader never imports webapp
+
+    con = sqlite3.connect(work_db)
+    con.row_factory = sqlite3.Row
+    try:
+        by_doc: dict[str, list[str]] = defaultdict(list)
+        for r in con.execute(
+            "SELECT document_id, raw_crop_path FROM vote_fields "
+            "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL"
+        ):
+            by_doc[r["document_id"]].append(crop_key(r["raw_crop_path"]))
+        incomplete = [d for d, keys in by_doc.items() if any(k not in uploaded for k in keys)]
+        kept = len(by_doc) - len(incomplete)
+        if incomplete:
+            con.execute("CREATE TEMP TABLE _drop(id TEXT PRIMARY KEY)")
+            con.executemany("INSERT INTO _drop VALUES (?)", [(d,) for d in incomplete])
+            con.execute("DELETE FROM vote_fields WHERE document_id IN (SELECT id FROM _drop)")
+            con.execute("DELETE FROM documents WHERE document_id IN (SELECT id FROM _drop)")
+            con.commit()
+            con.execute("VACUUM")
+        return kept, len(incomplete)
+    finally:
+        con.close()
+
+
 def publish_db(
     output_dir: Path,
     *,
     bucket: str | None = None,
     client=None,
+    only_uploaded: bool = False,
+    manifest: Path | None = None,
     verbose: bool = True,
-) -> dict:
-    """Snapshot the local results DB and publish it + the pointer to the bucket."""
+) -> dict | None:
+    """Snapshot the local results DB and publish it + the pointer to the bucket.
+
+    With ``only_uploaded``, the snapshot is pruned to the *frontier*: only actas whose
+    candidate crops are all in the upload manifest. Returns None if that frontier is empty
+    (nothing safe to publish yet) so the loop can simply wait.
+    """
     src = Path(output_dir) / "results" / "results.sqlite"
     if not src.exists():
         raise FileNotFoundError(f"results DB not found: {src}")
@@ -85,7 +125,16 @@ def publish_db(
 
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "snapshot.sqlite"
-        digest = make_snapshot(src, snap)
+        make_snapshot(src, snap)
+        if only_uploaded:
+            manifest = Path(manifest) if manifest else Path(output_dir) / "review" / "uploaded_crops.txt"
+            uploaded = set(manifest.read_text(encoding="utf-8").split()) if manifest.exists() else set()
+            kept, dropped = _prune_to_uploaded(snap, uploaded)
+            if verbose:
+                print(f"publish-db: frontier = {kept} fully-uploaded acta(s), {dropped} held back", flush=True)
+            if kept == 0:
+                return None  # nothing safe to publish yet
+        digest = _sha256(snap)
         size = snap.stat().st_size
         key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite"
         if verbose:
@@ -102,7 +151,7 @@ def publish_db(
             Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
-    return {"key": key, "sha256": digest, "size": size}
+    return {"key": key, "sha256": digest, "size": size, "kept": kept if only_uploaded else None}
 
 
 # --- reader (Fly app) ------------------------------------------------------
