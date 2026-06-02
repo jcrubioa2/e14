@@ -377,6 +377,13 @@ def create_app(
             docs, total = _qualifying_docs(db, department, anomaly_type, min_confidence, q, limit, offset)
             return {"total": total, "items": [_row_dict(row) for row in docs]}
 
+    def _published_count_by_doc() -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for key in community.published_keys():
+            doc = key.rsplit(":", 3)[0]
+            counts[doc] = counts.get(doc, 0) + 1
+        return counts
+
     @app.get("/browse")
     async def browse(
         request: Request,
@@ -384,17 +391,16 @@ def create_app(
         q: str | None = None,
         page: int = Query(1, ge=1),
     ):
-        # Crops are grouped by ACTA (one polling table), with the actas the
-        # automatic pipeline flagged shown first, and within each acta the flagged
-        # crops first. We keep the acta identity visible (no anonymization): people
-        # who already know which acta looks wrong need to be able to find it.
+        # LEVEL 1: a browsable summary, one entry per ACTA (a polling table). Actas the
+        # automatic pipeline flagged come first. Click through to /acta/{id} to see the
+        # candidate crops and flag them. Acta identity stays visible (no anonymization).
         where = ["vf.row_type='candidate'", "vf.raw_crop_path IS NOT NULL"]
         params: list[Any] = []
         if department:
             where.append("(d.department_code=? OR d.department_name=?)")
             params.extend([department, department])
         if q:
-            where.append("(d.document_id LIKE ? OR d.place_name LIKE ? OR vf.candidate_name LIKE ?)")
+            where.append("(d.document_id LIKE ? OR d.place_name LIKE ? OR d.municipality_name LIKE ?)")
             needle = f"%{q}%"
             params.extend([needle, needle, needle])
         clause = " AND ".join(where)
@@ -409,51 +415,30 @@ def create_app(
             doc_rows = db.execute(
                 f"""
                 SELECT d.document_id, d.department_code, d.department_name,
-                       d.municipality_code, d.municipality_name, d.zone, d.puesto,
-                       d.mesa, d.place_name, d.official_lookup_url,
-                       MAX(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS flagged
+                       d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name,
+                       COUNT(*) AS n_candidates,
+                       SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS n_flagged
                 FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
                 WHERE {clause}
                 GROUP BY d.document_id
-                ORDER BY flagged DESC, d.department_code, d.document_id
+                ORDER BY (SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) > 0) DESC,
+                         d.department_code, d.document_id
                 LIMIT ? OFFSET ?
                 """,
                 [*params, BROWSE_ACTAS_PER_PAGE, (page - 1) * BROWSE_ACTAS_PER_PAGE],
             ).fetchall()
-            doc_ids = [r["document_id"] for r in doc_rows]
-            fields_by_doc: dict[str, list[dict]] = {}
-            all_keys: list[str] = []
-            if doc_ids:
-                ph = ",".join("?" for _ in doc_ids)
-                frows = db.execute(
-                    f"""
-                    SELECT vf.document_id, vf.page_number, vf.row_number, vf.section,
-                           vf.candidate_number, vf.candidate_name, vf.raw_crop_path,
-                           CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END AS algo_flagged
-                    FROM vote_fields vf
-                    WHERE vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL
-                      AND vf.document_id IN ({ph})
-                    ORDER BY vf.document_id, vf.page_number, vf.row_number
-                    """,
-                    doc_ids,
-                ).fetchall()
-                for fr in frows:
-                    fkey = field_key_of(fr["document_id"], fr["page_number"], fr["row_number"], fr["section"])
-                    all_keys.append(fkey)
-                    fields_by_doc.setdefault(fr["document_id"], []).append(
-                        {"row": fr, "field_key": fkey, "algo_flagged": bool(fr["algo_flagged"])}
-                    )
             departments = _departments(db)
-        published = community.published_among(all_keys)
-        actas = []
-        for r in doc_rows:
-            crops = fields_by_doc.get(r["document_id"], [])
-            for c in crops:
-                c["published"] = c["field_key"] in published
-            actas.append({"doc": r, "crops": crops, "flagged": bool(r["flagged"])})
-        # Issue a stable session id so a subsequent flag POST has an identity.
-        sid = request.cookies.get("sid") or uuid.uuid4().hex
-        response = templates.TemplateResponse(
+        pub_counts = _published_count_by_doc()
+        actas = [
+            {
+                "doc": r,
+                "n_candidates": r["n_candidates"],
+                "n_flagged": r["n_flagged"] or 0,
+                "n_published": pub_counts.get(r["document_id"], 0),
+            }
+            for r in doc_rows
+        ]
+        return templates.TemplateResponse(
             request,
             "browse.html",
             {
@@ -463,6 +448,47 @@ def create_app(
                 "page": page,
                 "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
                 "total": total_actas,
+            },
+        )
+
+    @app.get("/acta/{document_id}")
+    async def acta_detail(request: Request, document_id: str):
+        # LEVEL 2: one acta, all candidate crops in ballot order, each flaggable.
+        with conn() as db:
+            doc = db.execute(
+                "SELECT * FROM documents WHERE document_id=?", (document_id,)
+            ).fetchone()
+            if not doc:
+                raise HTTPException(status_code=404, detail="acta no encontrada")
+            frows = db.execute(
+                f"""
+                SELECT vf.page_number, vf.row_number, vf.section, vf.candidate_number,
+                       vf.candidate_name, vf.raw_crop_path,
+                       CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END AS algo_flagged
+                FROM vote_fields vf
+                WHERE vf.document_id=? AND vf.row_type='candidate'
+                  AND vf.raw_crop_path IS NOT NULL
+                ORDER BY vf.page_number, vf.row_number
+                """,
+                (document_id,),
+            ).fetchall()
+        crops = []
+        for fr in frows:
+            fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
+            crops.append({"row": fr, "field_key": fkey, "algo_flagged": bool(fr["algo_flagged"])})
+        published = community.published_among([c["field_key"] for c in crops])
+        for c in crops:
+            c["published"] = c["field_key"] in published
+        flagged = any(c["algo_flagged"] for c in crops)
+        # Issue a stable session id so a subsequent flag POST has an identity.
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        response = templates.TemplateResponse(
+            request,
+            "acta.html",
+            {
+                "doc": doc,
+                "crops": crops,
+                "flagged": flagged,
                 "turnstile_sitekey": poll_cfg.turnstile_sitekey,
             },
         )

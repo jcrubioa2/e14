@@ -3,82 +3,49 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Revisa los votos &mdash; E-14</title>
-  {% if turnstile_sitekey %}
-  <script>
-    // Invisible Turnstile with EXPLICIT render so a fresh, single-use token is
-    // produced per flag (the page has many buttons; tokens are one-shot + expire).
-    // execute() is serialized and reset() between uses so the next flag gets a new one.
-    window.__cfSitekey = "{{ turnstile_sitekey }}";
-    window.__cfWidget = null;
-    window.__cfPending = null;
-    window.__cfChain = Promise.resolve();
-    window.onloadTurnstile = function () {
-      window.__cfWidget = window.turnstile.render('#cf-widget', {
-        sitekey: window.__cfSitekey,
-        size: 'invisible',
-        execution: 'execute',
-        callback: function (t) { if (window.__cfPending) { window.__cfPending(t); window.__cfPending = null; } },
-        'error-callback': function () { if (window.__cfPending) { window.__cfPending(null); window.__cfPending = null; } },
-        'expired-callback': function () { if (window.__cfPending) { window.__cfPending(null); window.__cfPending = null; } },
-      });
-    };
-    window.getToken = function () {
-      const run = () => new Promise((resolve) => {
-        if (!window.turnstile || window.__cfWidget === null) { resolve(null); return; }
-        let done = false;
-        const finish = (tok) => { if (done) return; done = true; try { window.turnstile.reset(window.__cfWidget); } catch (e) {} resolve(tok); };
-        window.__cfPending = finish;
-        setTimeout(() => finish(null), 8000); // don't hang the button if the challenge stalls
-        try { window.turnstile.execute(window.__cfWidget); } catch (e) { finish(null); }
-      });
-      // serialize: only one challenge in flight at a time
-      const result = window.__cfChain.then(run, run);
-      window.__cfChain = result.catch(() => {});
-      return result;
-    };
-  </script>
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstile&render=explicit" async defer></script>
-  {% endif %}
+  <title>Revisa las actas E-14</title>
   <style>
-    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ink:#202124; }
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ink:#202124; --accent:#0969da; }
+    * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: #fff; }
-    header, main { max-width: 1180px; margin: 0 auto; padding: 22px; }
-    h1 { margin: 0 0 6px; font-size: 28px; line-height: 1.2; }
-    .muted { color: var(--muted); font-size: 13px; }
-    a { color: #0969da; text-decoration: none; }
+    header, main { max-width: 1080px; margin: 0 auto; padding: 22px; }
+    header { background: var(--bg); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 8px; font-size: 26px; line-height: 1.2; }
+    .lede { color: var(--muted); font-size: 15px; max-width: 70ch; line-height: 1.5; }
+    .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0 4px; }
+    .step { font-size: 13px; color: var(--muted); }
+    .step b { color: var(--ink); display: block; font-size: 14px; }
+    a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
-    form.filters { display: grid; grid-template-columns: repeat(3, minmax(130px, 1fr)); gap: 10px; align-items: end; margin: 18px 0; }
+    .muted { color: var(--muted); font-size: 13px; }
+    form.filters { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: end; margin: 18px 0; }
     label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
-    input, select, button { height: 36px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; font: inherit; background: #fff; }
+    input, select, button { height: 38px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; font: inherit; background: #fff; }
     button.filter { background: #24292f; color: #fff; cursor: pointer; }
-    .acta { border: 1px solid var(--line); border-radius: 10px; padding: 0; margin: 16px 0; background: #fff; overflow: hidden; }
-    .acta.flagged { border-color: #f1a7a0; box-shadow: 0 0 0 1px #f7d4d0 inset; }
-    .acta-head { padding: 12px 14px; background: var(--bg); border-bottom: 1px solid var(--line); }
-    .acta-title { font-size: 15px; font-weight: 700; }
+    .list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+    .acta { display: block; border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: #fff; color: inherit; }
+    .acta:hover { border-color: var(--accent); text-decoration: none; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+    .acta.flagged { border-color: #f1a7a0; }
+    .acta-title { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
     .acta-meta { color: var(--muted); font-size: 12px; line-height: 1.5; }
-    .chip { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .badges { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .chip { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; }
     .chip.alert { border-color: #f1a7a0; color: var(--bad); background: #fff1f0; }
-    table.rows { width: 100%; border-collapse: collapse; }
-    table.rows td { border-top: 1px solid var(--line); padding: 8px 12px; vertical-align: middle; }
-    tr.flagged { background: #fff7f6; }
-    .who { width: 160px; font-size: 13px; }
-    .who b { display: block; }
-    .crop { max-width: 240px; max-height: 110px; object-fit: contain; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
-    .status { width: 130px; }
-    .act { width: 150px; text-align: right; }
-    .flag { height: 34px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px; padding: 0 12px; }
-    .flag:hover { background: var(--bg); }
-    .flag[disabled] { cursor: default; color: var(--muted); background: var(--bg); }
+    .chip.people { border-color: #b42318; color: #fff; background: #b42318; }
+    .go { margin-left: auto; font-weight: 600; color: var(--accent); }
     .pager { display: flex; gap: 12px; justify-content: flex-end; margin-top: 18px; }
-    @media (max-width: 760px) { form.filters { grid-template-columns: 1fr; } .who, .status, .act { width: auto; } }
+    @media (max-width: 720px) { form.filters { grid-template-columns: 1fr; } .steps { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <header>
-    <h1>Revisa los votos de las actas E-14</h1>
-    <div class="muted">Si un n&uacute;mero te parece extra&ntilde;o (escrito encima de un punto o una raya, con forma rara, retocado), m&aacute;rcalo. Cuando varias personas marcan la misma casilla, una revisi&oacute;n autom&aacute;tica la verifica y, si confirma algo raro, se publica como sospechosa.</div>
-    {% if turnstile_sitekey %}<div id="cf-widget"></div>{% endif %}
+    <h1>Ayuda a revisar las actas de votación E-14</h1>
+    <p class="lede">Cada acta es la planilla de una mesa de votación. Aqu&iacute; puedes mirar los n&uacute;meros escritos a mano y avisar si alguno se ve raro. Tu reporte ayuda a decidir qu&eacute; casillas se revisan con m&aacute;s cuidado.</p>
+    <div class="steps">
+      <div class="step"><b>1. Elige un acta</b>Busca por departamento o municipio y abre una.</div>
+      <div class="step"><b>2. Mira las casillas</b>Cada fila es un candidato y los votos que recibi&oacute;.</div>
+      <div class="step"><b>3. Marca lo raro</b>Si un n&uacute;mero se ve alterado, m&aacute;rcalo. Varias marcas activan una revisi&oacute;n.</div>
+    </div>
   </header>
   <main>
     <form class="filters" method="get" action="/browse">
@@ -92,67 +59,37 @@
         </select>
       </label>
       <label>Buscar
-        <input name="q" value="{{ filters.q }}" placeholder="acta, puesto, candidato">
+        <input name="q" value="{{ filters.q }}" placeholder="municipio, lugar o c&oacute;digo de acta">
       </label>
       <button class="filter" type="submit">Filtrar</button>
     </form>
 
-    <div class="muted" style="margin-bottom:6px">{{ total }} acta(s), p&aacute;gina {{ page }} de {{ pages }}. Las actas con una posible alerta del sistema aparecen primero. Cada fila es un candidato, en el mismo orden del acta.</div>
-    {% for acta in actas %}
-    {% set d = acta.doc %}
-    <section class="acta{% if acta.flagged %} flagged{% endif %}">
-      <div class="acta-head">
-        <div class="acta-title">
-          {{ d.department_name or d.department_code or "" }}{% if d.municipality_name %} &middot; {{ d.municipality_name }}{% endif %}
-          {% if acta.flagged %}<span class="chip alert">posible alerta del sistema</span>{% endif %}
-        </div>
+    <div class="muted" style="margin-bottom:10px">{{ total }} acta(s), p&aacute;gina {{ page }} de {{ pages }}. Las que tienen una posible alerta del sistema aparecen primero.</div>
+    <div class="list">
+      {% for acta in actas %}
+      {% set d = acta.doc %}
+      <a class="acta{% if acta.n_flagged %} flagged{% endif %}" href="/acta/{{ d.document_id }}">
+        <div class="acta-title">{{ d.department_name or d.department_code or "" }}{% if d.municipality_name %} &middot; {{ d.municipality_name }}{% endif %}</div>
         <div class="acta-meta">
           {% if d.place_name %}{{ d.place_name }}<br>{% endif %}
-          {% if d.zone %}zona {{ d.zone }} &middot; {% endif %}{% if d.puesto %}puesto {{ d.puesto }} &middot; {% endif %}{% if d.mesa %}mesa {{ d.mesa }} &middot; {% endif %}<a href="/doc/{{ d.document_id }}">{{ d.document_id }}</a>{% if d.official_lookup_url %} &middot; <a href="{{ d.official_lookup_url }}" target="_blank" rel="noopener">ver acta oficial</a>{% endif %}
+          {% if d.zone %}zona {{ d.zone }} &middot; {% endif %}{% if d.puesto %}puesto {{ d.puesto }} &middot; {% endif %}{% if d.mesa %}mesa {{ d.mesa }}{% endif %}
         </div>
-      </div>
-      <table class="rows">
-        {% for it in acta.crops %}
-        {% set r = it.row %}
-        <tr class="{% if it.published or it.algo_flagged %}flagged{% endif %}">
-          <td class="who"><b>Candidato {{ r.candidate_number or r.row_number }}</b>{{ r.candidate_name or "" }}</td>
-          <td><img class="crop" loading="lazy" src="/crop?path={{ r.raw_crop_path|urlencode }}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
-          <td class="status">
-            {% if it.published %}<span class="chip alert">marcada como sospechosa</span>
-            {% elif it.algo_flagged %}<span class="chip alert">revisar</span>{% endif %}
-          </td>
-          <td class="act"><button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button></td>
-        </tr>
-        {% endfor %}
-      </table>
-    </section>
-    {% else %}
-    <div class="muted">No hay actas para estos filtros.</div>
-    {% endfor %}
+        <div class="badges">
+          <span class="chip">{{ acta.n_candidates }} candidatos</span>
+          {% if acta.n_published %}<span class="chip people">marcada por la gente ({{ acta.n_published }})</span>
+          {% elif acta.n_flagged %}<span class="chip alert">posible alerta ({{ acta.n_flagged }})</span>{% endif %}
+          <span class="go">Revisar &rarr;</span>
+        </div>
+      </a>
+      {% else %}
+      <div class="muted">No hay actas para estos filtros.</div>
+      {% endfor %}
+    </div>
 
     <nav class="pager">
-      {% if page > 1 %}<a href="/browse?department={{ filters.department }}&q={{ filters.q }}&page={{ page - 1 }}">Anterior</a>{% endif %}
-      {% if page < pages %}<a href="/browse?department={{ filters.department }}&q={{ filters.q }}&page={{ page + 1 }}">Siguiente</a>{% endif %}
+      {% if page > 1 %}<a href="/browse?department={{ filters.department }}&q={{ filters.q }}&page={{ page - 1 }}">&larr; Anterior</a>{% endif %}
+      {% if page < pages %}<a href="/browse?department={{ filters.department }}&q={{ filters.q }}&page={{ page + 1 }}">Siguiente &rarr;</a>{% endif %}
     </nav>
   </main>
-
-  <script>
-    document.querySelectorAll('.flag').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        const token = window.getToken ? await window.getToken() : null;
-        try {
-          const res = await fetch('/api/flag', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ field_key: btn.dataset.fieldKey, turnstile_token: token }),
-          });
-          if (res.ok) { btn.textContent = '¡Gracias! Reportado'; }
-          else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }
-          else { btn.textContent = 'No se pudo enviar'; btn.disabled = false; }
-        } catch (e) { btn.textContent = 'Error de red'; btn.disabled = false; }
-      });
-    });
-  </script>
 </body>
 </html>

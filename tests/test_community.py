@@ -156,9 +156,12 @@ def test_flag_flow_clean_then_strange_via_re_eligibility(tmp_path: Path) -> None
             assert community.state_of(fkey)["vlm_state"] == "STRANGE"
             assert community.state_of(fkey)["published"] == 1
 
-            # The published badge now shows on the public browse page.
-            html = (await client.get("/browse")).text
-            assert "marcada como sospechosa" in html
+            # The published badge now shows on the acta detail page; the summary
+            # list reflects it as a "marcada por la gente" count.
+            detail = (await client.get("/acta/doc1")).text
+            assert "marcada como sospechosa" in detail
+            summary = (await client.get("/browse")).text
+            assert "marcada por la gente" in summary
 
     asyncio.run(run())
 

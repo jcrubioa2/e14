@@ -237,6 +237,14 @@ class CommunityStore:
                 "SELECT * FROM field_state WHERE field_key=?", (field_key,)
             ).fetchone()
 
+    def published_keys(self) -> list[str]:
+        """All field keys currently published as strange (few — only confirmed ones)."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT field_key FROM field_state WHERE published=1"
+            ).fetchall()
+        return [r["field_key"] for r in rows]
+
     def published_among(self, field_keys: list[str]) -> set[str]:
         """Subset of the given keys currently published as strange (for templates)."""
         if not field_keys:

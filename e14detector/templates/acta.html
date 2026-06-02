@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Acta {{ doc.document_id }} &mdash; Revisa los votos</title>
+  {% if turnstile_sitekey %}
+  <script>
+    // Invisible Turnstile with EXPLICIT render so a fresh, single-use token is
+    // produced per flag (many buttons; tokens are one-shot + expire). execute() is
+    // serialized and reset() between uses so the next flag gets a new token.
+    window.__cfSitekey = "{{ turnstile_sitekey }}";
+    window.__cfWidget = null;
+    window.__cfPending = null;
+    window.__cfChain = Promise.resolve();
+    window.onloadTurnstile = function () {
+      window.__cfWidget = window.turnstile.render('#cf-widget', {
+        sitekey: window.__cfSitekey,
+        size: 'invisible',
+        execution: 'execute',
+        callback: function (t) { if (window.__cfPending) { window.__cfPending(t); window.__cfPending = null; } },
+        'error-callback': function () { if (window.__cfPending) { window.__cfPending(null); window.__cfPending = null; } },
+        'expired-callback': function () { if (window.__cfPending) { window.__cfPending(null); window.__cfPending = null; } },
+      });
+    };
+    window.getToken = function () {
+      const run = () => new Promise((resolve) => {
+        if (!window.turnstile || window.__cfWidget === null) { resolve(null); return; }
+        let done = false;
+        const finish = (tok) => { if (done) return; done = true; try { window.turnstile.reset(window.__cfWidget); } catch (e) {} resolve(tok); };
+        window.__cfPending = finish;
+        setTimeout(() => finish(null), 8000);
+        try { window.turnstile.execute(window.__cfWidget); } catch (e) { finish(null); }
+      });
+      const result = window.__cfChain.then(run, run);
+      window.__cfChain = result.catch(() => {});
+      return result;
+    };
+  </script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstile&render=explicit" async defer></script>
+  {% endif %}
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ink:#202124; --accent:#0969da; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: #fff; }
+    header, main { max-width: 980px; margin: 0 auto; padding: 18px 22px; }
+    header { background: var(--bg); border-bottom: 1px solid var(--line); }
+    .back { font-size: 13px; }
+    h1 { margin: 8px 0 4px; font-size: 22px; line-height: 1.25; }
+    .acta-meta { color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .how { font-size: 14px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 16px 0; line-height: 1.5; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .chip { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .chip.alert { border-color: #f1a7a0; color: var(--bad); background: #fff1f0; }
+    .chip.people { border-color: #b42318; color: #fff; background: #b42318; }
+    table.rows { width: 100%; border-collapse: collapse; }
+    table.rows td { border-top: 1px solid var(--line); padding: 10px 12px; vertical-align: middle; }
+    tr.flagged { background: #fff7f6; }
+    .who { width: 150px; font-size: 13px; }
+    .who b { display: block; }
+    .crop { max-width: 260px; max-height: 120px; object-fit: contain; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
+    .status { width: 120px; }
+    .act { width: 160px; text-align: right; }
+    .flag { height: 36px; border: 1px solid var(--accent); border-radius: 6px; background: #fff; color: var(--accent); cursor: pointer; font-size: 13px; padding: 0 14px; }
+    .flag:hover { background: #f0f6ff; }
+    .flag[disabled] { cursor: default; color: var(--muted); border-color: var(--line); background: var(--bg); }
+    @media (max-width: 720px) { .who, .status, .act { width: auto; } .act { text-align: left; } table.rows td { display: block; border-top: none; padding: 4px 12px; } tr { display: block; border-top: 1px solid var(--line); padding: 8px 0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="back"><a href="/browse">&larr; Volver a la lista de actas</a></div>
+    <h1>{{ doc.department_name or doc.department_code or "" }}{% if doc.municipality_name %} &middot; {{ doc.municipality_name }}{% endif %}
+      {% if flagged %}<span class="chip alert">posible alerta del sistema</span>{% endif %}
+    </h1>
+    <div class="acta-meta">
+      {% if doc.place_name %}{{ doc.place_name }}<br>{% endif %}
+      {% if doc.zone %}zona {{ doc.zone }} &middot; {% endif %}{% if doc.puesto %}puesto {{ doc.puesto }} &middot; {% endif %}{% if doc.mesa %}mesa {{ doc.mesa }} &middot; {% endif %}{{ doc.document_id }}
+      {% if doc.official_lookup_url %}<br><a href="{{ doc.official_lookup_url }}" target="_blank" rel="noopener">Ver el acta oficial en la Registradur&iacute;a &rarr;</a>{% endif %}
+    </div>
+    {% if turnstile_sitekey %}<div id="cf-widget"></div>{% endif %}
+  </header>
+  <main>
+    <div class="how">
+      Cada fila es un <b>candidato</b> y la casilla con los <b>votos</b> que recibi&oacute; en esta mesa, escritos a mano.
+      Si un n&uacute;mero te parece <b>alterado</b> &mdash; escrito encima de un punto o una raya, con forma extra&ntilde;a, retocado o sobrescrito &mdash; pulsa <b>&laquo;Marcar como extra&ntilde;o&raquo;</b>.
+      No necesitas estar seguro: cuando varias personas marcan la misma casilla, se revisa autom&aacute;ticamente.
+    </div>
+
+    <table class="rows">
+      {% for it in crops %}
+      {% set r = it.row %}
+      <tr class="{% if it.published or it.algo_flagged %}flagged{% endif %}">
+        <td class="who"><b>Candidato {{ r.candidate_number or r.row_number }}</b>{{ r.candidate_name or "" }}</td>
+        <td><img class="crop" loading="lazy" src="/crop?path={{ r.raw_crop_path|urlencode }}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
+        <td class="status">
+          {% if it.published %}<span class="chip people">marcada como sospechosa</span>
+          {% elif it.algo_flagged %}<span class="chip alert">revisar</span>{% endif %}
+        </td>
+        <td class="act"><button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button></td>
+      </tr>
+      {% else %}
+      <tr><td class="muted">Esta acta no tiene casillas para revisar.</td></tr>
+      {% endfor %}
+    </table>
+  </main>
+
+  <script>
+    document.querySelectorAll('.flag').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const token = window.getToken ? await window.getToken() : null;
+        try {
+          const res = await fetch('/api/flag', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ field_key: btn.dataset.fieldKey, turnstile_token: token }),
+          });
+          if (res.ok) { btn.textContent = '¡Gracias! Reportado'; }
+          else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }
+          else { btn.textContent = 'No se pudo enviar'; btn.disabled = false; }
+        } catch (e) { btn.textContent = 'Error de red'; btn.disabled = false; }
+      });
+    });
+  </script>
+</body>
+</html>
