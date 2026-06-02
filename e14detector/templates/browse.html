@@ -42,7 +42,17 @@
     .hot-item:hover { border-color: var(--accent); text-decoration: none; }
     .hot-title { font-weight: 600; font-size: 13px; }
     .pager { display: flex; gap: 12px; justify-content: flex-end; margin-top: 18px; }
-    @media (max-width: 720px) { form.filters { grid-template-columns: 1fr; } .steps { grid-template-columns: 1fr; } }
+    .sync { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0 0 18px; background: #fbfcfd; }
+    .sync.done { border-color: #aedcb8; background: #f2fbf4; }
+    .sync-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: 14px; }
+    .sync-head b { font-size: 15px; }
+    .sync-count { margin-left: auto; color: var(--muted); font-size: 13px; }
+    .bar { height: 8px; border-radius: 999px; background: #e7ebef; overflow: hidden; margin: 10px 0 8px; }
+    .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 999px; transition: width .4s ease; }
+    .sync.done .bar > span { background: #1a7f37; }
+    .sync-meta { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .sync-meta .dot { margin: 0 6px; }
+    @media (max-width: 720px) { form.filters { grid-template-columns: 1fr; } .steps { grid-template-columns: 1fr; } .sync-count { margin-left: 0; flex-basis: 100%; } }
   </style>
 </head>
 <body>
@@ -56,6 +66,25 @@
     </div>
   </header>
   <main>
+    {% if progress %}
+    <section class="sync {% if progress.complete %}done{% endif %}" aria-live="polite">
+      <div class="sync-head">
+        {% if progress.complete %}
+        <b>Todas las actas est&aacute;n disponibles</b>
+        {% else %}
+        <b>Cargando las actas a nivel nacional&hellip;</b>
+        {% endif %}
+        <span class="sync-count">{{ progress.synced_label }} de {{ progress.total_label }} actas &middot; {{ progress.pct }}%</span>
+      </div>
+      <div class="bar"><span style="width: {{ progress.pct }}%"></span></div>
+      <div class="sync-meta">
+        {% if not progress.complete %}Las actas se publican por regiones a medida que se procesan; esta lista crece sola.{% else %}Ya puedes revisar cualquier acta del pa&iacute;s.{% endif %}
+        {% if progress.last_sync_text %}<span class="dot">&middot;</span>&Uacute;ltima actualizaci&oacute;n {{ progress.last_sync_text }}{% endif %}
+        {% if progress.eta_text and not progress.complete %}<span class="dot">&middot;</span>Tiempo restante estimado {{ progress.eta_text }}{% endif %}
+      </div>
+    </section>
+    {% endif %}
+
     {% if hotlist %}
     <section class="hot">
       <h2>Actas para revisar ahora</h2>

@@ -1,10 +1,12 @@
 import asyncio
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 from PIL import Image
 
+from e14detector import config
 from e14detector.schemas import DocumentMetadata, FieldClassification, VoteField
 from e14detector.storage import DetectorStore
 from e14detector.webapp import create_app, resolve_crop_path
@@ -14,6 +16,42 @@ def _crop(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (24, 16), color=(255, 255, 255)).save(path)
     return path
+
+
+def test_browse_shows_national_sync_progress(tmp_path: Path, monkeypatch) -> None:
+    """The public /browse page shows rollout progress: synced/total, %, and an ETA."""
+    monkeypatch.setattr(config, "NATIONAL_TOTAL_ACTAS", 100)
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    now = datetime.now(timezone.utc)
+    # Two browsable actas processed an hour apart -> a measurable rate -> an ETA.
+    for i, ts in enumerate([now - timedelta(hours=1), now - timedelta(minutes=1)]):
+        doc_id = f"doc-{i}"
+        store.upsert_document(DocumentMetadata(
+            document_id=doc_id, source_path=f"{doc_id}.pdf",
+            processing_timestamp=ts.isoformat(),
+        ))
+        store.insert_vote_field(VoteField(
+            document_id=doc_id, page_number=1, row_type="candidate", row_number=1,
+            candidate_name="A", raw_crop_path=str(crop),
+        ))
+    store.commit()
+    store.close()
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/browse")).text
+            assert "2 de 100 actas" in html
+            assert "2.0%" in html
+            assert "Cargando las actas" in html
+            assert "Tiempo restante estimado" in html
+            assert "actualizaci" in html  # "Última actualización ..."
+
+    asyncio.run(run())
 
 
 def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_path: Path) -> None:

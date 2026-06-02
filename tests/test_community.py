@@ -253,7 +253,7 @@ def test_appeal_flow_clears_a_gemma_false_positive(tmp_path: Path) -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             # Initially the seed is shown strange and exposes the "Se ve normal" button.
             before = (await client.get("/acta/doc1")).text
-            assert "para revisar" in before
+            assert 'class="chip seed">para revisar' in before
             assert '<button class="normal"' in before
 
             # 3 distinct "Se ve normal" votes -> neutral re-read -> CLEAN -> cleared.
@@ -266,7 +266,7 @@ def test_appeal_flow_clears_a_gemma_false_positive(tmp_path: Path) -> None:
 
             # The crop is no longer shown strange; the appeal button is gone.
             after = (await client.get("/acta/doc1")).text
-            assert "para revisar" not in after
+            assert 'class="chip seed">para revisar' not in after
             assert '<button class="normal"' not in after
 
     asyncio.run(run())
@@ -286,6 +286,26 @@ def test_appeal_rejected_on_non_strange_field(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_flag_rejected_on_already_strange_field(tmp_path: Path) -> None:
+    """A crop already shown as strange can't be re-flagged; the appeal path applies."""
+    app = _build_app(tmp_path, _FakeReviewer(FieldClassification.CLEAN), seed_strange=True)
+    fkey = field_key_of("doc1", 1, 1, None)
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            res = await _flag(client, fkey, "10.0.0.1")
+            assert res.status_code == 409  # already marked strange
+
+            # The acta page hides the flag button on the strange row (the appeal
+            # button is shown instead).
+            detail = (await client.get("/acta/doc1")).text
+            assert '<button class="flag"' not in detail
+            assert '<button class="normal"' in detail
+
+    asyncio.run(run())
+
+
 def test_unknown_field_rejected_and_counter_never_leaked(tmp_path: Path) -> None:
     app = _build_app(tmp_path, _FakeReviewer(FieldClassification.CLEAN))
 
@@ -297,6 +317,47 @@ def test_unknown_field_rejected_and_counter_never_leaked(tmp_path: Path) -> None
             ok = await _flag(client, field_key_of("doc1", 1, 1, None), "10.0.0.1")
             # The response body exposes no vote count — only an acknowledgement.
             assert set(ok.json().keys()) == {"ok"}
+
+    asyncio.run(run())
+
+
+def test_browse_floats_most_voted_to_top_silently(tmp_path: Path) -> None:
+    """Most-voted actas appear first on /browse (silently), above unvoted ones."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = output_dir / "crops" / "c.png"
+    crop.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (24, 16), (255, 255, 255)).save(crop)
+
+    store = DetectorStore(db)
+    for doc_id in ("doc-a", "doc-b", "doc-c"):  # none flagged -> region (id) order by default
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf"))
+        store.insert_vote_field(VoteField(
+            document_id=doc_id, page_number=1, row_type="candidate", row_number=1,
+            candidate_name="A", raw_crop_path=str(crop),
+        ))
+    store.commit()
+    store.close()
+
+    community = CommunityStore(tmp_path / "community.sqlite")
+    # doc-c: 2 distinct voters; doc-b: 1; doc-a: 0.
+    community.record_flag(field_key_of("doc-c", 1, 1, None), "v1")
+    community.record_flag(field_key_of("doc-c", 1, 1, None), "v2")
+    community.record_flag(field_key_of("doc-b", 1, 1, None), "v1")
+    community.close()
+
+    app = create_app(results_db=db, output_dir=output_dir,
+                     community_db=tmp_path / "community.sqlite")
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/browse")).text
+            pos = {d: html.index(f"/acta/{d}") for d in ("doc-a", "doc-b", "doc-c")}
+            # Vote order wins over the default id order (which would be a < b < c).
+            assert pos["doc-c"] < pos["doc-b"] < pos["doc-a"]
+            # Silent: no raw vote counts are rendered for the floated actas.
+            assert "2 votos" not in html and "votantes" not in html
 
     asyncio.run(run())
 

@@ -7,6 +7,7 @@ import math
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.D
 # /browse paginates over ACTAS (grouped), not individual crops.
 BROWSE_ACTAS_PER_PAGE = 12
 HOTLIST_SIZE = 8
+# The most-voted actas float silently to the top of /browse (crowd attention compounds).
+# Capped well under SQLite's bound-parameter limit so the "exclude these" clause is safe.
+VOTED_FLOAT_CAP = 300
 # The visible "basis" signal: a CONFIDENT Gemma verdict (not CV — CV was dropped for
 # over-firing on plain placeholder dots). The proactive Gemma pass seeds the first
 # batch of crops worth reviewing; these are shown ("para revisar") and sorted first.
@@ -39,6 +43,20 @@ HOTLIST_SIZE = 8
 # 5%% national sample) have a NULL verdict and stay neutral.
 _ALGO_FLAG_SQL = (
     "(vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY'))"
+)
+
+# One acta-summary row for the /browse list (grouped per document). Shared by the
+# main, "most-voted-float", and "rest" queries so their columns stay identical.
+_ACTA_SUMMARY_SELECT = (
+    "SELECT d.document_id, d.department_code, d.department_name, "
+    "d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
+    "COUNT(*) AS n_candidates, "
+    f"SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS n_flagged "
+    "FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id"
+)
+_ACTA_FLAGGED_ORDER = (
+    f"ORDER BY (SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) > 0) DESC, "
+    "d.department_code, d.document_id"
 )
 
 VISIBLE_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY", "UNCLEAR")
@@ -226,21 +244,110 @@ def parse_field_key(field_key: str) -> tuple[str, int, int, str] | None:
         return None
 
 
-def lookup_candidate_crop(conn: sqlite3.Connection, field_key: str) -> str | None:
-    """Resolve a client-supplied field key to a real candidate crop path, or None."""
-    parsed = parse_field_key(field_key)
-    if parsed is None:
-        return None
-    document_id, page, row, section = parsed
-    row_ = conn.execute(
-        "SELECT raw_crop_path FROM vote_fields "
-        "WHERE document_id=? AND page_number=? AND row_number=? "
-        "AND COALESCE(section,'')=? AND row_type='candidate' LIMIT 1",
-        (document_id, page, row, section),
+def _es_thousands(n: int) -> str:
+    """Format an integer with Colombian thousands separators (1234567 -> '1.234.567')."""
+    return f"{n:,}".replace(",", ".")
+
+
+def _es_ago(then: datetime, now: datetime) -> str:
+    """Spanish relative time, e.g. 'hace 5 minutos' / 'hace 2 horas'."""
+    secs = max(0, int((now - then).total_seconds()))
+    if secs < 90:
+        return "hace unos segundos"
+    mins = secs // 60
+    if mins < 60:
+        return f"hace {mins} minuto{'s' if mins != 1 else ''}"
+    hours = mins // 60
+    if hours < 24:
+        return f"hace {hours} hora{'s' if hours != 1 else ''}"
+    days = hours // 24
+    return f"hace {days} día{'s' if days != 1 else ''}"
+
+
+def _es_duration(secs: float) -> str:
+    """Spanish coarse duration, e.g. '~3 h 20 min' / '~45 min'."""
+    mins = max(1, int(round(secs / 60)))
+    hours, mins = divmod(mins, 60)
+    if hours and mins:
+        return f"~{hours} h {mins} min"
+    if hours:
+        return f"~{hours} h"
+    return f"~{mins} min"
+
+
+def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
+    """Public rollout status, derived purely from the served results DB.
+
+    Counts browsable actas (those with at least one candidate crop) against the full
+    national universe, and estimates remaining time from the processing-timestamp span.
+    Reads the total at call time so it can be overridden per-deployment / in tests.
+    """
+    now = now or datetime.now(timezone.utc)
+    total = max(1, config.NATIONAL_TOTAL_ACTAS)
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT vf.document_id) AS synced, "
+        "       MIN(d.processing_timestamp) AS first_ts, "
+        "       MAX(d.processing_timestamp) AS last_ts "
+        "FROM vote_fields vf JOIN documents d ON d.document_id = vf.document_id "
+        "WHERE vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL"
     ).fetchone()
-    if row_ is None:
-        return None
-    return row_["raw_crop_path"]
+    synced = min(row["synced"] or 0, total)
+    pct = round(synced * 100 / total, 1)
+
+    last_sync_text = None
+    if row["last_ts"]:
+        try:
+            last_sync_text = _es_ago(datetime.fromisoformat(row["last_ts"]), now)
+        except ValueError:
+            last_sync_text = None
+
+    eta_text = None
+    if 0 < synced < total and row["first_ts"] and row["last_ts"]:
+        try:
+            elapsed = (datetime.fromisoformat(row["last_ts"]) - datetime.fromisoformat(row["first_ts"])).total_seconds()
+        except ValueError:
+            elapsed = 0
+        # Need a couple of actas and a real time span to project a rate.
+        if synced >= 2 and elapsed > 0:
+            remaining_secs = (total - synced) * (elapsed / synced)
+            # Suppress implausible estimates (>14 days): the rate sample isn't
+            # representative yet (e.g. stale pilot data, or a stalled publisher).
+            if remaining_secs <= 14 * 24 * 3600:
+                eta_text = _es_duration(remaining_secs)
+
+    return {
+        "synced": synced,
+        "total": total,
+        "synced_label": _es_thousands(synced),
+        "total_label": _es_thousands(total),
+        "pct": pct,
+        "complete": synced >= total,
+        "last_sync_text": last_sync_text,
+        "eta_text": eta_text,
+    }
+
+
+def _voted_doc_rows(
+    conn: sqlite3.Connection, popularity: dict[str, int], clause: str, params: list, cap: int
+) -> tuple[list[sqlite3.Row], list[str]]:
+    """The most-voted actas matching the current filter, ordered by vote count desc.
+
+    These float silently to the top of /browse (no counts shown). Returns the ordered
+    rows and the ids that matched (so the 'rest' query can exclude them). Capped so the
+    id list stays a safe number of bound parameters.
+    """
+    if not popularity:
+        return [], []
+    top_ids = [doc for doc, _ in sorted(popularity.items(), key=lambda kv: kv[1], reverse=True)[:cap]]
+    rank = {doc: i for i, doc in enumerate(top_ids)}
+    placeholders = ",".join("?" for _ in top_ids)
+    rows = conn.execute(
+        f"{_ACTA_SUMMARY_SELECT} WHERE {clause} AND d.document_id IN ({placeholders}) "
+        "GROUP BY d.document_id",
+        [*params, *top_ids],
+    ).fetchall()
+    rows = sorted(rows, key=lambda r: rank[r["document_id"]])
+    return rows, [r["document_id"] for r in rows]
 
 
 def lookup_candidate_appeal(conn: sqlite3.Connection, field_key: str) -> tuple[str, bool] | None:
@@ -444,8 +551,7 @@ def create_app(
             counts[doc] = counts.get(doc, 0) + 1
         return counts
 
-    def _build_hotlist(db: sqlite3.Connection) -> list[dict]:
-        popularity = community.acta_popularity()
+    def _build_hotlist(db: sqlite3.Connection, popularity: dict[str, int]) -> list[dict]:
         items: dict[str, dict] = {}
         # Gemma's seed findings (the initial "stranges" to review).
         for r in db.execute(
@@ -503,21 +609,26 @@ def create_app(
                 f"  WHERE {clause} GROUP BY d.document_id)",
                 params,
             ).fetchone()["c"]
-            doc_rows = db.execute(
-                f"""
-                SELECT d.document_id, d.department_code, d.department_name,
-                       d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name,
-                       COUNT(*) AS n_candidates,
-                       SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS n_flagged
-                FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
-                WHERE {clause}
-                GROUP BY d.document_id
-                ORDER BY (SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) > 0) DESC,
-                         d.department_code, d.document_id
-                LIMIT ? OFFSET ?
-                """,
-                [*params, BROWSE_ACTAS_PER_PAGE, (page - 1) * BROWSE_ACTAS_PER_PAGE],
-            ).fetchall()
+            # Ordering: the most-voted actas float to the very top (silently — crowd
+            # attention compounds), then the flagged seeds, then the rest by region.
+            # The voted rows are paginated as a prefix; the "rest" query excludes them.
+            popularity = community.acta_popularity()
+            voted_rows, voted_ids = _voted_doc_rows(db, popularity, clause, params, VOTED_FLOAT_CAP)
+            offset = (page - 1) * BROWSE_ACTAS_PER_PAGE
+            head = voted_rows[offset : offset + BROWSE_ACTAS_PER_PAGE]
+            rest_rows: list = []
+            rest_count = BROWSE_ACTAS_PER_PAGE - len(head)
+            if rest_count > 0:
+                rest_clause, rest_params = clause, list(params)
+                if voted_ids:
+                    rest_clause += f" AND d.document_id NOT IN ({','.join('?' for _ in voted_ids)})"
+                    rest_params += voted_ids
+                rest_rows = db.execute(
+                    f"{_ACTA_SUMMARY_SELECT} WHERE {rest_clause} GROUP BY d.document_id "
+                    f"{_ACTA_FLAGGED_ORDER} LIMIT ? OFFSET ?",
+                    [*rest_params, rest_count, max(0, offset - len(voted_rows))],
+                ).fetchall()
+            doc_rows = list(head) + list(rest_rows)
             departments = _departments(db)
             # Hotlist (page 1, unfiltered): the actas to review *now* — the ones
             # people are flagging most, backfilled with Gemma's seed findings so the
@@ -525,7 +636,8 @@ def create_app(
             # numbers are shown (the counter stays private); it is a ranking only.
             hotlist = []
             if page == 1 and not department and not q:
-                hotlist = _build_hotlist(db)
+                hotlist = _build_hotlist(db, popularity)
+            progress = compute_sync_progress(db)
         pub_counts = _published_count_by_doc()
         # Appeals that reversed a Gemma seed: subtract them so a cleared false positive
         # stops inflating the acta's flagged count.
@@ -548,6 +660,7 @@ def create_app(
             {
                 "actas": actas,
                 "hotlist": hotlist,
+                "progress": progress,
                 "departments": departments,
                 "filters": {"department": department or "", "q": q or ""},
                 "page": page,
@@ -633,9 +746,16 @@ def create_app(
 
         # Validate the field exists and resolve its crop (read-only results DB).
         with conn() as db:
-            crop_rel = lookup_candidate_crop(db, field_key)
-        if not crop_rel:
+            looked = lookup_candidate_appeal(db, field_key)
+        if not looked:
             raise HTTPException(status_code=404, detail="unknown field")
+        crop_rel, is_seed = looked
+        # A crop already shown as strange (Gemma seed or live-published) can't be
+        # re-flagged — it's already strange. The appeal path ("Se ve normal") is what
+        # applies there. Mirrors the eligibility check in /api/appeal.
+        strange_now = is_seed or (field_key in community.published_among([field_key]))
+        if strange_now and field_key not in community.cleared_among([field_key]):
+            raise HTTPException(status_code=409, detail="field is already marked strange")
         try:
             crop_path = resolve_crop_path(crop_rel, output_dir)
         except (FileNotFoundError, ValueError):

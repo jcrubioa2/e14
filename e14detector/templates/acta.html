@@ -19,6 +19,8 @@
     h1 { margin: 8px 0 4px; font-size: 22px; line-height: 1.25; }
     .acta-meta { color: var(--muted); font-size: 13px; line-height: 1.6; }
     .how { font-size: 14px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 16px 0; line-height: 1.5; }
+    .how p { margin: 0 0 8px; }
+    .how p:last-child { margin-bottom: 0; }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
     .chip { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; }
@@ -57,9 +59,9 @@
   </header>
   <main>
     <div class="how">
-      Cada fila es un <b>candidato</b> y la casilla con los <b>votos</b> que recibi&oacute; en esta mesa, escritos a mano.
-      Si un n&uacute;mero te parece <b>alterado</b> &mdash; escrito encima de un punto o una raya, con forma extra&ntilde;a, retocado o sobrescrito &mdash; pulsa <b>&laquo;Marcar como extra&ntilde;o&raquo;</b>.
-      No necesitas estar seguro: cuando varias personas marcan la misma casilla, se revisa autom&aacute;ticamente.
+      <p>Cada fila es un <b>candidato</b> y la casilla con los <b>votos</b> que recibi&oacute; en esta mesa, escritos a mano.</p>
+      <p>Si un n&uacute;mero te parece <b>alterado</b> &mdash; escrito encima de un punto o una raya, con forma extra&ntilde;a, retocado o sobrescrito &mdash; pulsa <b>&laquo;Marcar como extra&ntilde;o&raquo;</b>. No necesitas estar seguro: si los votos son suficientes, revisaremos el caso.</p>
+      <p>Si una casilla ya <b>se&ntilde;alada para revisar</b> te parece <b>normal</b>, pulsa <b>&laquo;Se ve normal&raquo;</b>. Si varias personas est&aacute;n de acuerdo, la revisamos de nuevo.</p>
     </div>
 
     <!-- Honeypot: hidden from people, but bots that fill every field will trip it. -->
@@ -77,10 +79,11 @@
           {% elif it.strange %}<span class="chip seed">para revisar</span>{% endif %}
         </td>
         <td class="act">
-          <button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button>
           {% if it.strange %}
           <button class="normal" data-field-key="{{ it.field_key }}">Se ve normal</button>
           <span class="hint">&iquest;Crees que esta casilla est&aacute; bien? Av&iacute;sanos y se vuelve a revisar.</span>
+          {% else %}
+          <button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button>
           {% endif %}
         </td>
       </tr>

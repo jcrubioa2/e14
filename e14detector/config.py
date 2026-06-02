@@ -33,6 +33,10 @@ DEFAULT_OUTPUT_DIR = Path("data") / "detector"
 DEFAULT_RESULTS_DB = DEFAULT_OUTPUT_DIR / "results" / "results.sqlite"
 DEFAULT_RESULTS_JSONL = DEFAULT_OUTPUT_DIR / "results" / "results.jsonl"
 
+# Size of the full national universe of E-14 actas. Used only to show public
+# rollout progress ("X de Y actas sincronizadas"); override per-deployment.
+NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
+
 DEFAULT_DPI = 300
 DEFAULT_WORKERS = 4
 DEFAULT_VLM_MODE = "off"
@@ -86,6 +90,11 @@ SCREEN_MODEL = os.environ.get("E14_SCREEN_MODEL", "google/gemma-4-31b-it")
 OPENROUTER_MAX_TOKENS = int(os.environ.get("E14_OPENROUTER_MAX_TOKENS", "40"))
 LIVE_MAX_TOKENS = int(os.environ.get("E14_LIVE_MAX_TOKENS", "1500"))
 SCREEN_MAX_TOKENS = int(os.environ.get("E14_SCREEN_MAX_TOKENS", "200"))
+# Confirm tier: a high-precision model re-checks ONLY the crops the cheap screen flagged,
+# with the skeptical CONFIRM prompt. CLEAN here demotes the seed (drops it from the public
+# basis); DIRTY keeps it. Only runs on ~2-3%% of the sample, so a strong model is affordable.
+CONFIRM_MODEL = os.environ.get("E14_CONFIRM_MODEL", "anthropic/claude-sonnet-4.6")
+CONFIRM_MAX_TOKENS = int(os.environ.get("E14_CONFIRM_MAX_TOKENS", "64"))
 # OpenRouter provider-routing sort. For our tiny CLEAN/DIRTY answer, time-to-first-
 # token dominates, so "latency" beats "throughput" (which optimizes tokens/sec we
 # don't use, and was picking slow/flaky hosts). Accepts "latency"|"throughput"|"price".
