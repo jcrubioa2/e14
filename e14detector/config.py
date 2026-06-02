@@ -78,7 +78,9 @@ OPENROUTER_BASE_URL = os.environ.get("E14_OPENROUTER_BASE_URL", "https://openrou
 # so it uses a heavier (thinking) model; the proactive 5%% pre-screen values speed + cost,
 # so it uses a fast cheap model. Both ride OpenRouter (OpenAI-compatible).
 OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "qwen/qwen3-vl-8b-thinking")
-SCREEN_MODEL = os.environ.get("E14_SCREEN_MODEL", "google/gemini-2.5-flash-lite")
+# Pre-screen model: Gemma proved more precise than gemini-flash-lite on these bilevel
+# placeholder-dot crops (gemini over-flagged dots/zeros/asterisks), so the seed pass uses it.
+SCREEN_MODEL = os.environ.get("E14_SCREEN_MODEL", "google/gemma-4-31b-it")
 # Output caps. A thinking model needs room to reason before the JSON, so the live cap is
 # generous; the screen model only emits the tiny JSON. 0 = uncapped.
 OPENROUTER_MAX_TOKENS = int(os.environ.get("E14_OPENROUTER_MAX_TOKENS", "40"))
