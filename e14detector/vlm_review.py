@@ -121,18 +121,36 @@ def run_vlm_review(
     candidates_only: bool = True,
     document_id: str | None = None,
     verbose: bool = True,
+    require_flag: bool = True,
+    sample_rate: float | None = None,
 ) -> dict[str, int]:
-    """Review pending flagged fields with the configured VLM provider."""
+    """Review pending fields with the configured VLM provider.
+
+    With ``sample_rate`` set, the pass ignores the CV flag and reviews *every*
+    candidate in a deterministic ``sample_rate`` subset of documents — the
+    "drop CV, Gemma on N%% of files" mode.
+    """
     store = DetectorStore(Path(output_dir) / "results" / "results.sqlite")
     reviewer = build_reviewer(provider)
     workers = concurrency or config.VLM_CONCURRENCY
     totals = {"reviewed": 0, "cached": 0, "failed": 0}
 
     try:
+        document_ids = None
+        if sample_rate is not None:
+            document_ids = store.sampled_document_ids(sample_rate)
+            require_flag = False  # CV not run in this mode; review all sampled candidates
+            if verbose:
+                print(
+                    f"vlm-review: Gemma sample {sample_rate:.0%} -> {len(document_ids)} document(s)",
+                    flush=True,
+                )
         rows = store.fields_needing_vlm(
             limit=limit,
             candidates_only=candidates_only,
             document_id=document_id,
+            require_flag=require_flag,
+            document_ids=document_ids,
         )
         if verbose:
             scope = f" document_id={document_id}" if document_id else ""

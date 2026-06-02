@@ -26,6 +26,7 @@ def cmd_process(args: argparse.Namespace) -> int:
         debug=args.debug,
         force=args.force,
         workers=args.workers,
+        crop_only=args.crop_only,
     )
     print(
         f"done={totals['done']} skipped={totals['skipped']} "
@@ -75,6 +76,8 @@ def cmd_vlm_review(args: argparse.Namespace) -> int:
         concurrency=args.concurrency,
         candidates_only=not args.include_summary,
         document_id=args.document_id,
+        require_flag=not args.all_candidates,
+        sample_rate=args.sample_rate,
     )
     print(
         f"reviewed={totals['reviewed']} cached={totals['cached']} failed={totals['failed']}"
@@ -159,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
     process.add_argument("--gpu-mode", choices=config.GPU_MODES, default=config.DEFAULT_GPU_MODE)
     process.add_argument("--debug", action="store_true")
     process.add_argument("--force", action="store_true")
+    process.add_argument(
+        "--crop-only",
+        action="store_true",
+        help="skip CV analysis; only render+crop (fast national first pass, Gemma is the analyzer)",
+    )
     process.set_defaults(func=cmd_process)
 
     process_one = sub.add_parser("process-one", help="process a single PDF (fast iteration) and optionally refresh its audit page")
@@ -170,13 +178,15 @@ def build_parser() -> argparse.ArgumentParser:
     process_one.add_argument("--audit-output", default=str(config.DEFAULT_OUTPUT_DIR / "review" / "one_doc_audit.html"))
     process_one.set_defaults(func=cmd_process_one)
 
-    vlm = sub.add_parser("vlm-review", help="run the VLM second-opinion pass over CV-flagged fields")
+    vlm = sub.add_parser("vlm-review", help="run the VLM pass (CV-flagged fields, or a Gemma sample with --sample-rate)")
     vlm.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
-    vlm.add_argument("--provider", choices=("mock", "qwen"), default=config.VLM_PROVIDER, help="VLM provider (qwen requires E14_QWEN_API_KEY)")
+    vlm.add_argument("--provider", choices=("mock", "qwen", "openrouter"), default=config.VLM_PROVIDER, help="VLM provider (openrouter=Gemma; needs E14_OPENROUTER_API_KEY)")
     vlm.add_argument("--limit", type=int, help="maximum fields to review this run")
     vlm.add_argument("--concurrency", type=int, default=config.VLM_CONCURRENCY)
     vlm.add_argument("--include-summary", action="store_true", help="also review summary rows; default reviews candidate rows only")
     vlm.add_argument("--document-id", help="restrict review to one document_id")
+    vlm.add_argument("--all-candidates", action="store_true", help="review every candidate, not only CV-flagged (use when CV is disabled)")
+    vlm.add_argument("--sample-rate", type=float, help="review every candidate in a deterministic fraction of documents (e.g. 0.05); implies --all-candidates")
     vlm.set_defaults(func=cmd_vlm_review)
 
     serve = sub.add_parser("serve", help="serve a local anomaly review web app")

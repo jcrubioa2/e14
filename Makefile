@@ -106,6 +106,17 @@ detector-add: ## Add one acta: make detector-add PDF=... DOC_ID=...
 detector-serve: ## Serve the Spanish anomaly review report
 	$(DETECTOR) serve --host $(REPORT_HOST) --port $(REPORT_PORT) --output-dir $(DETECTOR_OUTPUT)
 
+# --- National "drop CV, Gemma on a sample" pipeline -------------------------
+# Cropping runs on ALL files (fast: no CV analysis); Gemma pre-screens only
+# LLM_SAMPLE_RATE of documents. The crowd poll + live Gemma do the rest.
+LLM_SAMPLE_RATE ?= 0.05
+
+detector-crop-all: ## Crop-only pass over ALL actas (no CV) — fast national first pass
+	$(DETECTOR) process --input-dir data/actas --output-dir $(DETECTOR_OUTPUT) --workers 8 --crop-only --force
+
+detector-gemma-sample: ## Pre-screen LLM_SAMPLE_RATE of documents with Gemma (OpenRouter)
+	$(DETECTOR) vlm-review --provider openrouter --output-dir $(DETECTOR_OUTPUT) --sample-rate $(LLM_SAMPLE_RATE) --concurrency $(QWEN_CONCURRENCY)
+
 clean: ## Remove downloaded actas + manifest (ASKS), keeps universe CSV
 	@printf "Delete data/actas + manifest (keep mesa_universe.csv)? type 'yes': " && read ans && [ "$$ans" = "yes" ] || (echo "aborted." && exit 1)
 	@rm -rf data/manifest.db* data/actas data/failed.csv logs/results.jsonl dist

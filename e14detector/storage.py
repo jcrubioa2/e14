@@ -1,6 +1,7 @@
 """SQLite and JSONL storage for detector output."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import asdict, is_dataclass
@@ -205,30 +206,65 @@ class DetectorStore:
         limit: int | None = None,
         candidates_only: bool = True,
         document_id: str | None = None,
+        require_flag: bool = True,
+        document_ids: list[str] | None = None,
     ) -> list[sqlite3.Row]:
-        """Vote fields flagged for review that have no VLM verdict yet.
+        """Vote fields with no VLM verdict yet.
 
         ``candidates_only`` (default) skips ``summary`` rows (votes en blanco /
         nulos / no marcados / total), which are negligible for the manipulation
         review and would otherwise waste paid VLM calls.
+
+        ``require_flag`` (default) keeps the CV-gated behaviour (only rows the
+        heuristics marked ``needs_human_review``). Set it False to review every
+        candidate regardless of CV — used by the crop-only + Gemma sample pass,
+        where CV is not run. ``document_ids`` restricts the pass to a subset of
+        documents (e.g. a deterministic sample).
         """
         sql = (
             "SELECT id, document_id, page_number, row_number, row_type, candidate_name, "
             "raw_crop_path, enhanced_crop_path, debug_crop_path, final_classification, "
             "slot_1_class, slot_2_class, slot_3_class "
             "FROM vote_fields "
-            "WHERE needs_human_review=1 AND vlm_classification IS NULL "
+            "WHERE vlm_classification IS NULL "
         )
+        if require_flag:
+            sql += "AND needs_human_review=1 "
         if candidates_only:
             sql += "AND row_type='candidate' "
         params: list[str] = []
         if document_id:
             sql += "AND document_id=? "
             params.append(document_id)
+        if document_ids is not None:
+            if not document_ids:
+                return []
+            placeholders = ",".join("?" for _ in document_ids)
+            sql += f"AND document_id IN ({placeholders}) "
+            params.extend(document_ids)
         sql += "ORDER BY id"
         if limit:
             sql += f" LIMIT {int(limit)}"
         return self.conn.execute(sql, params).fetchall()
+
+    def sampled_document_ids(self, sample_rate: float) -> list[str]:
+        """Deterministic ~``sample_rate`` subset of documents (stable across runs).
+
+        Sampling by a hash of ``document_id`` means the same actas are picked every
+        run, so resuming/re-running never re-bills a different slice.
+        """
+        if sample_rate >= 1.0:
+            return [r["document_id"] for r in self.conn.execute("SELECT document_id FROM documents")]
+        if sample_rate <= 0.0:
+            return []
+        threshold = int(sample_rate * 10000)
+        keep = []
+        for row in self.conn.execute("SELECT document_id FROM documents"):
+            doc = row["document_id"]
+            bucket = int(hashlib.sha1(doc.encode("utf-8")).hexdigest(), 16) % 10000
+            if bucket < threshold:
+                keep.append(doc)
+        return keep
 
     def vlm_cache_get(self, image_hash: str) -> sqlite3.Row | None:
         """Return a prior VLM verdict for an identical crop, if any (idempotent reruns)."""

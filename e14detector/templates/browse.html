@@ -68,7 +68,7 @@
     <div class="list">
       {% for acta in actas %}
       {% set d = acta.doc %}
-      <a class="acta{% if acta.n_flagged %} flagged{% endif %}" href="/acta/{{ d.document_id }}">
+      <a class="acta" href="/acta/{{ d.document_id }}">
         <div class="acta-title">{{ d.department_name or d.department_code or "" }}{% if d.municipality_name %} &middot; {{ d.municipality_name }}{% endif %}</div>
         <div class="acta-meta">
           {% if d.place_name %}{{ d.place_name }}<br>{% endif %}
@@ -76,8 +76,7 @@
         </div>
         <div class="badges">
           <span class="chip">{{ acta.n_candidates }} candidatos</span>
-          {% if acta.n_published %}<span class="chip people">marcada por la gente ({{ acta.n_published }})</span>
-          {% elif acta.n_flagged %}<span class="chip alert">posible alerta ({{ acta.n_flagged }})</span>{% endif %}
+          {% if acta.n_published %}<span class="chip people">marcada por la gente ({{ acta.n_published }})</span>{% endif %}
           <span class="go">Revisar &rarr;</span>
         </div>
       </a>

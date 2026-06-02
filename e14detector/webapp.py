@@ -22,10 +22,12 @@ from .vlm.factory import build_reviewer
 STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.DIGIT_SHAPE_ANOMALY)
 # /browse paginates over ACTAS (grouped), not individual crops.
 BROWSE_ACTAS_PER_PAGE = 12
-# A field the automatic pipeline flagged: a strong CV signal, or a VLM visible verdict.
+# Silent prioritization signal: the Gemma (LLM) verdict, NOT CV. CV was dropped —
+# it over-fired (flagged plain placeholder dots) and biased the crowd. This only
+# orders actas; it is never shown to the public. Documents Gemma did not screen
+# (most, at a 5%% sample) have a NULL verdict and stay neutral.
 _ALGO_FLAG_SQL = (
-    "(vf.final_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY') "
-    "OR vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY','UNCLEAR'))"
+    "(vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY','UNCLEAR'))"
 )
 
 VISIBLE_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY", "UNCLEAR")

@@ -71,9 +71,7 @@
 <body>
   <header>
     <div class="back"><a href="/browse">&larr; Volver a la lista de actas</a></div>
-    <h1>{{ doc.department_name or doc.department_code or "" }}{% if doc.municipality_name %} &middot; {{ doc.municipality_name }}{% endif %}
-      {% if flagged %}<span class="chip alert">posible alerta del sistema</span>{% endif %}
-    </h1>
+    <h1>{{ doc.department_name or doc.department_code or "" }}{% if doc.municipality_name %} &middot; {{ doc.municipality_name }}{% endif %}</h1>
     <div class="acta-meta">
       {% if doc.place_name %}{{ doc.place_name }}<br>{% endif %}
       {% if doc.zone %}zona {{ doc.zone }} &middot; {% endif %}{% if doc.puesto %}puesto {{ doc.puesto }} &middot; {% endif %}{% if doc.mesa %}mesa {{ doc.mesa }} &middot; {% endif %}{{ doc.document_id }}
@@ -91,12 +89,11 @@
     <table class="rows">
       {% for it in crops %}
       {% set r = it.row %}
-      <tr class="{% if it.published or it.algo_flagged %}flagged{% endif %}">
+      <tr class="{% if it.published %}flagged{% endif %}">
         <td class="who"><b>Candidato {{ r.candidate_number or r.row_number }}</b>{{ r.candidate_name or "" }}</td>
         <td><img class="crop" loading="lazy" src="/crop?path={{ r.raw_crop_path|urlencode }}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
         <td class="status">
-          {% if it.published %}<span class="chip people">marcada como sospechosa</span>
-          {% elif it.algo_flagged %}<span class="chip alert">revisar</span>{% endif %}
+          {% if it.published %}<span class="chip people">marcada como sospechosa</span>{% endif %}
         </td>
         <td class="act"><button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button></td>
       </tr>

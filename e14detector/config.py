@@ -84,6 +84,9 @@ OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "qwen/qwen-2.5-vl-7b-i
 # real anomaly forever. STRANGE is terminal/published.
 POLL_THRESHOLD = int(os.environ.get("E14_POLL_THRESHOLD", "5"))
 POLL_RESCALE_STEP = int(os.environ.get("E14_POLL_RESCALE_STEP", "5"))
+# Fraction of documents to pre-screen with the LLM (Gemma) in the national bulk
+# pass. CV is dropped; cropping runs on all files, Gemma only on this sample.
+LLM_SAMPLE_RATE = float(os.environ.get("E14_LLM_SAMPLE_RATE", "0.05"))
 COMMUNITY_DB = os.environ.get("E14_COMMUNITY_DB", str(DEFAULT_OUTPUT_DIR / "community.sqlite"))
 # Per-voter token-bucket rate limit (defeats casual scripted flooding).
 RATE_REFILL_PER_MIN = float(os.environ.get("E14_RATE_REFILL_PER_MIN", "10"))

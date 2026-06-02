@@ -17,7 +17,7 @@ from .digit_shape import digit_shape_score, extract_digit_shape_features
 from .layout import field_layouts_for_page
 from .pdf_render import PdfRenderError, render_pdf_pages
 from .preprocess import preprocess_for_features
-from .schemas import DocumentMetadata, SlotClass, VoteField
+from .schemas import DocumentMetadata, FieldClassification, SlotClass, VoteField
 from .segmentation import adaptive_slot_boxes
 from .storage import DetectorStore
 from .utils import enrich_metadata_from_index, parse_document_metadata, sha256_file
@@ -40,11 +40,18 @@ class PdfComputeResult:
     errors: list[tuple[str | None, str, str, str]] = dataclass_field(default_factory=list)
 
 
-def compute_pdf(pdf_path: Path, output_dir: Path, dpi: int, debug: bool) -> PdfComputeResult:
-    """Render, crop and classify one PDF. Pure compute + crop-image writes; no DB.
+def compute_pdf(
+    pdf_path: Path, output_dir: Path, dpi: int, debug: bool, crop_only: bool = False
+) -> PdfComputeResult:
+    """Render, crop and (optionally) classify one PDF. Pure compute + crop writes; no DB.
 
     Crop PNGs are written here so the heavy Pillow saves stay parallelised; all
     SQLite writes are deferred to the parent process via the returned result.
+
+    ``crop_only`` skips the CV feature extraction / classification entirely (the
+    expensive per-slot work). It still saves the crops the public poll needs and
+    records neutral classifications (NOT_APPLICABLE). Use it for the fast national
+    first pass where Gemma — not CV — is the analyzer.
     """
     pdf_path = Path(pdf_path)
     meta = enrich_metadata_from_index(parse_document_metadata(pdf_path))
@@ -77,6 +84,34 @@ def compute_pdf(pdf_path: Path, output_dir: Path, dpi: int, debug: bool) -> PdfC
                     field_binary = preprocess_for_features(np.array(crop_image(page.image, layout.field_box)))
                     slot_boxes = adaptive_slot_boxes(layout.field_box, field_binary)
                     paths = save_field_crops(page.image, layout, meta.document_id, output_dir, slot_boxes=slot_boxes)
+                    if crop_only:
+                        # Fast national first pass: keep the crops the poll needs,
+                        # skip all CV analysis, leave the verdict to Gemma.
+                        slot_paths = [str(path) for path in paths.slot_paths]
+                        fields.append((
+                            VoteField(
+                                document_id=meta.document_id,
+                                page_number=page.page_number,
+                                row_type=layout.row.row_type,
+                                row_number=layout.row.row_number,
+                                candidate_number=layout.row.candidate_number,
+                                candidate_name=layout.row.candidate_name,
+                                section=layout.row.section,
+                                raw_crop_path=str(paths.raw_crop_path),
+                                enhanced_crop_path=str(paths.enhanced_crop_path),
+                                debug_crop_path=str(paths.debug_crop_path),
+                                slot_1_crop_path=slot_paths[0],
+                                slot_2_crop_path=slot_paths[1],
+                                slot_3_crop_path=slot_paths[2],
+                                cv_classification=FieldClassification.NOT_APPLICABLE,
+                                final_classification=FieldClassification.NOT_APPLICABLE,
+                                final_reason="CV disabled (crop-only)",
+                                needs_human_review=False,
+                            ),
+                            {"crop_only": True},
+                        ))
+                        field_count += 1
+                        continue
                     slot_features = []
                     slot_binaries = []
                     for slot_box in slot_boxes:
@@ -166,11 +201,11 @@ def _counts(result: PdfComputeResult) -> dict[str, int]:
     }
 
 
-def process_pdf(pdf_path: Path, output_dir: Path, store: DetectorStore, dpi: int, debug: bool, force: bool = False) -> dict[str, int]:
+def process_pdf(pdf_path: Path, output_dir: Path, store: DetectorStore, dpi: int, debug: bool, force: bool = False, crop_only: bool = False) -> dict[str, int]:
     meta = enrich_metadata_from_index(parse_document_metadata(pdf_path))
     if not force and store.already_processed(meta.document_id, sha256_file(pdf_path)):
         return {"done": 0, "skipped": 1, "failed": 0, "fields": 0}
-    result = compute_pdf(pdf_path, output_dir, dpi=dpi, debug=debug)
+    result = compute_pdf(pdf_path, output_dir, dpi=dpi, debug=debug, crop_only=crop_only)
     _persist(store, result)
     return _counts(result)
 
@@ -187,9 +222,9 @@ def run_process_one(pdf_path: Path, output_dir: Path, dpi: int, debug: bool, for
     return result
 
 
-def _compute_worker(args: tuple[str, str, int, bool]) -> PdfComputeResult:
-    pdf_path, output_dir, dpi, debug = args
-    return compute_pdf(Path(pdf_path), Path(output_dir), dpi=dpi, debug=debug)
+def _compute_worker(args: tuple[str, str, int, bool, bool]) -> PdfComputeResult:
+    pdf_path, output_dir, dpi, debug, crop_only = args
+    return compute_pdf(Path(pdf_path), Path(output_dir), dpi=dpi, debug=debug, crop_only=crop_only)
 
 
 def run_process(
@@ -200,6 +235,7 @@ def run_process(
     debug: bool,
     force: bool = False,
     workers: int = 1,
+    crop_only: bool = False,
 ) -> dict[str, int]:
     config.ensure_output_dirs(output_dir)
     store = DetectorStore(Path(output_dir) / "results" / "results.sqlite", Path(output_dir) / "results" / "results.jsonl")
@@ -224,7 +260,7 @@ def run_process(
             done = 0
             with ProcessPoolExecutor(max_workers=workers) as executor:
                 futures = {
-                    executor.submit(_compute_worker, (str(pdf), str(output_dir), dpi, debug)): pdf
+                    executor.submit(_compute_worker, (str(pdf), str(output_dir), dpi, debug, crop_only)): pdf
                     for pdf in todo
                 }
                 for future in as_completed(futures):
@@ -240,7 +276,7 @@ def run_process(
             store.commit()
         else:
             for pdf in pdfs:
-                result = process_pdf(pdf, output_dir, store, dpi=dpi, debug=debug, force=force)
+                result = process_pdf(pdf, output_dir, store, dpi=dpi, debug=debug, force=force, crop_only=crop_only)
                 for key in totals:
                     totals[key] += result[key]
                 store.commit()

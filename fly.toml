@@ -10,7 +10,7 @@ primary_region = 'dfw'
 
 [env]
   E14_COMMUNITY_DB = '/data/community.sqlite'
-  E14_OPENROUTER_MODEL = 'qwen/qwen-2.5-vl-7b-instruct'
+  E14_OPENROUTER_MODEL = 'google/gemma-4-31b-it'
   E14_POLL_RESCALE_STEP = '5'
   E14_POLL_THRESHOLD = '5'
   E14_TURNSTILE_SITEKEY = '0x4AAAAAADdWyvx9OVxuUDFw'
