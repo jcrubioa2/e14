@@ -437,6 +437,25 @@ def test_high_vote_label_shows_even_when_model_clean(tmp_path: Path, monkeypatch
     asyncio.run(run())
 
 
+def test_flag_records_when_crop_is_not_on_local_disk(tmp_path: Path) -> None:
+    """National deploy: crops live on the CDN, not the volume. A flag must still record
+    (the crop is only fetched when adjudication fires) — regression for the 404 bug."""
+    app = _build_app(tmp_path, _FakeReviewer(FieldClassification.CLEAN))
+    # Remove the local crop so resolve_crop_path would fail (as on the Fly volume).
+    (tmp_path / "out" / "crops" / "c.png").unlink()
+    fkey = field_key_of("doc1", 1, 1, None)
+    community = app.state.community
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            res = await _flag(client, fkey, "10.0.0.1")
+            assert res.status_code == 200 and res.json() == {"ok": True}
+            assert community.distinct_votes(fkey) == 1  # vote recorded despite no local crop
+
+    asyncio.run(run())
+
+
 def test_form_token_roundtrip_and_timing() -> None:
     tok = issue_form_token("s", "sid1", now=1000.0)
     # Too fast (age 0.5s < 2s min) is rejected; aged enough passes.

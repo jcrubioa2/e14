@@ -508,49 +508,71 @@ def create_app(
             raise HTTPException(status_code=500, detail=f"results DB not found: {results_db}")
         return _connect(results_db)
 
-    def adjudicate(field_key: str, crop_path: Path, votes_at_call: int) -> None:
+    def _obtain_crop(crop_rel: str) -> tuple[Path, bool]:
+        """A local image path for the VLM: the file on the volume, or — when crops live on
+        the CDN (national deploy) — a temp download from it. Returns (path, is_temp)."""
+        try:
+            return resolve_crop_path(crop_rel, output_dir), False
+        except (FileNotFoundError, ValueError):
+            pass
+        url = crop_cdn_url(crop_rel, config.CDN_BASE_URL)
+        if not url:
+            raise FileNotFoundError(crop_rel)
+        import tempfile
+        import urllib.request
+        fd, tmp = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp, open(tmp, "wb") as out:
+                out.write(resp.read())
+        except Exception:
+            Path(tmp).unlink(missing_ok=True)
+            raise FileNotFoundError(crop_rel)
+        return Path(tmp), True
+
+    def _review_crop(crop_rel: str, prompt_text: str):
+        """Fetch the crop (local or CDN) and run one VLM read; cleans up any temp file."""
+        local, is_temp = _obtain_crop(crop_rel)
+        try:
+            result = get_reviewer().review_vote_field([str(local)], metadata={}, prompt_text=prompt_text)
+            try:
+                digest = hashlib.sha256(local.read_bytes()).hexdigest()
+            except OSError:
+                digest = None
+            return result, digest
+        finally:
+            if is_temp:
+                local.unlink(missing_ok=True)
+
+    def adjudicate(field_key: str, crop_rel: str, votes_at_call: int) -> None:
         """Blocking VLM second opinion on an upvoted crop; runs on a worker thread.
 
         Uses the CONFIRM prompt: the crowd already pushed toward "suspicious", so the
         model is asked to judge independently (skeptical of the report) before we publish.
         """
         try:
-            result = get_reviewer().review_vote_field(
-                [str(crop_path)], metadata={}, prompt_text=VOTE_FIELD_CONFIRM_PROMPT
-            )
-            strange = result.classification in STRANGE_CLASSES
-            try:
-                digest = hashlib.sha256(Path(crop_path).read_bytes()).hexdigest()
-            except OSError:
-                digest = None
-            community.record_verdict(field_key, strange, votes_at_call, digest)
+            result, digest = _review_crop(crop_rel, VOTE_FIELD_CONFIRM_PROMPT)
+            community.record_verdict(field_key, result.classification in STRANGE_CLASSES, votes_at_call, digest)
         except Exception:
-            # Transient failure: roll the PENDING claim back so a later flag retries.
+            # Transient failure (incl. crop fetch): roll the PENDING claim back so a later flag retries.
             community.release_pending(field_key)
 
-    def schedule_adjudication(field_key: str, crop_path: Path, votes_at_call: int) -> None:
-        task = asyncio.create_task(asyncio.to_thread(adjudicate, field_key, crop_path, votes_at_call))
+    def schedule_adjudication(field_key: str, crop_rel: str, votes_at_call: int) -> None:
+        task = asyncio.create_task(asyncio.to_thread(adjudicate, field_key, crop_rel, votes_at_call))
         app.state._bg_tasks.add(task)
         task.add_done_callback(app.state._bg_tasks.discard)
 
-    def adjudicate_appeal(field_key: str, crop_path: Path, votes_at_call: int) -> None:
+    def adjudicate_appeal(field_key: str, crop_rel: str, votes_at_call: int) -> None:
         """Neutral-prompt re-read of a strange crop; CLEAN un-publishes it."""
         appeal_prompt = config.APPEAL_PROMPT or VOTE_FIELD_APPEAL_PROMPT
         try:
-            result = get_reviewer().review_vote_field(
-                [str(crop_path)], metadata={}, prompt_text=appeal_prompt
-            )
-            cleared = result.classification not in STRANGE_CLASSES
-            try:
-                digest = hashlib.sha256(Path(crop_path).read_bytes()).hexdigest()
-            except OSError:
-                digest = None
-            community.record_appeal_verdict(field_key, cleared, votes_at_call, digest)
+            result, digest = _review_crop(crop_rel, appeal_prompt)
+            community.record_appeal_verdict(field_key, result.classification not in STRANGE_CLASSES, votes_at_call, digest)
         except Exception:
             community.release_appeal(field_key)
 
-    def schedule_appeal(field_key: str, crop_path: Path, votes_at_call: int) -> None:
-        task = asyncio.create_task(asyncio.to_thread(adjudicate_appeal, field_key, crop_path, votes_at_call))
+    def schedule_appeal(field_key: str, crop_rel: str, votes_at_call: int) -> None:
+        task = asyncio.create_task(asyncio.to_thread(adjudicate_appeal, field_key, crop_rel, votes_at_call))
         app.state._bg_tasks.add(task)
         task.add_done_callback(app.state._bg_tasks.discard)
 
@@ -972,17 +994,15 @@ def create_app(
         strange_now = is_seed or (field_key in community.published_among([field_key]))
         if strange_now and field_key not in community.cleared_among([field_key]):
             raise HTTPException(status_code=409, detail="field is already marked strange")
-        try:
-            crop_path = resolve_crop_path(crop_rel, output_dir)
-        except (FileNotFoundError, ValueError):
-            raise HTTPException(status_code=404, detail="crop unavailable")
 
+        # Record the vote regardless of where the crop lives; the crop is only fetched
+        # (locally or from the CDN) if/when this crosses the adjudication threshold.
         community.record_flag(field_key, token)
         votes_at_call = community.try_claim_adjudication(
             field_key, poll_cfg.threshold, poll_cfg.rescale_step
         )
         if votes_at_call is not None:
-            schedule_adjudication(field_key, crop_path, votes_at_call)
+            schedule_adjudication(field_key, crop_rel, votes_at_call)
 
         # Never leak the count or whether a review fired — the counter is private.
         return _flag_response({"ok": True}, 200, sid, new_sid)
@@ -1021,17 +1041,13 @@ def create_app(
         strange_now = is_seed or (field_key in community.published_among([field_key]))
         if not strange_now or field_key in community.cleared_among([field_key]):
             raise HTTPException(status_code=409, detail="field is not marked strange")
-        try:
-            crop_path = resolve_crop_path(crop_rel, output_dir)
-        except (FileNotFoundError, ValueError):
-            raise HTTPException(status_code=404, detail="crop unavailable")
 
         community.record_appeal(field_key, token)
         votes_at_call = community.try_claim_appeal(
             field_key, poll_cfg.appeal_threshold, poll_cfg.appeal_rescale_step
         )
         if votes_at_call is not None:
-            schedule_appeal(field_key, crop_path, votes_at_call)
+            schedule_appeal(field_key, crop_rel, votes_at_call)
         return _flag_response({"ok": True}, 200, sid, new_sid)
 
     return app
