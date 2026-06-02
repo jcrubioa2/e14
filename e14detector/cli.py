@@ -137,14 +137,23 @@ def cmd_publish_loop(args: argparse.Namespace) -> int:
     from .publish import publish_crops
 
     output_dir = Path(args.output_dir)
+    last_db = 0.0
     while True:
         started = time.time()
         crops = publish_crops(output_dir, bucket=args.bucket, workers=args.workers, verbose=False)
-        info = publish_db(output_dir, bucket=args.bucket, only_uploaded=True, verbose=False)
-        front = "empty" if info is None else f"{info['kept']} actas (sha {info['sha256'][:8]})"
+        # Decoupled cadence: upload crops every tick (cheap delta), but republish the DB
+        # only every --db-interval (the gzipped snapshot is the bigger transfer).
+        db_note = "db not due"
+        if args.once or (time.time() - last_db) >= args.db_interval:
+            info = publish_db(output_dir, bucket=args.bucket, only_uploaded=True, verbose=False)
+            if info is not None:
+                last_db = time.time()
+                db_note = f"frontier {info['kept']} actas (sha {info['sha256'][:8]})"
+            else:
+                db_note = "frontier empty"
         print(
             f"[publish-loop] +{crops['uploaded']} crops (fail {crops['failed']}) · "
-            f"frontier {front} · {time.time()-started:.0f}s",
+            f"{db_note} · {time.time()-started:.0f}s",
             flush=True,
         )
         if args.once:
@@ -327,7 +336,8 @@ def build_parser() -> argparse.ArgumentParser:
     publish_loop.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
     publish_loop.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
     publish_loop.add_argument("--workers", type=int, default=32, help="crop upload concurrency")
-    publish_loop.add_argument("--interval", type=int, default=120, help="seconds between cycles")
+    publish_loop.add_argument("--interval", type=int, default=60, help="seconds between crop-upload ticks")
+    publish_loop.add_argument("--db-interval", type=int, default=300, help="seconds between DB publishes")
     publish_loop.add_argument("--once", action="store_true", help="run a single cycle and exit")
     publish_loop.set_defaults(func=cmd_publish_loop)
 

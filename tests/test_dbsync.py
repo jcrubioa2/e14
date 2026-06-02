@@ -1,3 +1,4 @@
+import gzip
 import json
 import sqlite3
 from pathlib import Path
@@ -65,6 +66,29 @@ def test_refresh_round_trip_and_idempotence(tmp_path: Path) -> None:
     con.close()
 
 
+def test_refresh_handles_gzipped_snapshot(tmp_path: Path) -> None:
+    """Reader decompresses a .gz snapshot on the fly and verifies the decompressed sha."""
+    import shutil
+
+    src = tmp_path / "src" / "results.sqlite"
+    _make_db(src, 6)
+    cdn = tmp_path / "cdn"
+    (cdn / dbsync.DB_PREFIX).mkdir(parents=True)
+    snap = cdn / "s.sqlite"
+    digest = dbsync.make_snapshot(src, snap)
+    key = f"{dbsync.DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
+    with open(snap, "rb") as f_in, gzip.open(cdn / key, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
+    snap.unlink()
+    (cdn / dbsync.POINTER_KEY).write_text(json.dumps({"key": key, "sha256": digest}))
+
+    dest = tmp_path / "served" / "results.sqlite"
+    assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) == digest
+    con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+    assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 6
+    con.close()
+
+
 def test_refresh_rejects_corrupt_snapshot_and_keeps_served_file(tmp_path: Path) -> None:
     src = tmp_path / "src" / "results.sqlite"
     _make_db(src, 4)
@@ -124,9 +148,11 @@ def test_publish_db_only_uploaded_publishes_the_frontier(tmp_path: Path) -> None
     s3 = _FakeS3()
     info = dbsync.publish_db(out, bucket="b", client=s3, only_uploaded=True, verbose=False)
     assert info is not None and info["kept"] == 1
+    assert info["key"].endswith(".sqlite.gz")
 
     snap = tmp_path / "got.sqlite"
-    snap.write_bytes(s3.objects[info["key"]])
+    snap.write_bytes(gzip.decompress(s3.objects[info["key"]]))  # stored object is gzipped
+    assert dbsync._sha256(snap) == info["sha256"]  # pointer sha is of the decompressed db
     con = sqlite3.connect(snap)
     docs = {r[0] for r in con.execute("SELECT document_id FROM documents")}
     con.close()
@@ -169,7 +195,7 @@ def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) ->
 
     s3 = _FakeS3()
     info = dbsync.publish_db(src_dir, bucket="b", client=s3, verbose=False)
-    assert info["key"] == f"db/results-{info['sha256'][:16]}.sqlite"
+    assert info["key"] == f"db/results-{info['sha256'][:16]}.sqlite.gz"
     assert info["key"] in s3.objects
     pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
     assert pointer["sha256"] == info["sha256"] and pointer["key"] == info["key"]

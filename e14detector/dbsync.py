@@ -16,9 +16,11 @@ only the local publisher uses boto3, imported lazily.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -134,34 +136,40 @@ def publish_db(
                 print(f"publish-db: frontier = {kept} fully-uploaded acta(s), {dropped} held back", flush=True)
             if kept == 0:
                 return None  # nothing safe to publish yet
-        digest = _sha256(snap)
-        size = snap.stat().st_size
-        key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite"
+        digest = _sha256(snap)  # sha of the DECOMPRESSED db (what the reader installs)
+        key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
         # Skip re-uploading an identical DB (nothing changed since the last cycle).
         try:
             cur = json.loads(client.get_object(Bucket=bucket, Key=POINTER_KEY)["Body"].read())
             if cur.get("sha256") == digest:
                 if verbose:
                     print("publish-db: unchanged since last publish; skipping upload", flush=True)
-                return {"key": key, "sha256": digest, "size": size,
+                return {"key": key, "sha256": digest, "size": cur.get("size", 0),
                         "kept": kept if only_uploaded else None, "skipped": True}
         except Exception:
             pass  # no pointer yet, or client without get_object — just publish
+        # gzip the snapshot — a paths/metadata DB (mostly NULL columns + repetitive crop
+        # paths) compresses ~10x, so the upload is far smaller and cycles stay short.
+        gz = Path(str(snap) + ".gz")
+        with open(snap, "rb") as f_in, gzip.open(gz, "wb", compresslevel=6) as f_out:
+            shutil.copyfileobj(f_in, f_out, 1 << 20)
+        raw_size, gz_size = snap.stat().st_size, gz.stat().st_size
         if verbose:
-            print(f"publish-db: snapshot {size/1e6:.1f} MB sha={digest[:12]} -> {bucket}/{key}", flush=True)
-        # Immutable content-addressed object (safe to cache forever) ...
-        client.upload_file(
-            str(snap), bucket, key,
-            ExtraArgs={"ContentType": "application/x-sqlite3",
+            print(f"publish-db: {raw_size/1e6:.0f} MB -> {gz_size/1e6:.1f} MB gz "
+                  f"sha={digest[:12]} -> {bucket}/{key}", flush=True)
+        client.upload_file(  # immutable content-addressed object (cache forever)
+            str(gz), bucket, key,
+            ExtraArgs={"ContentType": "application/gzip",
                        "CacheControl": "public, max-age=31536000, immutable"},
         )
         # ... then flip the pointer last (never cache it).
-        pointer = json.dumps({"key": key, "sha256": digest, "size": size, "ts": int(time.time())})
+        pointer = json.dumps({"key": key, "sha256": digest, "size": gz_size,
+                              "raw_size": raw_size, "ts": int(time.time())})
         client.put_object(
             Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
-    return {"key": key, "sha256": digest, "size": size, "kept": kept if only_uploaded else None}
+    return {"key": key, "sha256": digest, "size": gz_size, "kept": kept if only_uploaded else None}
 
 
 # --- reader (Fly app) ------------------------------------------------------
@@ -200,11 +208,13 @@ def refresh_db_once(cdn_base: str, dest_db: Path, *, timeout: float = 60.0) -> s
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        with urllib.request.urlopen(urllib.request.Request(f"{base}/{key}"), timeout=timeout) as resp, \
-                open(tmp, "wb") as out:
-            for chunk in iter(lambda: resp.read(1 << 20), b""):
-                out.write(chunk)
-        got = _sha256(tmp)
+        with urllib.request.urlopen(urllib.request.Request(f"{base}/{key}"), timeout=timeout) as resp:
+            # gzip-compressed snapshots are decompressed on the fly; raw .sqlite still works.
+            stream = gzip.GzipFile(fileobj=resp) if key.endswith(".gz") else resp
+            with open(tmp, "wb") as out:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    out.write(chunk)
+        got = _sha256(tmp)  # verify the DECOMPRESSED db against the pointer
         if got != want:
             raise ValueError(f"snapshot sha mismatch: got {got[:12]} want {want[:12]}")
         # A stale -wal/-shm beside the new main file would corrupt reads; drop them.
