@@ -27,6 +27,10 @@ test = [
     "pytest>=8.0",
     "httpx>=0.27,<0.28",
 ]
+# Local-only: uploading crops to Fly Tigris / S3 (never imported by the serve image).
+publish = [
+    "boto3>=1.34",
+]
 
 [tool.setuptools]
 packages = ["e14", "e14detector"]

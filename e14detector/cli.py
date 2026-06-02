@@ -99,6 +99,22 @@ def cmd_vlm_confirm(args: argparse.Namespace) -> int:
     return 1 if totals["failed"] else 0
 
 
+def cmd_publish_crops(args: argparse.Namespace) -> int:
+    from .publish import publish_crops
+
+    totals = publish_crops(
+        output_dir=Path(args.output_dir),
+        bucket=args.bucket,
+        limit=args.limit,
+        workers=args.workers,
+        dry_run=args.dry_run,
+    )
+    print(
+        f"uploaded={totals['uploaded']} skipped={totals['skipped']} failed={totals['failed']}"
+    )
+    return 1 if totals["failed"] else 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -241,6 +257,17 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--model", help=f"confirm model (default: {config.CONFIRM_MODEL})")
     confirm.add_argument("--concurrency", type=int, default=config.VLM_CONCURRENCY)
     confirm.set_defaults(func=cmd_vlm_confirm)
+
+    publish = sub.add_parser(
+        "publish-crops",
+        help="upload new public candidate crops to the object store (Tigris/S3); incremental",
+    )
+    publish.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    publish.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    publish.add_argument("--limit", type=int, help="cap crops uploaded this run")
+    publish.add_argument("--workers", type=int, default=16)
+    publish.add_argument("--dry-run", action="store_true", help="count new crops without uploading")
+    publish.set_defaults(func=cmd_publish_crops)
 
     serve = sub.add_parser("serve", help="serve a local anomaly review web app")
     serve.add_argument("--host", default="127.0.0.1")

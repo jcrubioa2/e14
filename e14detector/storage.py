@@ -347,6 +347,14 @@ class DetectorStore:
             params,
         ).fetchall()
 
+    def candidate_crop_paths(self) -> list[str]:
+        """Distinct raw crop paths for candidate rows (the public crops to publish)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT raw_crop_path FROM vote_fields "
+            "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL"
+        ).fetchall()
+        return [r["raw_crop_path"] for r in rows]
+
     def candidate_id_for_crop(self, raw_crop_path: str) -> int | None:
         row = self.conn.execute(
             "SELECT id FROM vote_fields WHERE row_type='candidate' AND raw_crop_path=? LIMIT 1",

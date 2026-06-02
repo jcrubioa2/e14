@@ -215,19 +215,26 @@ def _qualifying_docs(
     return rows, count_row["c"]
 
 
+def crop_key(raw_crop_path: str) -> str:
+    """Object-store key for a crop: the ``crops/<file>`` suffix of its stored path.
+
+    All candidate crops live under ``<output_dir>/crops/``, so keying on that suffix
+    lets the uploader and the page agree regardless of whether the stored path is
+    absolute or relative.
+    """
+    s = str(raw_crop_path).replace("\\", "/")
+    idx = s.find("crops/")
+    return s[idx:] if idx != -1 else s.lstrip("/")
+
+
 def crop_cdn_url(raw_crop_path: str, cdn_base: str) -> str | None:
     """Public URL for a crop on the CDN, or None when no CDN is configured.
 
-    All candidate crops live under ``<output_dir>/crops/``; the CDN key mirrors that
-    suffix (``crops/<file>``), so the uploader and the page agree regardless of whether
-    the stored path is absolute or relative. None => caller falls back to /crop.
+    None => caller falls back to the in-app /crop endpoint.
     """
     if not cdn_base:
         return None
-    s = str(raw_crop_path).replace("\\", "/")
-    idx = s.find("crops/")
-    key = s[idx:] if idx != -1 else s.lstrip("/")
-    return f"{cdn_base}/{key}"
+    return f"{cdn_base}/{crop_key(raw_crop_path)}"
 
 
 def resolve_crop_path(path: str, output_dir: Path) -> Path:
