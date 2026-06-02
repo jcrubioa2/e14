@@ -66,10 +66,7 @@
           <span class="muted">probar:</span>
           {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&model={{ m|urlencode }}" target="_blank" rel="noopener">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}<br>
           <span class="muted">aplicar:</span>
-          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&record=1&model={{ m|urlencode }}" target="_blank" rel="noopener" onclick="return confirm('Aplicar veredicto de {{ label }} a esta casilla?')">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}<br>
-          <span class="muted">manual:</span>
-          <a href="/admin/set?key={{ key|urlencode }}&field_key={{ fk }}&verdict=strange" target="_blank" rel="noopener" onclick="return confirm('Marcar esta casilla como SOSPECHOSA (manual)?')">sospechosa</a>
-          <a href="/admin/set?key={{ key|urlencode }}&field_key={{ fk }}&verdict=clean" target="_blank" rel="noopener" onclick="return confirm('Marcar esta casilla como LIMPIA (manual)?')">limpia</a>
+          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&record=1&model={{ m|urlencode }}" target="_blank" rel="noopener" onclick="return confirm('Aplicar veredicto de {{ label }} a esta casilla?')">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}
         </td>
       </tr>
       {% else %}

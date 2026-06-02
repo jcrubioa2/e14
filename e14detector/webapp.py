@@ -748,25 +748,6 @@ def create_app(
             "raw": result.raw_json,
         }
 
-    @app.get("/admin/set")
-    async def admin_set(request: Request, key: str = "", field_key: str = "", verdict: str = ""):
-        # Operator override: set a casilla's verdict by hand, regardless of the AI.
-        if not config.ADMIN_TOKEN:
-            raise HTTPException(status_code=404, detail="not found")
-        if key != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=403, detail="forbidden")
-        if verdict not in ("strange", "clean"):
-            raise HTTPException(status_code=400, detail="verdict must be strange|clean")
-        with conn() as db:
-            if not lookup_candidate_appeal(db, field_key):
-                raise HTTPException(status_code=404, detail="unknown field")
-        votes = community.distinct_votes(field_key)
-        if verdict == "strange":
-            community.record_verdict(field_key, True, votes, None)        # publish as suspicious
-        else:
-            community.record_appeal_verdict(field_key, True, votes, None)  # clear (also un-seeds)
-        return {"field_key": field_key, "verdict": verdict, "applied": True}
-
     @app.get("/robots.txt")
     async def robots():
         body = (

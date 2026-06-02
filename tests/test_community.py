@@ -515,28 +515,6 @@ def test_admin_review_runs_on_demand_and_can_record(tmp_path: Path, monkeypatch)
     asyncio.run(run())
 
 
-def test_admin_set_manual_override(tmp_path: Path, monkeypatch) -> None:
-    """Operator can force a verdict by hand (strange publishes; clean clears)."""
-    from e14detector import config as _config
-    app = _build_app(tmp_path, _FakeReviewer(FieldClassification.CLEAN))
-    fk = field_key_of("doc1", 1, 1, None)
-    community = app.state.community
-    monkeypatch.setattr(_config, "ADMIN_TOKEN", "k")
-
-    async def run() -> None:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            assert (await client.get(f"/admin/set?field_key={fk}&verdict=strange")).status_code == 403  # no key
-            r = await client.get(f"/admin/set?key=k&field_key={fk}&verdict=strange")
-            assert r.json()["applied"] is True
-            assert fk in community.published_among([fk])          # forced strange -> published
-            await client.get(f"/admin/set?key=k&field_key={fk}&verdict=clean")
-            assert fk not in community.published_among([fk])       # forced clean -> un-published
-            assert fk in community.cleared_among([fk])             # and cleared (un-seeds too)
-
-    asyncio.run(run())
-
-
 def test_pending_among_reflects_in_flight_review(tmp_path: Path) -> None:
     """A casilla shows 'en revisión' (PENDING) only while its VLM check is in flight."""
     c = CommunityStore(tmp_path / "c.sqlite")
