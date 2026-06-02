@@ -1,0 +1,22 @@
+# Keep the image lean: only e14detector/ + data/detector/ are COPYed, but guard
+# against pulling the writable DB, scratch data, and caches into the build context.
+.git
+.venv
+**/__pycache__
+*.pyc
+*.pyo
+
+# The community votes DB is runtime state on the volume, never in the image.
+data/detector/community.sqlite
+data/detector/community.sqlite-wal
+data/detector/community.sqlite-shm
+
+# Detector scratch / source corpus (never needed to serve).
+data/_digitset
+data/_cvprobe
+data/actas
+logs
+plans
+scripts
+tests
+files

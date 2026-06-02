@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Revision de actas E-14</title>
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ink:#202124; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: #fff; }
+    header, main { max-width: 1180px; margin: 0 auto; padding: 22px; }
+    h1 { margin: 0 0 6px; font-size: 28px; line-height: 1.2; }
+    h2 { margin: 28px 0 12px; font-size: 18px; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 18px; }
+    .stat { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fff; }
+    .stat b { display: block; font-size: 24px; line-height: 1.1; }
+    form { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 10px; align-items: end; margin: 18px 0; }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    input, select, button { height: 36px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; font: inherit; background: #fff; }
+    button { background: #24292f; color: #fff; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 9px; font-size: 13px; text-align: left; vertical-align: top; }
+    th { background: var(--bg); position: sticky; top: 0; }
+    .tag { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 7px; margin: 1px 3px 1px 0; font-size: 11px; }
+    .tag.bad { border-color: #f1a7a0; color: var(--bad); background: #fff1f0; }
+    .pager { display: flex; gap: 12px; justify-content: flex-end; margin-top: 14px; }
+    @media (max-width: 760px) { form { grid-template-columns: 1fr; } th:nth-child(3), td:nth-child(3) { display: none; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Revision de actas E-14</h1>
+    <div class="muted">Actas donde una revision automatica encontro posibles cambios en votos de candidatos. Los votos en blanco, nulos, no marcados y el total no se usan para marcar un acta como sospechosa.</div>
+    <section class="stats">
+      <div class="stat"><b>{{ summary.total_docs }}</b><span class="muted">actas revisadas</span></div>
+      <div class="stat"><b>{{ summary.qualifying_docs }}</b><span class="muted">actas con alerta</span></div>
+      <div class="stat"><b>{{ summary.total_fields }}</b><span class="muted">casillas de votos</span></div>
+      {% for klass in visible_classes %}
+      <div class="stat"><b>{{ summary.vlm_counts.get(klass, 0) }}</b><span class="muted">{% if klass == "SUSPICIOUS_OVERLAP" %}posible numero escrito encima de una raya{% elif klass == "DIGIT_SHAPE_ANOMALY" %}posible numero con forma rara{% else %}necesita revision humana{% endif %}</span></div>
+      {% endfor %}
+    </section>
+  </header>
+  <main>
+    <form method="get" action="/">
+      <label>Departamento
+        <select name="department">
+          <option value="">Todos</option>
+          {% for dep in departments %}
+          {% set dep_value = dep.department_code or dep.department_name %}
+          <option value="{{ dep_value }}" {% if filters.department == dep_value %}selected{% endif %}>{{ dep.department_code or "" }} {{ dep.department_name or "" }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Tipo de alerta
+        <select name="anomaly_type">
+          <option value="">Todas</option>
+          {% for klass in visible_classes %}
+          <option value="{{ klass }}" {% if filters.anomaly_type == klass %}selected{% endif %}>{% if klass == "SUSPICIOUS_OVERLAP" %}numero encima de una raya{% elif klass == "DIGIT_SHAPE_ANOMALY" %}numero con forma rara{% else %}necesita revision humana{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Seguridad minima
+        <input name="min_confidence" type="number" min="0" max="1" step="0.01" value="{{ filters.min_confidence }}">
+      </label>
+      <label>Buscar
+        <input name="q" value="{{ filters.q }}" placeholder="acta, archivo, puesto">
+      </label>
+      <button type="submit">Filtrar</button>
+    </form>
+
+    <h2>Actas con alerta</h2>
+    <div class="muted">{{ total }} resultado(s), pagina {{ page }} de {{ pages }}</div>
+    <table>
+      <thead>
+        <tr><th>Acta</th><th>Alertas</th><th>Departamento</th><th>Puesto</th><th>Mayor seguridad</th><th>Tipo</th></tr>
+      </thead>
+      <tbody>
+        {% for doc in docs %}
+        <tr>
+          <td><a href="/doc/{{ doc.document_id }}?min_confidence={{ filters.min_confidence }}">{{ doc.document_id }}</a><div class="muted">{{ doc.filename or "" }}</div></td>
+          <td><b>{{ doc.n_confirmed }}</b></td>
+          <td>{{ doc.department_code or "" }} {{ doc.department_name or "" }}</td>
+          <td>{{ doc.place_name or "" }}<div class="muted">mesa {{ doc.mesa or "" }}</div></td>
+          <td>{{ "%.2f"|format(doc.max_confidence or 0) }}</td>
+          <td>
+            {% for klass in (doc.anomaly_types or "").split(",") if klass %}
+            <span class="tag bad">{% if klass == "SUSPICIOUS_OVERLAP" %}numero encima de una raya{% elif klass == "DIGIT_SHAPE_ANOMALY" %}numero con forma rara{% elif klass == "UNCLEAR" %}necesita revision humana{% else %}{{ klass }}{% endif %}</span>
+            {% endfor %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="muted">No hay actas con alerta para estos filtros.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <nav class="pager">
+      {% if page > 1 %}<a href="/?department={{ filters.department }}&anomaly_type={{ filters.anomaly_type }}&min_confidence={{ filters.min_confidence }}&q={{ filters.q }}&page={{ page - 1 }}">Anterior</a>{% endif %}
+      {% if page < pages %}<a href="/?department={{ filters.department }}&anomaly_type={{ filters.anomaly_type }}&min_confidence={{ filters.min_confidence }}&q={{ filters.q }}&page={{ page + 1 }}">Siguiente</a>{% endif %}
+    </nav>
+  </main>
+</body>
+</html>

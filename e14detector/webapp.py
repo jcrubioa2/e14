@@ -1,0 +1,517 @@
+"""Dynamic FastAPI report for VLM-confirmed candidate anomalies."""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import math
+import sqlite3
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+
+from .community import CommunityStore, PollConfig, field_key_of, verify_turnstile, voter_token
+from .schemas import FieldClassification
+from .vlm.base import VisionReviewer
+from .vlm.factory import build_reviewer
+
+STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.DIGIT_SHAPE_ANOMALY)
+# /browse paginates over ACTAS (grouped), not individual crops.
+BROWSE_ACTAS_PER_PAGE = 12
+# A field the automatic pipeline flagged: a strong CV signal, or a VLM visible verdict.
+_ALGO_FLAG_SQL = (
+    "(vf.final_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY') "
+    "OR vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY','UNCLEAR'))"
+)
+
+VISIBLE_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY", "UNCLEAR")
+# Strong deterministic CV signals. The VLM second pass is allowed to PRUNE the
+# marginal UNCLEAR band (where it reduces false positives), but it must NOT be
+# able to hide a strong CV catch by returning CLEAN: the VLM is non-deterministic
+# and proven unreliable on faint placeholder-overlaps, so a CV overlap/shape flag
+# stays in the human queue regardless of the VLM verdict (VLM stays advisory there).
+STRONG_CV_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY")
+PAGE_SIZE = 50
+
+
+def _connect(db_path: Path) -> sqlite3.Connection:
+    uri = f"file:{db_path.resolve()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return dict(row)
+
+
+def _filters(
+    department: str | None,
+    anomaly_type: str | None,
+    min_confidence: float,
+    q: str | None,
+) -> tuple[str, list[Any]]:
+    # Non-vetoing union: a row qualifies if the VLM flags it (confidently enough)
+    # OR the CV pass raised a strong deterministic signal. The latter clause means
+    # a VLM CLEAN can never hide a CV overlap/shape catch — it can only prune the
+    # marginal UNCLEAR band, which is the half of the join the VLM is reliable on.
+    where = [
+        "vf.row_type='candidate'",
+        (
+            "("
+            f"(vf.vlm_classification IN ({','.join('?' for _ in VISIBLE_CLASSES)})"
+            " AND COALESCE(vf.vlm_confidence, 0) >= ?)"
+            f" OR vf.final_classification IN ({','.join('?' for _ in STRONG_CV_CLASSES)})"
+            ")"
+        ),
+    ]
+    params: list[Any] = [*VISIBLE_CLASSES, min_confidence, *STRONG_CV_CLASSES]
+    if department:
+        where.append("(d.department_code=? OR d.department_name=?)")
+        params.extend([department, department])
+    if anomaly_type:
+        if anomaly_type not in VISIBLE_CLASSES:
+            raise HTTPException(status_code=400, detail="invalid anomaly type")
+        # Match the effective alert: a VLM verdict, or a strong CV verdict the VLM
+        # did not override.
+        where.append("(vf.vlm_classification=? OR vf.final_classification=?)")
+        params.extend([anomaly_type, anomaly_type])
+    if q:
+        where.append("(d.document_id LIKE ? OR d.filename LIKE ? OR d.place_name LIKE ?)")
+        needle = f"%{q}%"
+        params.extend([needle, needle, needle])
+    return " AND ".join(where), params
+
+
+def _summary(conn: sqlite3.Connection, min_confidence: float) -> dict[str, Any]:
+    total_docs = conn.execute("SELECT COUNT(*) c FROM documents").fetchone()["c"]
+    total_fields = conn.execute("SELECT COUNT(*) c FROM vote_fields").fetchone()["c"]
+    class_counts = {
+        row["classification"] or "NULL": row["c"]
+        for row in conn.execute(
+            "SELECT final_classification classification, COUNT(*) c "
+            "FROM vote_fields GROUP BY final_classification"
+        )
+    }
+    vlm_counts = {
+        row["classification"] or "NULL": row["c"]
+        for row in conn.execute(
+            "SELECT vlm_classification classification, COUNT(*) c "
+            "FROM vote_fields WHERE vlm_classification IS NOT NULL "
+            "GROUP BY vlm_classification"
+        )
+    }
+    qualifying_docs = conn.execute(
+        f"""
+        SELECT COUNT(*) c FROM (
+            SELECT d.document_id
+            FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
+            WHERE vf.row_type='candidate'
+              AND (
+                (vf.vlm_classification IN ({','.join('?' for _ in VISIBLE_CLASSES)})
+                 AND COALESCE(vf.vlm_confidence, 0) >= ?)
+                OR vf.final_classification IN ({','.join('?' for _ in STRONG_CV_CLASSES)})
+              )
+            GROUP BY d.document_id
+        )
+        """,
+        (*VISIBLE_CLASSES, min_confidence, *STRONG_CV_CLASSES),
+    ).fetchone()["c"]
+    return {
+        "total_docs": total_docs,
+        "qualifying_docs": qualifying_docs,
+        "total_fields": total_fields,
+        "class_counts": class_counts,
+        "vlm_counts": vlm_counts,
+    }
+
+
+def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT department_code, department_name
+        FROM documents
+        WHERE department_code IS NOT NULL OR department_name IS NOT NULL
+        GROUP BY department_code, department_name
+        ORDER BY department_code, department_name
+        """
+    ).fetchall()
+
+
+def _qualifying_docs(
+    conn: sqlite3.Connection,
+    department: str | None,
+    anomaly_type: str | None,
+    min_confidence: float,
+    q: str | None,
+    limit: int,
+    offset: int,
+) -> tuple[list[sqlite3.Row], int]:
+    where, params = _filters(department, anomaly_type, min_confidence, q)
+    count_row = conn.execute(
+        f"""
+        SELECT COUNT(*) c FROM (
+            SELECT d.document_id
+            FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
+            WHERE {where}
+            GROUP BY d.document_id
+            HAVING COUNT(*) > 0
+        )
+        """,
+        params,
+    ).fetchone()
+    rows = conn.execute(
+        f"""
+        SELECT d.*,
+               COUNT(*) AS n_confirmed,
+               MAX(vf.vlm_confidence) AS max_confidence,
+               GROUP_CONCAT(DISTINCT vf.vlm_classification) AS anomaly_types
+        FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
+        WHERE {where}
+        GROUP BY d.document_id
+        HAVING n_confirmed > 0
+        ORDER BY n_confirmed DESC, max_confidence DESC, d.document_id
+        LIMIT ? OFFSET ?
+        """,
+        [*params, limit, offset],
+    ).fetchall()
+    return rows, count_row["c"]
+
+
+def resolve_crop_path(path: str, output_dir: Path) -> Path:
+    output_dir = Path(output_dir).resolve()
+    requested = Path(path)
+    candidates = [requested] if requested.is_absolute() else [requested, output_dir / requested]
+    resolved = None
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+            break
+        except FileNotFoundError:
+            continue
+    if resolved is None:
+        raise FileNotFoundError(path)
+    resolved.relative_to(output_dir)
+    return resolved
+
+
+def parse_field_key(field_key: str) -> tuple[str, int, int, str] | None:
+    """Split ``document:page:row:section`` back into parts (document ids carry no colon)."""
+    parts = field_key.rsplit(":", 3)
+    if len(parts) != 4:
+        return None
+    document_id, page, row, section = parts
+    try:
+        return document_id, int(page), int(row), section
+    except ValueError:
+        return None
+
+
+def lookup_candidate_crop(conn: sqlite3.Connection, field_key: str) -> str | None:
+    """Resolve a client-supplied field key to a real candidate crop path, or None."""
+    parsed = parse_field_key(field_key)
+    if parsed is None:
+        return None
+    document_id, page, row, section = parsed
+    row_ = conn.execute(
+        "SELECT raw_crop_path FROM vote_fields "
+        "WHERE document_id=? AND page_number=? AND row_number=? "
+        "AND COALESCE(section,'')=? AND row_type='candidate' LIMIT 1",
+        (document_id, page, row, section),
+    ).fetchone()
+    if row_ is None:
+        return None
+    return row_["raw_crop_path"]
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP, honoring a single proxy hop (Fly/Cloudflare)."""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "0.0.0.0"
+
+
+def create_app(
+    results_db: Path,
+    output_dir: Path,
+    community_db: Path | None = None,
+    reviewer: VisionReviewer | None = None,
+    poll: PollConfig | None = None,
+) -> FastAPI:
+    results_db = Path(results_db)
+    output_dir = Path(output_dir).resolve()
+    templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+    poll_cfg = poll or PollConfig.from_config()
+    community = CommunityStore(community_db or (output_dir / "community.sqlite"))
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        community.close()
+
+    app = FastAPI(title="Revision de posibles irregularidades E-14", lifespan=lifespan)
+    app.state.results_db = results_db
+    app.state.output_dir = output_dir
+    app.state.community = community
+    app.state.poll = poll_cfg
+    # Reviewer is built lazily so importing/serving never requires a live key, and
+    # tests can inject a deterministic stub.
+    app.state.reviewer = reviewer
+    app.state._bg_tasks: set[asyncio.Task] = set()
+
+    def get_reviewer() -> VisionReviewer:
+        if app.state.reviewer is None:
+            app.state.reviewer = build_reviewer()
+        return app.state.reviewer
+
+    def conn() -> sqlite3.Connection:
+        if not results_db.exists():
+            raise HTTPException(status_code=500, detail=f"results DB not found: {results_db}")
+        return _connect(results_db)
+
+    def adjudicate(field_key: str, crop_path: Path, votes_at_call: int) -> None:
+        """Blocking VLM second opinion; runs on a worker thread (never the loop)."""
+        try:
+            result = get_reviewer().review_vote_field([str(crop_path)], metadata={})
+            strange = result.classification in STRANGE_CLASSES
+            try:
+                digest = hashlib.sha256(Path(crop_path).read_bytes()).hexdigest()
+            except OSError:
+                digest = None
+            community.record_verdict(field_key, strange, votes_at_call, digest)
+        except Exception:
+            # Transient failure: roll the PENDING claim back so a later flag retries.
+            community.release_pending(field_key)
+
+    def schedule_adjudication(field_key: str, crop_path: Path, votes_at_call: int) -> None:
+        task = asyncio.create_task(asyncio.to_thread(adjudicate, field_key, crop_path, votes_at_call))
+        app.state._bg_tasks.add(task)
+        task.add_done_callback(app.state._bg_tasks.discard)
+
+    @app.get("/")
+    async def dashboard(
+        request: Request,
+        department: str | None = None,
+        anomaly_type: str | None = None,
+        min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+        q: str | None = None,
+        page: int = Query(1, ge=1),
+    ):
+        with conn() as db:
+            docs, total = _qualifying_docs(
+                db, department, anomaly_type, min_confidence, q, PAGE_SIZE, (page - 1) * PAGE_SIZE
+            )
+            return templates.TemplateResponse(
+                request,
+                "dashboard.html",
+                {
+                    "summary": _summary(db, min_confidence),
+                    "departments": _departments(db),
+                    "docs": docs,
+                    "visible_classes": VISIBLE_CLASSES,
+                    "filters": {
+                        "department": department or "",
+                        "anomaly_type": anomaly_type or "",
+                        "min_confidence": min_confidence,
+                        "q": q or "",
+                    },
+                    "page": page,
+                    "pages": max(1, math.ceil(total / PAGE_SIZE)),
+                    "total": total,
+                },
+            )
+
+    @app.get("/doc/{document_id}")
+    async def doc_detail(request: Request, document_id: str, min_confidence: float = Query(0.0, ge=0.0, le=1.0)):
+        with conn() as db:
+            doc = db.execute("SELECT * FROM documents WHERE document_id=?", (document_id,)).fetchone()
+            if not doc:
+                raise HTTPException(status_code=404, detail="document not found")
+            fields = db.execute(
+                """
+                SELECT *
+                FROM vote_fields
+                WHERE document_id=?
+                ORDER BY CASE row_type WHEN 'candidate' THEN 0 ELSE 1 END, page_number, row_number
+                """,
+                (document_id,),
+            ).fetchall()
+            return templates.TemplateResponse(
+                request,
+                "doc.html",
+                {
+                    "doc": doc,
+                    "fields": fields,
+                    "visible_classes": VISIBLE_CLASSES,
+                    "min_confidence": min_confidence,
+                },
+            )
+
+    @app.get("/crop")
+    async def crop(path: str):
+        try:
+            resolved = resolve_crop_path(path, output_dir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="crop not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail="crop path outside output_dir") from exc
+        return FileResponse(resolved)
+
+    @app.get("/api/flagged")
+    async def api_flagged(
+        department: str | None = None,
+        anomaly_type: str | None = None,
+        min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+        q: str | None = None,
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+    ):
+        with conn() as db:
+            docs, total = _qualifying_docs(db, department, anomaly_type, min_confidence, q, limit, offset)
+            return {"total": total, "items": [_row_dict(row) for row in docs]}
+
+    @app.get("/browse")
+    async def browse(
+        request: Request,
+        department: str | None = None,
+        q: str | None = None,
+        page: int = Query(1, ge=1),
+    ):
+        # Crops are grouped by ACTA (one polling table), with the actas the
+        # automatic pipeline flagged shown first, and within each acta the flagged
+        # crops first. We keep the acta identity visible (no anonymization): people
+        # who already know which acta looks wrong need to be able to find it.
+        where = ["vf.row_type='candidate'", "vf.raw_crop_path IS NOT NULL"]
+        params: list[Any] = []
+        if department:
+            where.append("(d.department_code=? OR d.department_name=?)")
+            params.extend([department, department])
+        if q:
+            where.append("(d.document_id LIKE ? OR d.place_name LIKE ? OR vf.candidate_name LIKE ?)")
+            needle = f"%{q}%"
+            params.extend([needle, needle, needle])
+        clause = " AND ".join(where)
+        with conn() as db:
+            total_actas = db.execute(
+                f"SELECT COUNT(*) c FROM ("
+                f"  SELECT d.document_id FROM documents d "
+                f"  JOIN vote_fields vf ON vf.document_id=d.document_id "
+                f"  WHERE {clause} GROUP BY d.document_id)",
+                params,
+            ).fetchone()["c"]
+            doc_rows = db.execute(
+                f"""
+                SELECT d.document_id, d.department_code, d.department_name,
+                       d.municipality_code, d.municipality_name, d.zone, d.puesto,
+                       d.mesa, d.place_name, d.official_lookup_url,
+                       MAX(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS flagged
+                FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
+                WHERE {clause}
+                GROUP BY d.document_id
+                ORDER BY flagged DESC, d.department_code, d.document_id
+                LIMIT ? OFFSET ?
+                """,
+                [*params, BROWSE_ACTAS_PER_PAGE, (page - 1) * BROWSE_ACTAS_PER_PAGE],
+            ).fetchall()
+            doc_ids = [r["document_id"] for r in doc_rows]
+            fields_by_doc: dict[str, list[dict]] = {}
+            all_keys: list[str] = []
+            if doc_ids:
+                ph = ",".join("?" for _ in doc_ids)
+                frows = db.execute(
+                    f"""
+                    SELECT vf.document_id, vf.page_number, vf.row_number, vf.section,
+                           vf.candidate_number, vf.candidate_name, vf.raw_crop_path,
+                           CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END AS algo_flagged
+                    FROM vote_fields vf
+                    WHERE vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL
+                      AND vf.document_id IN ({ph})
+                    ORDER BY vf.document_id, vf.page_number, vf.row_number
+                    """,
+                    doc_ids,
+                ).fetchall()
+                for fr in frows:
+                    fkey = field_key_of(fr["document_id"], fr["page_number"], fr["row_number"], fr["section"])
+                    all_keys.append(fkey)
+                    fields_by_doc.setdefault(fr["document_id"], []).append(
+                        {"row": fr, "field_key": fkey, "algo_flagged": bool(fr["algo_flagged"])}
+                    )
+            departments = _departments(db)
+        published = community.published_among(all_keys)
+        actas = []
+        for r in doc_rows:
+            crops = fields_by_doc.get(r["document_id"], [])
+            for c in crops:
+                c["published"] = c["field_key"] in published
+            actas.append({"doc": r, "crops": crops, "flagged": bool(r["flagged"])})
+        # Issue a stable session id so a subsequent flag POST has an identity.
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        response = templates.TemplateResponse(
+            request,
+            "browse.html",
+            {
+                "actas": actas,
+                "departments": departments,
+                "filters": {"department": department or "", "q": q or ""},
+                "page": page,
+                "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
+                "total": total_actas,
+                "turnstile_sitekey": poll_cfg.turnstile_sitekey,
+            },
+        )
+        if "sid" not in request.cookies:
+            response.set_cookie("sid", sid, max_age=60 * 60 * 24 * 365, httponly=True, samesite="lax")
+        return response
+
+    @app.post("/api/flag")
+    async def api_flag(request: Request, payload: dict = Body(...)):
+        field_key = str(payload.get("field_key", ""))
+        if not field_key:
+            raise HTTPException(status_code=400, detail="field_key required")
+
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        token = voter_token(poll_cfg.voter_salt, _client_ip(request), sid)
+
+        # Rate limit before any paid work or Turnstile round-trip.
+        if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+
+        if not verify_turnstile(poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)):
+            return _flag_response({"ok": False, "error": "captcha_failed"}, 403, sid, new_sid)
+
+        # Validate the field exists and resolve its crop (read-only results DB).
+        with conn() as db:
+            crop_rel = lookup_candidate_crop(db, field_key)
+        if not crop_rel:
+            raise HTTPException(status_code=404, detail="unknown field")
+        try:
+            crop_path = resolve_crop_path(crop_rel, output_dir)
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(status_code=404, detail="crop unavailable")
+
+        community.record_flag(field_key, token)
+        votes_at_call = community.try_claim_adjudication(
+            field_key, poll_cfg.threshold, poll_cfg.rescale_step
+        )
+        if votes_at_call is not None:
+            schedule_adjudication(field_key, crop_path, votes_at_call)
+
+        # Never leak the count or whether a review fired — the counter is private.
+        return _flag_response({"ok": True}, 200, sid, new_sid)
+
+    return app
+
+
+def _flag_response(body: dict, status: int, sid: str, set_sid: bool) -> JSONResponse:
+    response = JSONResponse(body, status_code=status)
+    if set_sid:
+        response.set_cookie("sid", sid, max_age=60 * 60 * 24 * 365, httponly=True, samesite="lax")
+    return response

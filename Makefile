@@ -7,6 +7,15 @@ RATE        ?= 120
 RETRY       ?= 5
 PY          := .venv/bin/python
 CLI         := $(PY) -m e14.cli
+DETECTOR    := .venv/bin/e14detector
+
+DETECTOR_OUTPUT ?= data/detector
+SAMPLE_LIMIT    ?= 38
+QWEN_CONCURRENCY ?= 12   # VLM pass is network-bound; serial (1) was the main slowdown
+REPORT_HOST     ?= 127.0.0.1
+REPORT_PORT     ?= 8001
+PDF             ?=
+DOC_ID          ?=
 
 DL_FLAGS = --concurrency $(CONCURRENCY) --rate $(RATE) --auto-retry $(RETRY)
 # Pipe only stdout (the summary) to the run log; leave stderr on the terminal so
@@ -15,7 +24,7 @@ DL_FLAGS = --concurrency $(CONCURRENCY) --rate $(RATE) --auto-retry $(RETRY)
 LOG      = | tee logs/run_$$(date +%Y%m%d_%H%M%S).log
 
 .DEFAULT_GOAL := help
-.PHONY: help setup universe run resume fresh retry stats dictionary package verify clean distclean
+.PHONY: help setup universe run resume fresh retry stats dictionary package verify clean distclean detector-sample detector-vlm detector-add detector-serve
 
 help: ## Show this help
 	@echo "E-14 Acta Scraper — targets:"
@@ -24,6 +33,12 @@ help: ## Show this help
 	@echo
 	@echo "Tunables: CONCURRENCY=$(CONCURRENCY) RATE=$(RATE) RETRY=$(RETRY)"
 	@echo "Example:  make fresh CONCURRENCY=96 RATE=200"
+	@echo
+	@echo "Detector tunables: SAMPLE_LIMIT=$(SAMPLE_LIMIT) DETECTOR_OUTPUT=$(DETECTOR_OUTPUT) QWEN_CONCURRENCY=$(QWEN_CONCURRENCY)"
+	@echo "Examples:"
+	@echo "  make detector-sample SAMPLE_LIMIT=38"
+	@echo "  make detector-add PDF=data/actas/29/022/000/01/E14_PRE_29_022_000_01_003_delegados.pdf DOC_ID=E14_PRE_29_022_000_01_003_delegados"
+	@echo "  make detector-serve REPORT_PORT=8001"
 
 setup: ## Create the venv and install dependencies (uv)
 	uv venv --python 3.12 .venv
@@ -70,6 +85,26 @@ verify: ## Verify downloaded PDFs against dist/VERIFICACION_SHA256.txt
 	@test -f dist/VERIFICACION_SHA256.txt || (echo "Run 'make package' first." && exit 1)
 	@cd data/actas && sha256sum -c ../../dist/VERIFICACION_SHA256.txt | tail -5
 	@echo ">> verify complete."
+
+detector-sample: ## Reprocess the detector sample, then run Qwen on queued candidate rows
+	$(DETECTOR) process --input-dir data/actas --output-dir $(DETECTOR_OUTPUT) --limit $(SAMPLE_LIMIT) --workers 4 --force
+	$(DETECTOR) vlm-review --provider qwen --output-dir $(DETECTOR_OUTPUT) --concurrency $(QWEN_CONCURRENCY)
+
+detector-vlm: ## Run Qwen review on queued candidate rows (optionally DOC_ID=...)
+	@if [ -n "$(DOC_ID)" ]; then \
+	  $(DETECTOR) vlm-review --provider qwen --output-dir $(DETECTOR_OUTPUT) --document-id "$(DOC_ID)" --concurrency $(QWEN_CONCURRENCY); \
+	else \
+	  $(DETECTOR) vlm-review --provider qwen --output-dir $(DETECTOR_OUTPUT) --concurrency $(QWEN_CONCURRENCY); \
+	fi
+
+detector-add: ## Add one acta: make detector-add PDF=... DOC_ID=...
+	@test -n "$(PDF)" || (echo "Set PDF=path/to/E14_PRE_..._delegados.pdf" && exit 1)
+	@test -n "$(DOC_ID)" || (echo "Set DOC_ID=E14_PRE_..._delegados" && exit 1)
+	$(DETECTOR) process-one --pdf "$(PDF)" --output-dir $(DETECTOR_OUTPUT)
+	$(DETECTOR) vlm-review --provider qwen --output-dir $(DETECTOR_OUTPUT) --document-id "$(DOC_ID)" --concurrency $(QWEN_CONCURRENCY)
+
+detector-serve: ## Serve the Spanish anomaly review report
+	$(DETECTOR) serve --host $(REPORT_HOST) --port $(REPORT_PORT) --output-dir $(DETECTOR_OUTPUT)
 
 clean: ## Remove downloaded actas + manifest (ASKS), keeps universe CSV
 	@printf "Delete data/actas + manifest (keep mesa_universe.csv)? type 'yes': " && read ans && [ "$$ans" = "yes" ] || (echo "aborted." && exit 1)
