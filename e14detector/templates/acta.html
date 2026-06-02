@@ -73,7 +73,7 @@
       {% set r = it.row %}
       <tr class="{% if it.strange %}flagged{% endif %}">
         <td class="who"><b>Candidato {{ r.candidate_number or r.row_number }}</b>{{ r.candidate_name or "" }}</td>
-        <td><img class="crop" loading="lazy" src="/crop?path={{ r.raw_crop_path|urlencode }}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
+        <td><img class="crop" loading="lazy" src="{% if it.crop_url %}{{ it.crop_url }}{% else %}/crop?path={{ r.raw_crop_path|urlencode }}{% endif %}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
         <td class="status">
           {% if it.published %}<span class="chip people">marcada como sospechosa</span>
           {% elif it.strange %}<span class="chip seed">para revisar</span>{% endif %}

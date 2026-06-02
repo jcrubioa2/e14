@@ -37,6 +37,11 @@ DEFAULT_RESULTS_JSONL = DEFAULT_OUTPUT_DIR / "results" / "results.jsonl"
 # rollout progress ("X de Y actas sincronizadas"); override per-deployment.
 NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
 
+# Base URL of the crop CDN (Fly Tigris / S3). When set, the public page serves crops
+# from "<CDN>/crops/<file>" instead of the in-app /crop endpoint (which can't scale to
+# ~1.58M files). Unset (the pilot) keeps the baked-in crops served via /crop.
+CDN_BASE_URL = os.environ.get("E14_CDN_BASE_URL", "").rstrip("/")
+
 DEFAULT_DPI = 300
 DEFAULT_WORKERS = 4
 DEFAULT_VLM_MODE = "off"

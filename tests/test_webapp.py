@@ -54,6 +54,35 @@ def test_browse_shows_national_sync_progress(tmp_path: Path, monkeypatch) -> Non
     asyncio.run(run())
 
 
+def test_acta_crop_src_uses_cdn_when_configured(tmp_path: Path, monkeypatch) -> None:
+    """With a CDN base set, crop <img> points at the CDN; unset falls back to /crop."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "abc.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc1", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    async def fetch() -> str:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            return (await client.get("/acta/doc1")).text
+
+    # Default: in-app /crop endpoint.
+    assert "/crop?path=" in asyncio.run(fetch())
+
+    # Configured: the CDN URL, keyed by the crops/ suffix.
+    monkeypatch.setattr(config, "CDN_BASE_URL", "https://cdn.example.com")
+    html = asyncio.run(fetch())
+    assert 'src="https://cdn.example.com/crops/abc.png"' in html
+    assert "/crop?path=" not in html
+
+
 def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"

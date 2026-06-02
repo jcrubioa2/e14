@@ -215,6 +215,21 @@ def _qualifying_docs(
     return rows, count_row["c"]
 
 
+def crop_cdn_url(raw_crop_path: str, cdn_base: str) -> str | None:
+    """Public URL for a crop on the CDN, or None when no CDN is configured.
+
+    All candidate crops live under ``<output_dir>/crops/``; the CDN key mirrors that
+    suffix (``crops/<file>``), so the uploader and the page agree regardless of whether
+    the stored path is absolute or relative. None => caller falls back to /crop.
+    """
+    if not cdn_base:
+        return None
+    s = str(raw_crop_path).replace("\\", "/")
+    idx = s.find("crops/")
+    key = s[idx:] if idx != -1 else s.lstrip("/")
+    return f"{cdn_base}/{key}"
+
+
 def resolve_crop_path(path: str, output_dir: Path) -> Path:
     output_dir = Path(output_dir).resolve()
     requested = Path(path)
@@ -693,7 +708,12 @@ def create_app(
         crops = []
         for fr in frows:
             fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
-            crops.append({"row": fr, "field_key": fkey, "algo_flagged": bool(fr["algo_flagged"])})
+            crops.append({
+                "row": fr,
+                "field_key": fkey,
+                "algo_flagged": bool(fr["algo_flagged"]),
+                "crop_url": crop_cdn_url(fr["raw_crop_path"], config.CDN_BASE_URL),
+            })
         keys = [c["field_key"] for c in crops]
         published = community.published_among(keys)
         cleared = community.cleared_among(keys)
