@@ -456,6 +456,35 @@ def test_flag_records_when_crop_is_not_on_local_disk(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_turnstile_enabled_rejects_missing_token(tmp_path: Path) -> None:
+    """When Turnstile is enabled, a flag without a token is rejected; disabled => ignored."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = output_dir / "crops" / "c.png"
+    crop.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (24, 16), (255, 255, 255)).save(crop)
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf"))
+    store.insert_vote_field(VoteField(document_id="doc1", page_number=1, row_type="candidate",
+                                      row_number=1, candidate_name="A", raw_crop_path=str(crop)))
+    store.commit(); store.close()
+    poll = PollConfig(threshold=3, rescale_step=2, appeal_threshold=3, appeal_rescale_step=2,
+                      rate_refill_per_min=10_000, rate_bucket=10_000, voter_salt="t",
+                      turnstile_secret="x", turnstile_enabled=True)
+    app = create_app(results_db=db, output_dir=output_dir,
+                     community_db=tmp_path / "community.sqlite", poll=poll)
+    fkey = field_key_of("doc1", 1, 1, None)
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await _flag(client, fkey, "10.0.0.1")  # no turnstile_token
+            assert r.status_code == 403
+            assert app.state.community.distinct_votes(fkey) == 0
+
+    asyncio.run(run())
+
+
 def test_form_token_roundtrip_and_timing() -> None:
     tok = issue_form_token("s", "sid1", now=1000.0)
     # Too fast (age 0.5s < 2s min) is rejected; aged enough passes.

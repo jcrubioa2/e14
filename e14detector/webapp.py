@@ -23,6 +23,7 @@ from .community import (
     field_key_of,
     issue_form_token,
     verify_form_token,
+    verify_turnstile,
     voter_token,
 )
 from .schemas import FieldClassification
@@ -972,6 +973,7 @@ def create_app(
                 "crops": crops,
                 "flagged": flagged,
                 "form_token": form_token,
+                "turnstile_sitekey": poll_cfg.turnstile_sitekey if poll_cfg.turnstile_enabled else "",
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/acta/{doc['document_id']}",
                 "page_title": f"Acta E-14 — {loc} | Veeduría ciudadana 2026",
@@ -1004,8 +1006,12 @@ def create_app(
             return _flag_response({"ok": True}, 200, sid, new_sid)  # shadow-drop the bot
         if bot:
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        if poll_cfg.turnstile_enabled and not verify_turnstile(
+            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
+        ):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
 
-        # Validate the field exists and resolve its crop (read-only results DB).
+        # Validate the field exists (read-only results DB).
         with conn() as db:
             looked = lookup_candidate_appeal(db, field_key)
         if not looked:
@@ -1052,6 +1058,10 @@ def create_app(
         if bot == "honeypot":
             return _flag_response({"ok": True}, 200, sid, new_sid)
         if bot:
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        if poll_cfg.turnstile_enabled and not verify_turnstile(
+            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
+        ):
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
 
         with conn() as db:

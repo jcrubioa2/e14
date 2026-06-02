@@ -144,6 +144,9 @@ RATE_BUCKET = float(os.environ.get("E14_RATE_BUCKET", "20"))
 # (local/dev), so the feature degrades gracefully offline.
 TURNSTILE_SECRET = os.environ.get("E14_TURNSTILE_SECRET", "")
 TURNSTILE_SITEKEY = os.environ.get("E14_TURNSTILE_SITEKEY", "")
+# Explicit master switch: Turnstile only works on the real owned domain (not *.fly.dev),
+# so keep it off until the custom domain serves and the widget is configured for it.
+TURNSTILE_ENABLED = os.environ.get("E14_TURNSTILE_ENABLED", "").lower() in ("1", "true", "yes")
 # Salt for the daily, rotating voter-identity hash (privacy: no raw IPs stored).
 VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
 # In-app bot check (replaces Turnstile when there is no owned domain). The acta page

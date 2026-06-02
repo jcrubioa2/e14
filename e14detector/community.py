@@ -159,6 +159,7 @@ class PollConfig:
     rate_bucket: float = 20.0
     turnstile_secret: str = ""
     turnstile_sitekey: str = ""
+    turnstile_enabled: bool = False
     voter_salt: str = "e14-dev-salt"
     # In-app bot check (no CAPTCHA, no domain). Empty secret => skip (tests/dev).
     form_token_secret: str = ""
@@ -176,6 +177,7 @@ class PollConfig:
             rate_bucket=config.RATE_BUCKET,
             turnstile_secret=config.TURNSTILE_SECRET,
             turnstile_sitekey=config.TURNSTILE_SITEKEY,
+            turnstile_enabled=config.TURNSTILE_ENABLED,
             voter_salt=config.VOTER_SALT,
             form_token_secret=config.FORM_TOKEN_SECRET,
             form_min_seconds=config.FORM_MIN_SECONDS,
