@@ -582,8 +582,9 @@ def test_flag_requires_valid_form_token_and_honeypot_drops_bots(tmp_path: Path) 
     asyncio.run(run())
 
 
-def test_voter_token_distinct_by_ip_and_session() -> None:
-    a = voter_token("salt", "1.1.1.1", "sidA", day="2026-06-01")
-    b = voter_token("salt", "2.2.2.2", "sidA", day="2026-06-01")
-    c = voter_token("salt", "1.1.1.1", "sidB", day="2026-06-01")
-    assert a != b and a != c and len({a, b, c}) == 3
+def test_voter_token_is_per_ip_per_day_not_per_cookie() -> None:
+    a = voter_token("salt", "1.1.1.1", day="2026-06-01")
+    assert voter_token("salt", "2.2.2.2", day="2026-06-01") != a   # different IP differs
+    assert voter_token("salt", "1.1.1.1", day="2026-06-02") != a   # rotates daily
+    # Same IP+day is stable — no session/cookie input, so clearing cookies can't re-vote.
+    assert voter_token("salt", "1.1.1.1", day="2026-06-01") == a

@@ -85,16 +85,17 @@ def field_key_of(document_id: str, page_number: int, row_number: int, section: s
     return f"{document_id}:{page_number}:{row_number}:{section or ''}"
 
 
-def voter_token(salt: str, client_ip: str, session_id: str, day: str | None = None) -> str:
-    """Daily-rotating, privacy-preserving voter identity.
+def voter_token(salt: str, client_ip: str, day: str | None = None) -> str:
+    """Daily-rotating, privacy-preserving voter identity — keyed on IP (not the cookie).
 
-    Hashing in a per-day bucket means no raw IP is stored and tokens naturally
-    expire, bounding the rate-bucket table. Best-effort only (true one-person-one-
-    vote needs accounts) — acceptable because crossing the threshold merely
-    triggers VLM adjudication, never publication.
+    Using the IP (not the session) means clearing cookies / incognito does NOT grant a
+    new vote; one identity per IP per day. Tradeoff: people sharing an IP (office/campus/
+    mobile NAT) count as one. Hashing in a per-day bucket stores no raw IP and lets tokens
+    expire. Best-effort only (true one-person-one-vote needs accounts) — acceptable because
+    crossing the threshold merely triggers VLM adjudication, never publication.
     """
     day = day or date.today().isoformat()
-    raw = f"{salt}|{day}|{client_ip}|{session_id}".encode("utf-8")
+    raw = f"{salt}|{day}|{client_ip}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 

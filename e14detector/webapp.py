@@ -1037,7 +1037,7 @@ def create_app(
 
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         new_sid = "sid" not in request.cookies
-        token = voter_token(poll_cfg.voter_salt, _client_ip(request), sid)
+        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
 
         # Rate limit before any paid work or Turnstile round-trip.
         if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
@@ -1092,7 +1092,7 @@ def create_app(
 
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         new_sid = "sid" not in request.cookies
-        token = voter_token(poll_cfg.voter_salt, _client_ip(request), sid)
+        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
 
         if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
