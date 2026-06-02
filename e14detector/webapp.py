@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import os
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -413,7 +414,34 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        # Optional: keep the served results DB in sync with the local writer via the
+        # object store (national rollout). Off unless E14_DB_SYNC is set, so the pilot
+        # and tests are unaffected. Failures only log — they never crash the app.
+        sync_task = None
+        if os.environ.get("E14_DB_SYNC", "").lower() in ("1", "true", "yes") and config.CDN_BASE_URL:
+            from .dbsync import refresh_db_once
+
+            interval = int(os.environ.get("E14_DB_SYNC_INTERVAL", "60"))
+
+            async def _pull() -> None:
+                await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
+
+            async def _sync_loop() -> None:
+                while True:
+                    await asyncio.sleep(interval)
+                    try:
+                        await _pull()
+                    except Exception as exc:  # noqa: BLE001 — never let sync crash serving
+                        print(f"db-sync: {exc}", flush=True)
+
+            try:  # initial pull so data is present at boot (bounded)
+                await asyncio.wait_for(_pull(), timeout=180)
+            except Exception as exc:  # noqa: BLE001
+                print(f"db-sync (initial): {exc}", flush=True)
+            sync_task = asyncio.create_task(_sync_loop())
         yield
+        if sync_task is not None:
+            sync_task.cancel()
         community.close()
 
     app = FastAPI(title="Revision de posibles irregularidades E-14", lifespan=lifespan)

@@ -115,6 +115,14 @@ def cmd_publish_crops(args: argparse.Namespace) -> int:
     return 1 if totals["failed"] else 0
 
 
+def cmd_publish_db(args: argparse.Namespace) -> int:
+    from .dbsync import publish_db
+
+    info = publish_db(output_dir=Path(args.output_dir), bucket=args.bucket)
+    print(f"published db: {info['key']} ({info['size']/1e6:.1f} MB, sha={info['sha256'][:12]})")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -268,6 +276,15 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--workers", type=int, default=16)
     publish.add_argument("--dry-run", action="store_true", help="count new crops without uploading")
     publish.set_defaults(func=cmd_publish_crops)
+
+    publish_db = sub.add_parser(
+        "publish-db",
+        help="snapshot the results DB and publish it + pointer to the object store "
+        "(the Fly app atomically swaps it in)",
+    )
+    publish_db.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    publish_db.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    publish_db.set_defaults(func=cmd_publish_db)
 
     serve = sub.add_parser("serve", help="serve a local anomaly review web app")
     serve.add_argument("--host", default="127.0.0.1")
