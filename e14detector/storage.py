@@ -296,6 +296,74 @@ class DetectorStore:
             (classification, confidence, raw_json, read_value, field_id),
         )
 
+    def flagged_candidate_fields(self, classes: tuple[str, ...]) -> list[sqlite3.Row]:
+        """Candidate rows whose screen verdict is in ``classes`` (the confirm-tier input)."""
+        ph = ",".join("?" for _ in classes)
+        return self.conn.execute(
+            "SELECT id, document_id, page_number, row_number, candidate_name, raw_crop_path, "
+            "enhanced_crop_path, debug_crop_path, final_classification, "
+            "slot_1_class, slot_2_class, slot_3_class "
+            f"FROM vote_fields WHERE row_type='candidate' AND vlm_classification IN ({ph})",
+            classes,
+        ).fetchall()
+
+    def set_field_classification(
+        self, field_id: int, classification: str, confidence: float, raw_json: str
+    ) -> None:
+        """Overwrite a row's verdict WITHOUT touching the vlm_reviews cache.
+
+        Used by the confirm tier: it calls a different model/prompt than the screen, so
+        caching under the same image hash would corrupt the screen cache. The vote_field
+        row is the authoritative seed state.
+        """
+        self.conn.execute(
+            "UPDATE vote_fields SET vlm_classification=?, vlm_confidence=?, vlm_raw_json=? WHERE id=?",
+            (classification, confidence, raw_json, field_id),
+        )
+
+    def candidate_crops_for_labeling(
+        self,
+        *,
+        only_unlabeled: bool = True,
+        only_flagged: bool = False,
+        department: str | None = None,
+    ) -> list[sqlite3.Row]:
+        """Candidate crops (id + identity + crop path) to hand to a local labeling pass."""
+        where = ["vf.row_type='candidate'", "vf.raw_crop_path IS NOT NULL"]
+        params: list[Any] = []
+        if only_flagged:
+            where.append("vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY')")
+        elif only_unlabeled:
+            where.append("vf.vlm_classification IS NULL")
+        if department:
+            where.append("(d.department_code=? OR d.department_name=?)")
+            params.extend([department, department])
+        clause = " AND ".join(where)
+        return self.conn.execute(
+            "SELECT vf.id, vf.document_id, vf.page_number, vf.row_number, vf.section, "
+            "vf.candidate_number, vf.candidate_name, vf.raw_crop_path, vf.vlm_classification "
+            "FROM vote_fields vf JOIN documents d ON d.document_id=vf.document_id "
+            f"WHERE {clause} ORDER BY vf.document_id, vf.page_number, vf.row_number",
+            params,
+        ).fetchall()
+
+    def candidate_id_for_crop(self, raw_crop_path: str) -> int | None:
+        row = self.conn.execute(
+            "SELECT id FROM vote_fields WHERE row_type='candidate' AND raw_crop_path=? LIMIT 1",
+            (raw_crop_path,),
+        ).fetchone()
+        return row["id"] if row else None
+
+    def candidate_id_for_key(
+        self, document_id: str, page_number: int, row_number: int, section: str | None
+    ) -> int | None:
+        row = self.conn.execute(
+            "SELECT id FROM vote_fields WHERE row_type='candidate' AND document_id=? "
+            "AND page_number=? AND row_number=? AND COALESCE(section,'')=? LIMIT 1",
+            (document_id, page_number, row_number, section or ""),
+        ).fetchone()
+        return row["id"] if row else None
+
     def insert_error(self, document_id: str | None, source_path: str, error_code: str, message: str) -> None:
         self.conn.execute(
             "INSERT INTO processing_errors (document_id,source_path,error_code,error_message) VALUES (?,?,?,?)",

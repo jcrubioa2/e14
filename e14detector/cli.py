@@ -85,6 +85,20 @@ def cmd_vlm_review(args: argparse.Namespace) -> int:
     return 1 if totals["failed"] else 0
 
 
+def cmd_vlm_confirm(args: argparse.Namespace) -> int:
+    from .vlm_review import run_seed_confirm
+
+    totals = run_seed_confirm(
+        output_dir=Path(args.output_dir),
+        confirm_model=args.model,
+        concurrency=args.concurrency,
+    )
+    print(
+        f"confirmed={totals['confirmed']} demoted={totals['demoted']} failed={totals['failed']}"
+    )
+    return 1 if totals["failed"] else 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -140,6 +154,35 @@ def cmd_crop_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_label_export(args: argparse.Namespace) -> int:
+    from .labeling import export_label_queue
+
+    queue_path, n = export_label_queue(
+        output_dir=Path(args.output_dir),
+        limit=args.limit,
+        only_flagged=args.only_flagged,
+        include_labeled=args.include_labeled,
+        department=args.department,
+        shuffle=args.shuffle,
+        seed=args.seed,
+    )
+    guide = queue_path.parent / "LABELING.md"
+    print(f"label queue: {n} crop(s) -> {queue_path}")
+    print(f"Hand this to a local Claude Code session: read {guide}, then run `label-import`.")
+    return 0
+
+
+def cmd_label_import(args: argparse.Namespace) -> int:
+    from .labeling import import_labels
+
+    t = import_labels(output_dir=Path(args.output_dir), labels_path=args.labels)
+    print(
+        f"labels applied: {t['dirty']} DIRTY (seeded), {t['clean']} CLEAN "
+        f"(confirmed) · skipped {t['skipped']} · unmatched {t['unmatched']}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="e14detector",
@@ -189,6 +232,16 @@ def build_parser() -> argparse.ArgumentParser:
     vlm.add_argument("--sample-rate", type=float, help="review every candidate in a deterministic fraction of documents (e.g. 0.05); implies --all-candidates")
     vlm.set_defaults(func=cmd_vlm_review)
 
+    confirm = sub.add_parser(
+        "vlm-confirm",
+        help="second tier: re-check only the screen-flagged crops with a precise model "
+        "(CLEAN demotes the seed, DIRTY keeps it)",
+    )
+    confirm.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    confirm.add_argument("--model", help=f"confirm model (default: {config.CONFIRM_MODEL})")
+    confirm.add_argument("--concurrency", type=int, default=config.VLM_CONCURRENCY)
+    confirm.set_defaults(func=cmd_vlm_confirm)
+
     serve = sub.add_parser("serve", help="serve a local anomaly review web app")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -214,6 +267,36 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--limit", type=int, help="maximum rows to include")
     audit.add_argument("--document-id", help="restrict to one document_id")
     audit.set_defaults(func=cmd_crop_audit)
+
+    label_export = sub.add_parser(
+        "label-export",
+        help="export a batch of candidate crops for a local Claude session to label as seeds",
+    )
+    label_export.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    label_export.add_argument("--limit", type=int, help="cap the number of crops to label")
+    label_export.add_argument("--department", help="restrict to one department (code or name)")
+    label_export.add_argument(
+        "--only-flagged", action="store_true",
+        help="export only crops the screen already flagged (audit Gemma's positives)",
+    )
+    label_export.add_argument(
+        "--include-labeled", action="store_true",
+        help="include crops that already have a verdict (default: only unlabeled)",
+    )
+    label_export.add_argument(
+        "--shuffle", action="store_true", help="random sample (use --seed for reproducibility)",
+    )
+    label_export.add_argument("--seed", type=int, default=0)
+    label_export.set_defaults(func=cmd_label_export)
+
+    label_import = sub.add_parser(
+        "label-import", help="apply local CLEAN/DIRTY labels to the results DB as seeds",
+    )
+    label_import.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    label_import.add_argument(
+        "--labels", help="labels JSONL (default: <output-dir>/review/label_done.jsonl)",
+    )
+    label_import.set_defaults(func=cmd_label_import)
 
     return parser
 

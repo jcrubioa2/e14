@@ -113,6 +113,82 @@ def _review_one(reviewer: VisionReviewer, row) -> dict:
     }
 
 
+def run_seed_confirm(
+    output_dir: Path,
+    confirm_model: str | None = None,
+    concurrency: int | None = None,
+    verbose: bool = True,
+) -> dict[str, int]:
+    """Second tier: re-check ONLY the screen-flagged crops with a precise model.
+
+    Uses the skeptical CONFIRM prompt. A CLEAN re-read demotes the seed to CLEAN (it
+    drops out of the public basis); a still-DIRTY read keeps it. Runs on the small
+    flagged subset only, so a strong model is affordable. Writes straight to the
+    vote_field row (never the screen cache).
+    """
+    from .vlm.prompt import VOTE_FIELD_CONFIRM_PROMPT
+
+    strange = (
+        FieldClassification.SUSPICIOUS_OVERLAP.value,
+        FieldClassification.DIGIT_SHAPE_ANOMALY.value,
+    )
+    store = DetectorStore(Path(output_dir) / "results" / "results.sqlite")
+    reviewer = build_reviewer(
+        "openrouter",
+        model=confirm_model or config.CONFIRM_MODEL,
+        max_tokens=config.CONFIRM_MAX_TOKENS,
+    )
+    workers = concurrency or config.VLM_CONCURRENCY
+    totals = {"confirmed": 0, "demoted": 0, "failed": 0}
+    try:
+        rows = store.flagged_candidate_fields(strange)
+        if verbose:
+            print(
+                f"seed-confirm: {len(rows)} flagged crop(s) -> {confirm_model or config.CONFIRM_MODEL} "
+                f"(concurrency={workers})",
+                flush=True,
+            )
+
+        def _confirm_one(row):
+            img = row["raw_crop_path"] or row["enhanced_crop_path"] or row["debug_crop_path"]
+            res = reviewer.review_vote_field([img], {}, prompt_text=VOTE_FIELD_CONFIRM_PROMPT)
+            keep = res.classification in (
+                FieldClassification.SUSPICIOUS_OVERLAP,
+                FieldClassification.DIGIT_SHAPE_ANOMALY,
+            )
+            return row, res, keep
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_confirm_one, r): r for r in rows}
+            for done, fut in enumerate(as_completed(futures), start=1):
+                row = futures[fut]
+                try:
+                    row, res, keep = fut.result()
+                except Exception as exc:
+                    store.insert_error(row["document_id"], "", "SEED_CONFIRM_FAILED", str(exc))
+                    totals["failed"] += 1
+                    continue
+                new_class = (
+                    res.classification.value if keep else FieldClassification.CLEAN.value
+                )
+                raw = json.dumps({"confirm_model": confirm_model or config.CONFIRM_MODEL,
+                                  "verdict": res.raw_json.get("verdict"), "kept": keep})
+                store.set_field_classification(row["id"], new_class, res.confidence, raw)
+                totals["confirmed" if keep else "demoted"] += 1
+                if verbose:
+                    print(
+                        f"seed-confirm: {done}/{len(rows)} {row['document_id']} row {row['row_number']} "
+                        f"-> {'KEEP' if keep else 'demote->CLEAN'}",
+                        flush=True,
+                    )
+                if done % 25 == 0:
+                    store.commit()
+        store.commit()
+    finally:
+        store.close()
+    return totals
+
+
 def run_vlm_review(
     output_dir: Path,
     provider: str | None = None,
