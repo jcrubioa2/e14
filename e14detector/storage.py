@@ -366,15 +366,14 @@ class DetectorStore:
         ).fetchone()
         return row["id"] if row else None
 
-    def candidate_id_for_key(
+    def candidate_row_for_key(
         self, document_id: str, page_number: int, row_number: int, section: str | None
-    ) -> int | None:
-        row = self.conn.execute(
-            "SELECT id FROM vote_fields WHERE row_type='candidate' AND document_id=? "
+    ) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT id, raw_crop_path FROM vote_fields WHERE row_type='candidate' AND document_id=? "
             "AND page_number=? AND row_number=? AND COALESCE(section,'')=? LIMIT 1",
             (document_id, page_number, row_number, section or ""),
         ).fetchone()
-        return row["id"] if row else None
 
     def insert_error(self, document_id: str | None, source_path: str, error_code: str, message: str) -> None:
         self.conn.execute(

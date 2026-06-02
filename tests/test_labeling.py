@@ -62,9 +62,12 @@ def test_import_seeds_dirty_and_confirms_clean(tmp_path: Path) -> None:
         ).fetchall()
     }
     store.close()
-    assert by_doc["doc-0"] == "SUSPICIOUS_OVERLAP"  # DIRTY -> public seed
-    assert by_doc["doc-1"] == "CLEAN"               # CLEAN -> confirmed clean
+    assert by_doc["doc-0"] == "SUSPICIOUS_OVERLAP"  # DIRTY -> public seed (uploaded)
+    assert by_doc["doc-1"] is None                  # CLEAN -> registry only, not in DB
     assert by_doc["doc-2"] is None                  # untouched
+    # Both labeled crops are in the registry (so they won't be re-selected).
+    reg = (output_dir / "review" / "labeled_crops.txt").read_text().split()
+    assert recs[0]["path"] in reg and recs[1]["path"] in reg
 
 
 def test_only_unlabeled_is_default(tmp_path: Path) -> None:
@@ -80,3 +83,27 @@ def test_only_unlabeled_is_default(tmp_path: Path) -> None:
     assert n == 2
     _, n_all = export_label_queue(output_dir, include_labeled=True)
     assert n_all == 3
+
+
+def test_clean_label_excluded_via_registry_and_batch_files_removed(tmp_path: Path) -> None:
+    """A CLEAN label (no DB row) is still not re-selected, and label_done.jsonl is removed."""
+    output_dir, db = _seed_store(tmp_path)
+    queue_path, n = export_label_queue(output_dir)
+    assert n == 3
+    recs = [json.loads(l) for l in queue_path.read_text().splitlines()]
+    labels = output_dir / "review" / "label_done.jsonl"
+    labels.write_text("\n".join(json.dumps({"path": r["path"], "label": "CLEAN"}) for r in recs))
+
+    totals = import_labels(output_dir)
+    assert totals == {"dirty": 0, "clean": 3, "skipped": 0, "unmatched": 0}
+    # Clean apply removed the transient batch files.
+    assert not labels.exists() and not queue_path.exists()
+    # No CLEAN verdicts written to the DB (nothing to upload).
+    store = DetectorStore(db)
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM vote_fields WHERE vlm_classification IS NOT NULL"
+    ).fetchone()[0] == 0
+    store.close()
+    # Re-export now finds nothing (all three are in the registry).
+    _, n2 = export_label_queue(output_dir)
+    assert n2 == 0

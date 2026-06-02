@@ -27,6 +27,10 @@ from .vlm.prompt import _RUBRIC
 QUEUE_NAME = "label_queue.jsonl"
 LABELS_NAME = "label_done.jsonl"
 GUIDE_NAME = "LABELING.md"
+# A CLEAN verdict needs no DB row and never ships — we only must avoid re-selecting that
+# crop. So CLEAN (and DIRTY) crop paths are recorded in this small local registry, which
+# label-export excludes. Only DIRTY also writes a seed verdict to the (uploaded) DB.
+LABELED_NAME = "labeled_crops.txt"
 
 # DIRTY seeds publicly (the generic "strange" class shown as "señalada para revisar");
 # CLEAN is recorded as confirmed-clean (never shown, and overrides a prior screen flag).
@@ -73,6 +77,12 @@ def export_label_queue(
         )
     finally:
         store.close()
+    # Skip crops already labeled (CLEAN lives only in this registry, not the DB) — unless
+    # we're deliberately re-evaluating one acta by id.
+    if document_id is None:
+        registry = labeled_registry(output_dir)
+        if registry:
+            rows = [r for r in rows if r["raw_crop_path"] not in registry]
     if shuffle:
         random.Random(seed).shuffle(rows)
     if limit is not None:
@@ -127,51 +137,79 @@ When done, the operator runs: `e14detector label-import --output-dir <dir>`
     )
 
 
-def _resolve_id(store: DetectorStore, rec: dict) -> int | None:
-    """Match a label record to a candidate row by crop path first, then field_key."""
+def _resolve(store: DetectorStore, rec: dict) -> tuple[int, str] | None:
+    """Match a label record to a candidate row; return (field_id, raw_crop_path)."""
     path = rec.get("path")
     if path:
         fid = store.candidate_id_for_crop(str(path))
         if fid is not None:
-            return fid
+            return fid, str(path)
     key = rec.get("field_key")
     if key and str(key).count(":") >= 3:
         document_id, page, row, section = str(key).rsplit(":", 3)
         try:
-            return store.candidate_id_for_key(document_id, int(page), int(row), section)
+            r = store.candidate_row_for_key(document_id, int(page), int(row), section)
         except ValueError:
             return None
-    # Legacy {document_id, row} (e.g. the gold set) — only safe when unambiguous; skip
-    # here since those records carry `path`, which the first branch already handled.
+        if r is not None and r["raw_crop_path"]:
+            return r["id"], r["raw_crop_path"]
     return None
 
 
+def labeled_registry(output_dir: Path) -> set[str]:
+    """Crop paths already labeled (CLEAN or DIRTY) — excluded from future exports."""
+    reg = Path(output_dir) / "review" / LABELED_NAME
+    return set(reg.read_text(encoding="utf-8").split()) if reg.exists() else set()
+
+
 def import_labels(output_dir: Path, labels_path: Path | None = None) -> dict[str, int]:
-    """Apply CLEAN/DIRTY labels to the results DB as seed verdicts."""
-    labels = Path(labels_path) if labels_path else Path(output_dir) / "review" / LABELS_NAME
+    """Apply labels: DIRTY -> seed verdict in the DB; CLEAN -> registry only (not uploaded).
+
+    Both are recorded in the local labeled-crops registry so they aren't re-selected. The
+    transient ``label_done.jsonl``/``label_queue.jsonl`` are removed after a clean apply.
+    """
+    output_dir = Path(output_dir)
+    labels = Path(labels_path) if labels_path else output_dir / "review" / LABELS_NAME
     if not labels.exists():
         raise FileNotFoundError(f"labels file not found: {labels}")
     totals = {"dirty": 0, "clean": 0, "skipped": 0, "unmatched": 0}
+    registry = output_dir / "review" / LABELED_NAME
+    already = labeled_registry(output_dir)
     store = DetectorStore(_results_db(output_dir))
+    # The crop run can hold the write lock for a full commit batch (~tens of seconds);
+    # wait it out rather than failing this tiny seed write.
+    store.conn.execute("PRAGMA busy_timeout=180000")
     try:
-        for line in labels.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            label = str(rec.get("label", "")).strip().upper()
-            if label not in ("CLEAN", "DIRTY"):
-                totals["skipped"] += 1
-                continue
-            fid = _resolve_id(store, rec)
-            if fid is None:
-                totals["unmatched"] += 1
-                continue
-            cls = _DIRTY_CLASS if label == "DIRTY" else _CLEAN_CLASS
-            raw = json.dumps({"source": "claude-local-label", "label": label})
-            store.set_field_classification(fid, cls, 1.0, raw)
-            totals["dirty" if label == "DIRTY" else "clean"] += 1
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        with registry.open("a", encoding="utf-8") as reg:
+            for line in labels.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                label = str(rec.get("label", "")).strip().upper()
+                if label not in ("CLEAN", "DIRTY"):
+                    totals["skipped"] += 1
+                    continue
+                resolved = _resolve(store, rec)
+                if resolved is None:
+                    totals["unmatched"] += 1
+                    continue
+                fid, crop_path = resolved
+                if label == "DIRTY":
+                    raw = json.dumps({"source": "claude-local-label", "label": "DIRTY"})
+                    store.set_field_classification(fid, _DIRTY_CLASS, 1.0, raw)
+                    totals["dirty"] += 1
+                else:
+                    totals["clean"] += 1  # CLEAN: no DB row, registry only
+                if crop_path not in already:
+                    reg.write(crop_path + "\n")
+                    already.add(crop_path)
         store.commit()
     finally:
         store.close()
+    # Drop the transient batch files once applied (the registry is the durable record).
+    if totals["unmatched"] == 0 and totals["skipped"] == 0:
+        labels.unlink(missing_ok=True)
+        (output_dir / "review" / QUEUE_NAME).unlink(missing_ok=True)
     return totals
