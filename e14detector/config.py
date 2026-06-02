@@ -132,6 +132,9 @@ APPEAL_RESCALE_STEP = int(os.environ.get("E14_APPEAL_RESCALE_STEP", str(POLL_RES
 # Optional override of the neutral appeal prompt (env). Empty = use the built-in
 # balanced VOTE_FIELD_APPEAL_PROMPT. Set this to tune leniency without a redeploy.
 APPEAL_PROMPT = os.environ.get("E14_APPEAL_PROMPT", "")
+# Same, for the live poll's CONFIRM prompt (the one that decides publish-as-strange).
+# Empty = built-in skeptical VOTE_FIELD_CONFIRM_PROMPT; set to make it stricter/looser.
+CONFIRM_PROMPT = os.environ.get("E14_CONFIRM_PROMPT", "")
 # Fraction of documents to pre-screen with the LLM (Gemma) in the national bulk
 # pass. CV is dropped; cropping runs on all files, Gemma only on this sample.
 LLM_SAMPLE_RATE = float(os.environ.get("E14_LLM_SAMPLE_RATE", "0.05"))

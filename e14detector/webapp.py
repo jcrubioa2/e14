@@ -552,7 +552,7 @@ def create_app(
         model is asked to judge independently (skeptical of the report) before we publish.
         """
         try:
-            result, digest = _review_crop(crop_rel, VOTE_FIELD_CONFIRM_PROMPT)
+            result, digest = _review_crop(crop_rel, config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT)
             community.record_verdict(field_key, result.classification in STRANGE_CLASSES, votes_at_call, digest)
         except Exception:
             # Transient failure (incl. crop fetch): roll the PENDING claim back so a later flag retries.
@@ -688,9 +688,10 @@ def create_app(
         # Models the operator can run on a crop. "" = the live poll model. Each can be run
         # as a dry preview, or "aplicar" to overwrite the actual verdict (record=1).
         review_models = [
-            ("en vivo", ""),
-            ("Sonnet", "anthropic/claude-sonnet-4.6"),
+            ("Haiku", "anthropic/claude-haiku-4.5"),
             ("Qwen", "qwen/qwen3-vl-8b-thinking"),
+            ("Gemma", "google/gemma-4-31b-it"),
+            ("Sonnet", "anthropic/claude-sonnet-4.6"),
         ]
         return templates.TemplateResponse(
             request,
@@ -716,10 +717,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown field")
         crop_rel, _ = looked
         prompt_text = {
-            "confirm": VOTE_FIELD_CONFIRM_PROMPT,
+            "confirm": config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT,
             "appeal": config.APPEAL_PROMPT or VOTE_FIELD_APPEAL_PROMPT,
             "screen": VOTE_FIELD_SCREEN_PROMPT,
-        }.get(prompt, VOTE_FIELD_CONFIRM_PROMPT)
+        }.get(prompt, config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT)
         reviewer = (
             build_reviewer("openrouter", model=model, max_tokens=config.LIVE_MAX_TOKENS)
             if model else get_reviewer()
