@@ -21,7 +21,7 @@ Goal: take the working 40-acta pilot to the **full 121,913-acta national univers
 - **Gold label set**: `data/detector/review/claude_labels.jsonl` — 104 crops, **103 CLEAN / 1 DIRTY**.
   Key finding: **real fraud base rate ≈ 1%** → seeds must be RARE; precision >> recall.
 
-## 🆕 Public rollout-progress banner (done locally, not yet deployed)
+## 🆕 Public rollout-progress banner (LIVE on e14-poll.fly.dev as of 2026-06-02)
 
 - `/browse` now shows a Spanish sync banner: **"X de 121.913 actas · Z%"**, a progress bar,
   **"Última actualización hace …"**, and **"Tiempo restante estimado ~…"** (hidden when the rate
@@ -30,9 +30,10 @@ Goal: take the working 40-acta pilot to the **full 121,913-acta national univers
   distinct actas with a candidate crop; last sync = `MAX(processing_timestamp)`; ETA from the
   timestamp span. **No publisher plumbing required** — it just grows as incremental DBs land.
 - Total comes from `config.NATIONAL_TOTAL_ACTAS` (env `E14_NATIONAL_TOTAL`, default 121913).
-- **Next:** deploy this so the live pilot already advertises the national rollout, then layer the
-  hourly publisher (Phase 3) underneath it. (Optional later: have the publisher stamp an explicit
-  "last published" time instead of relying on `processing_timestamp`.)
+- **Deployed** 2026-06-02 (shows "40 de 121.913 · 0.0% · Última actualización hace 15 horas").
+  Shipped alongside the silent most-voted ranking and the already-strange flag fix.
+- **Next:** layer the hourly publisher (Phase 3) underneath it. (Optional later: have the
+  publisher stamp an explicit "last published" time instead of relying on `processing_timestamp`.)
 
 ## 🆕 Local Claude labeling for the first seed pass (done locally)
 
