@@ -11,6 +11,9 @@ primary_region = 'dfw'
 [env]
   E14_COMMUNITY_DB = '/data/community.sqlite'
   E14_OPENROUTER_MODEL = 'anthropic/claude-haiku-4.5'
+  # Send a larger crop to the live model — at 256px the fine overlap detail is lost
+  # (the local full-res Claude read these correctly).
+  E14_QWEN_MAX_IMAGE_PX = '768'
   E14_SCREEN_MODEL = 'google/gemma-4-31b-it'
   E14_POLL_RESCALE_STEP = '5'
   E14_POLL_THRESHOLD = '5'
