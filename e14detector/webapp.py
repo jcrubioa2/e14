@@ -691,7 +691,6 @@ def create_app(
             ("Haiku", "anthropic/claude-haiku-4.5"),
             ("Qwen", "qwen/qwen3-vl-8b-thinking"),
             ("Gemma", "google/gemma-4-31b-it"),
-            ("Sonnet", "anthropic/claude-sonnet-4.6"),
         ]
         return templates.TemplateResponse(
             request,
