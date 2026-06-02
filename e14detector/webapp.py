@@ -685,8 +685,17 @@ def create_app(
             "clean": sum(r["vlm_state"] == "CLEAN" for r in rows),
             "cleared": sum(r["appeal_cleared"] for r in rows),
         }
+        # Models offered for on-demand "probar IA" comparison (the live model is the
+        # default link; these are alternatives to A/B against it).
+        review_models = [
+            ("Sonnet", "anthropic/claude-sonnet-4.6"),
+            ("Qwen", "qwen/qwen3-vl-8b-thinking"),
+        ]
         return templates.TemplateResponse(
-            request, "admin.html", {"rows": rows, "summary": summary, "key": key},
+            request,
+            "admin.html",
+            {"rows": rows, "summary": summary, "key": key,
+             "live_model": config.OPENROUTER_MODEL, "review_models": review_models},
         )
 
     @app.get("/admin/review")

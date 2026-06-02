@@ -30,7 +30,8 @@
 <body>
   <header>
     <h1>Panel de votación &mdash; operador</h1>
-    <div class="muted">Datos privados (conteos + veredictos de IA). No indexado. Casillas con actividad de la comunidad.</div>
+    <div class="muted">Datos privados (conteos + veredictos de IA). No indexado. Casillas con actividad de la comunidad.<br>
+      Modelo en vivo (poll): <b>{{ live_model }}</b> &middot; en cada fila puedes probar la IA en vivo o con otro modelo.</div>
     <div class="cards">
       <div class="card">campos<b>{{ summary.fields }}</b></div>
       <div class="card">votos totales<b>{{ summary.votes }}</b></div>
@@ -61,7 +62,8 @@
         <td class="muted">{{ r.image_hash }}</td>
         <td style="white-space:nowrap">
           <a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a> &middot;
-          <a href="/admin/review?key={{ key|urlencode }}&field_key={{ r.field_key|urlencode }}&prompt=confirm" target="_blank" rel="noopener">probar IA</a>
+          <a href="/admin/review?key={{ key|urlencode }}&field_key={{ r.field_key|urlencode }}&prompt=confirm" target="_blank" rel="noopener">IA</a>
+          {% for label, m in review_models %}&middot; <a href="/admin/review?key={{ key|urlencode }}&field_key={{ r.field_key|urlencode }}&prompt=confirm&model={{ m|urlencode }}" target="_blank" rel="noopener">{{ label }}</a>{% endfor %}
         </td>
       </tr>
       {% else %}
