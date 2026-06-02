@@ -4,41 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Acta {{ doc.document_id }} &mdash; Revisa los votos</title>
-  {% if turnstile_sitekey %}
   <script>
-    // Invisible Turnstile with EXPLICIT render so a fresh, single-use token is
-    // produced per flag (many buttons; tokens are one-shot + expire). execute() is
-    // serialized and reset() between uses so the next flag gets a new token.
-    window.__cfSitekey = "{{ turnstile_sitekey }}";
-    window.__cfWidget = null;
-    window.__cfPending = null;
-    window.__cfChain = Promise.resolve();
-    window.onloadTurnstile = function () {
-      window.__cfWidget = window.turnstile.render('#cf-widget', {
-        sitekey: window.__cfSitekey,
-        size: 'invisible',
-        execution: 'execute',
-        callback: function (t) { if (window.__cfPending) { window.__cfPending(t); window.__cfPending = null; } },
-        'error-callback': function () { if (window.__cfPending) { window.__cfPending(null); window.__cfPending = null; } },
-        'expired-callback': function () { if (window.__cfPending) { window.__cfPending(null); window.__cfPending = null; } },
-      });
-    };
-    window.getToken = function () {
-      const run = () => new Promise((resolve) => {
-        if (!window.turnstile || window.__cfWidget === null) { resolve(null); return; }
-        let done = false;
-        const finish = (tok) => { if (done) return; done = true; try { window.turnstile.reset(window.__cfWidget); } catch (e) {} resolve(tok); };
-        window.__cfPending = finish;
-        setTimeout(() => finish(null), 8000);
-        try { window.turnstile.execute(window.__cfWidget); } catch (e) { finish(null); }
-      });
-      const result = window.__cfChain.then(run, run);
-      window.__cfChain = result.catch(() => {});
-      return result;
-    };
+    // In-app bot check (no CAPTCHA): a signed token issued with this page load is sent
+    // back with each flag; the server rejects forged or impossibly-fast submits.
+    window.__formToken = "{{ form_token }}";
   </script>
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstile&render=explicit" async defer></script>
-  {% endif %}
   <style>
     :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ink:#202124; --accent:#0969da; }
     * { box-sizing: border-box; }
@@ -84,7 +54,6 @@
       {% if doc.zone %}zona {{ doc.zone }} &middot; {% endif %}{% if doc.puesto %}puesto {{ doc.puesto }} &middot; {% endif %}{% if doc.mesa %}mesa {{ doc.mesa }} &middot; {% endif %}{{ doc.document_id }}
       {% if doc.official_lookup_url %}<br><a href="{{ doc.official_lookup_url }}" target="_blank" rel="noopener">Ver el acta oficial en la Registradur&iacute;a &rarr;</a>{% endif %}
     </div>
-    {% if turnstile_sitekey %}<div id="cf-widget"></div>{% endif %}
   </header>
   <main>
     <div class="how">
@@ -92,6 +61,10 @@
       Si un n&uacute;mero te parece <b>alterado</b> &mdash; escrito encima de un punto o una raya, con forma extra&ntilde;a, retocado o sobrescrito &mdash; pulsa <b>&laquo;Marcar como extra&ntilde;o&raquo;</b>.
       No necesitas estar seguro: cuando varias personas marcan la misma casilla, se revisa autom&aacute;ticamente.
     </div>
+
+    <!-- Honeypot: hidden from people, but bots that fill every field will trip it. -->
+    <input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"
+           aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
 
     <table class="rows">
       {% for it in crops %}
@@ -121,12 +94,12 @@
     document.querySelectorAll('.flag').forEach((btn) => {
       btn.addEventListener('click', async () => {
         btn.disabled = true;
-        const token = window.getToken ? await window.getToken() : null;
+        const hp = document.getElementById('hp-website');
         try {
           const res = await fetch('/api/flag', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ field_key: btn.dataset.fieldKey, turnstile_token: token }),
+            body: JSON.stringify({ field_key: btn.dataset.fieldKey, form_token: window.__formToken, website: hp ? hp.value : '' }),
           });
           if (res.ok) { btn.textContent = '¡Gracias! Reportado'; }
           else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }
@@ -138,12 +111,12 @@
     document.querySelectorAll('.normal').forEach((btn) => {
       btn.addEventListener('click', async () => {
         btn.disabled = true;
-        const token = window.getToken ? await window.getToken() : null;
+        const hp = document.getElementById('hp-website');
         try {
           const res = await fetch('/api/appeal', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ field_key: btn.dataset.fieldKey, turnstile_token: token }),
+            body: JSON.stringify({ field_key: btn.dataset.fieldKey, form_token: window.__formToken, website: hp ? hp.value : '' }),
           });
           if (res.ok) { btn.textContent = '¡Gracias! Se revisar&aacute; de nuevo'; }
           else if (res.status === 429) { btn.textContent = 'Espera un momento…'; btn.disabled = false; }

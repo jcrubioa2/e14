@@ -15,7 +15,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from . import config
-from .community import CommunityStore, PollConfig, field_key_of, verify_turnstile, voter_token
+from .community import (
+    CommunityStore,
+    PollConfig,
+    field_key_of,
+    issue_form_token,
+    verify_form_token,
+    voter_token,
+)
 from .schemas import FieldClassification
 from .vlm.base import VisionReviewer
 from .vlm.factory import build_reviewer
@@ -584,8 +591,12 @@ def create_app(
             c["published"] = c["field_key"] in published and not c["cleared"]
             c["strange"] = (c["algo_flagged"] or c["published"]) and not c["cleared"]
         flagged = any(c["strange"] for c in crops)
-        # Issue a stable session id so a subsequent flag POST has an identity.
+        # Issue a stable session id so a subsequent flag POST has an identity, and a
+        # signed form token bound to it (the in-app bot check; no CAPTCHA needed).
         sid = request.cookies.get("sid") or uuid.uuid4().hex
+        form_token = (
+            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
+        )
         response = templates.TemplateResponse(
             request,
             "acta.html",
@@ -593,7 +604,7 @@ def create_app(
                 "doc": doc,
                 "crops": crops,
                 "flagged": flagged,
-                "turnstile_sitekey": poll_cfg.turnstile_sitekey,
+                "form_token": form_token,
             },
         )
         if "sid" not in request.cookies:
@@ -614,8 +625,11 @@ def create_app(
         if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
 
-        if not verify_turnstile(poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)):
-            return _flag_response({"ok": False, "error": "captcha_failed"}, 403, sid, new_sid)
+        bot = bot_check(payload, sid, poll_cfg)
+        if bot == "honeypot":
+            return _flag_response({"ok": True}, 200, sid, new_sid)  # shadow-drop the bot
+        if bot:
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
 
         # Validate the field exists and resolve its crop (read-only results DB).
         with conn() as db:
@@ -655,8 +669,11 @@ def create_app(
 
         if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        if not verify_turnstile(poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)):
-            return _flag_response({"ok": False, "error": "captcha_failed"}, 403, sid, new_sid)
+        bot = bot_check(payload, sid, poll_cfg)
+        if bot == "honeypot":
+            return _flag_response({"ok": True}, 200, sid, new_sid)
+        if bot:
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
 
         with conn() as db:
             looked = lookup_candidate_appeal(db, field_key)
@@ -682,6 +699,19 @@ def create_app(
         return _flag_response({"ok": True}, 200, sid, new_sid)
 
     return app
+
+
+def bot_check(payload: dict, sid: str, poll: PollConfig) -> str:
+    """In-app bot screen. Returns '' to proceed, 'honeypot' (silently drop a bot), or
+    'bad_token' (forged/missing/too-fast submit). Skipped when no form-token secret."""
+    if str(payload.get("website", "")).strip():
+        return "honeypot"  # a hidden field only bots fill
+    if poll.form_token_secret and not verify_form_token(
+        poll.form_token_secret, sid, payload.get("form_token"),
+        poll.form_min_seconds, poll.form_max_seconds,
+    ):
+        return "bad_token"
+    return ""
 
 
 def _flag_response(body: dict, status: int, sid: str, set_sid: bool) -> JSONResponse:

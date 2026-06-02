@@ -7,7 +7,14 @@ from pathlib import Path
 import httpx
 from PIL import Image
 
-from e14detector.community import CommunityStore, PollConfig, field_key_of, voter_token
+from e14detector.community import (
+    CommunityStore,
+    PollConfig,
+    field_key_of,
+    issue_form_token,
+    verify_form_token,
+    voter_token,
+)
 from e14detector.schemas import DocumentMetadata, FieldClassification, VoteField
 from e14detector.storage import DetectorStore
 from e14detector.vlm.base import VLMReviewResult
@@ -145,7 +152,7 @@ class _FakeReviewer:
         return VLMReviewResult(self.classification, 0.9, None, {}, "stub")
 
 
-def _build_app(tmp_path: Path, reviewer: _FakeReviewer, seed_strange: bool = False):
+def _build_app(tmp_path: Path, reviewer: _FakeReviewer, seed_strange: bool = False, form_secret: str = ""):
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     crop = output_dir / "crops" / "c.png"
@@ -172,7 +179,8 @@ def _build_app(tmp_path: Path, reviewer: _FakeReviewer, seed_strange: bool = Fal
 
     poll = PollConfig(threshold=3, rescale_step=2, appeal_threshold=3, appeal_rescale_step=2,
                       rate_refill_per_min=10_000, rate_bucket=10_000,
-                      turnstile_secret="", voter_salt="t")
+                      turnstile_secret="", voter_salt="t",
+                      form_token_secret=form_secret, form_min_seconds=0.0)
     app = create_app(results_db=db, output_dir=output_dir,
                      community_db=tmp_path / "community.sqlite", reviewer=reviewer, poll=poll)
     return app
@@ -289,6 +297,55 @@ def test_unknown_field_rejected_and_counter_never_leaked(tmp_path: Path) -> None
             ok = await _flag(client, field_key_of("doc1", 1, 1, None), "10.0.0.1")
             # The response body exposes no vote count — only an acknowledgement.
             assert set(ok.json().keys()) == {"ok"}
+
+    asyncio.run(run())
+
+
+def test_form_token_roundtrip_and_timing() -> None:
+    tok = issue_form_token("s", "sid1", now=1000.0)
+    # Too fast (age 0.5s < 2s min) is rejected; aged enough passes.
+    assert verify_form_token("s", "sid1", tok, min_age=2, max_age=3600, now=1000.5) is False
+    assert verify_form_token("s", "sid1", tok, min_age=2, max_age=3600, now=1005.0) is True
+    # Too old is rejected.
+    assert verify_form_token("s", "sid1", tok, min_age=2, max_age=10, now=1100.0) is False
+
+
+def test_form_token_rejects_forgery_and_wrong_session() -> None:
+    tok = issue_form_token("realsecret", "sid1", now=1000.0)
+    assert verify_form_token("realsecret", "sid1", "1000.deadbeefdeadbeef", 0, 3600, now=1005.0) is False
+    assert verify_form_token("wrongsecret", "sid1", tok, 0, 3600, now=1005.0) is False
+    assert verify_form_token("realsecret", "sid2", tok, 0, 3600, now=1005.0) is False
+
+
+def test_flag_requires_valid_form_token_and_honeypot_drops_bots(tmp_path: Path) -> None:
+    app = _build_app(tmp_path, _FakeReviewer(FieldClassification.CLEAN), form_secret="botsecret")
+    fkey = field_key_of("doc1", 1, 1, None)
+    community = app.state.community
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            # No token -> rejected, nothing recorded.
+            r = await client.post("/api/flag", json={"field_key": fkey}, headers={"x-forwarded-for": "10.0.0.1"})
+            assert r.status_code == 403 and r.json()["error"] == "invalid_request"
+            assert community.distinct_votes(fkey) == 0
+
+            # Real page load issues a valid token; flagging with it works.
+            page = (await client.get("/acta/doc1")).text
+            import re
+            tok = re.search(r'__formToken = "([^"]+)"', page).group(1)
+            sid = client.cookies.get("sid")
+            assert tok and sid
+            ok = await client.post("/api/flag", json={"field_key": fkey, "form_token": tok},
+                                   headers={"x-forwarded-for": "10.0.0.1"})
+            assert ok.json() == {"ok": True}
+            assert community.distinct_votes(fkey) == 1
+
+            # Honeypot filled -> looks like success to the bot, but no vote is recorded.
+            hp = await client.post("/api/flag", json={"field_key": fkey, "form_token": tok, "website": "x"},
+                                   headers={"x-forwarded-for": "10.0.0.2"})
+            assert hp.json() == {"ok": True}
+            assert community.distinct_votes(fkey) == 1  # unchanged
 
     asyncio.run(run())
 

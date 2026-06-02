@@ -124,6 +124,13 @@ TURNSTILE_SECRET = os.environ.get("E14_TURNSTILE_SECRET", "")
 TURNSTILE_SITEKEY = os.environ.get("E14_TURNSTILE_SITEKEY", "")
 # Salt for the daily, rotating voter-identity hash (privacy: no raw IPs stored).
 VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
+# In-app bot check (replaces Turnstile when there is no owned domain). The acta page
+# embeds a signed, timestamped token; the flag/appeal POST must echo it back un-forged
+# and no faster than FORM_MIN_SECONDS after load. Reuses the voter salt as the HMAC key
+# so no new secret is needed (it is already set in production).
+FORM_TOKEN_SECRET = os.environ.get("E14_FORM_TOKEN_SECRET", "") or VOTER_SALT
+FORM_MIN_SECONDS = float(os.environ.get("E14_FORM_MIN_SECONDS", "2"))
+FORM_MAX_SECONDS = float(os.environ.get("E14_FORM_MAX_SECONDS", "3600"))
 
 
 def ensure_output_dirs(output_dir: Path) -> None:

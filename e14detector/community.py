@@ -21,6 +21,7 @@ reassigned on every re-run).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import sqlite3
 import threading
 import time
@@ -97,6 +98,36 @@ def voter_token(salt: str, client_ip: str, session_id: str, day: str | None = No
     return hashlib.sha256(raw).hexdigest()
 
 
+def issue_form_token(secret: str, sid: str, now: float | None = None) -> str:
+    """Mint a signed, timestamped token embedded in the acta page.
+
+    No-domain replacement for a CAPTCHA: the token proves the submit came from a real
+    page load of ours (HMAC, un-forgeable) and carries the issue time so the server can
+    reject submits that arrive impossibly fast (scripts) — a timing + anti-forgery check.
+    """
+    ts = int(time.time() if now is None else now)
+    sig = hmac.new(secret.encode("utf-8"), f"{sid}|{ts}".encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    return f"{ts}.{sig}"
+
+
+def verify_form_token(
+    secret: str, sid: str, token: str | None, min_age: float, max_age: float, now: float | None = None
+) -> bool:
+    """True iff ``token`` is our un-tampered token for ``sid`` and aged within bounds."""
+    if not token or "." not in token:
+        return False
+    ts_str, _, sig = token.partition(".")
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        return False
+    expected = hmac.new(secret.encode("utf-8"), f"{sid}|{ts}".encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    if not hmac.compare_digest(sig, expected):
+        return False  # forged or wrong session
+    age = (time.time() if now is None else now) - ts
+    return min_age <= age <= max_age
+
+
 def verify_turnstile(secret: str, token: str | None, remote_ip: str | None = None) -> bool:
     """Verify a Cloudflare Turnstile token. Empty secret => skip (local/dev)."""
     if not secret:
@@ -129,6 +160,10 @@ class PollConfig:
     turnstile_secret: str = ""
     turnstile_sitekey: str = ""
     voter_salt: str = "e14-dev-salt"
+    # In-app bot check (no CAPTCHA, no domain). Empty secret => skip (tests/dev).
+    form_token_secret: str = ""
+    form_min_seconds: float = 2.0
+    form_max_seconds: float = 3600.0
 
     @classmethod
     def from_config(cls) -> "PollConfig":
@@ -142,6 +177,9 @@ class PollConfig:
             turnstile_secret=config.TURNSTILE_SECRET,
             turnstile_sitekey=config.TURNSTILE_SITEKEY,
             voter_salt=config.VOTER_SALT,
+            form_token_secret=config.FORM_TOKEN_SECRET,
+            form_min_seconds=config.FORM_MIN_SECONDS,
+            form_max_seconds=config.FORM_MAX_SECONDS,
         )
 
 
