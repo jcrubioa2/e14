@@ -61,9 +61,12 @@
         <td>{% if r.appeal_cleared %}s&iacute;{% endif %}</td>
         <td class="muted">{{ r.image_hash }}</td>
         <td style="white-space:nowrap">
-          <a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a> &middot;
-          <a href="/admin/review?key={{ key|urlencode }}&field_key={{ r.field_key|urlencode }}&prompt=confirm" target="_blank" rel="noopener">IA</a>
-          {% for label, m in review_models %}&middot; <a href="/admin/review?key={{ key|urlencode }}&field_key={{ r.field_key|urlencode }}&prompt=confirm&model={{ m|urlencode }}" target="_blank" rel="noopener">{{ label }}</a>{% endfor %}
+          <a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a><br>
+          {% set fk = r.field_key|urlencode %}
+          <span class="muted">probar:</span>
+          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&model={{ m|urlencode }}" target="_blank" rel="noopener">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}<br>
+          <span class="muted">aplicar:</span>
+          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&record=1&model={{ m|urlencode }}" target="_blank" rel="noopener" onclick="return confirm('Aplicar veredicto de {{ label }} a esta casilla?')">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}
         </td>
       </tr>
       {% else %}

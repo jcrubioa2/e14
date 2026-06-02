@@ -685,9 +685,10 @@ def create_app(
             "clean": sum(r["vlm_state"] == "CLEAN" for r in rows),
             "cleared": sum(r["appeal_cleared"] for r in rows),
         }
-        # Models offered for on-demand "probar IA" comparison (the live model is the
-        # default link; these are alternatives to A/B against it).
+        # Models the operator can run on a crop. "" = the live poll model. Each can be run
+        # as a dry preview, or "aplicar" to overwrite the actual verdict (record=1).
         review_models = [
+            ("en vivo", ""),
             ("Sonnet", "anthropic/claude-sonnet-4.6"),
             ("Qwen", "qwen/qwen3-vl-8b-thinking"),
         ]
