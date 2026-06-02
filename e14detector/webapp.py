@@ -677,6 +677,7 @@ def create_app(
         zone: str | None = None,
         puesto: str | None = None,
         q: str | None = None,
+        review: int = 0,
         page: int = Query(1, ge=1),
     ):
         # LEVEL 1: a browsable summary, one entry per ACTA (a polling table). Drill down
@@ -709,46 +710,62 @@ def create_app(
             params.extend([needle, needle, needle])
         clause = " AND ".join(where)
         any_filter = bool(department or municipality or zone or puesto or q)
+        offset = (page - 1) * BROWSE_ACTAS_PER_PAGE
         with conn() as db:
-            total_actas = db.execute(
-                f"SELECT COUNT(*) c FROM ("
-                f"  SELECT d.document_id FROM documents d "
-                f"  JOIN vote_fields vf ON vf.document_id=d.document_id "
-                f"  WHERE {clause} GROUP BY d.document_id)",
-                params,
-            ).fetchone()["c"]
-            # Ordering: the most-voted actas float to the very top (silently — crowd
-            # attention compounds), then the flagged seeds, then the rest by region.
-            # The voted rows are paginated as a prefix; the "rest" query excludes them.
             popularity = community.acta_popularity()
-            voted_rows, voted_ids = _voted_doc_rows(db, popularity, clause, params, VOTED_FLOAT_CAP)
-            offset = (page - 1) * BROWSE_ACTAS_PER_PAGE
-            head = voted_rows[offset : offset + BROWSE_ACTAS_PER_PAGE]
-            rest_rows: list = []
-            rest_count = BROWSE_ACTAS_PER_PAGE - len(head)
-            if rest_count > 0:
-                rest_clause, rest_params = clause, list(params)
-                if voted_ids:
-                    rest_clause += f" AND d.document_id NOT IN ({','.join('?' for _ in voted_ids)})"
-                    rest_params += voted_ids
-                rest_rows = db.execute(
-                    f"{_ACTA_SUMMARY_SELECT} WHERE {rest_clause} GROUP BY d.document_id "
-                    f"{_ACTA_FLAGGED_ORDER} LIMIT ? OFFSET ?",
-                    [*rest_params, rest_count, max(0, offset - len(voted_rows))],
+            if review:
+                # "Ver todas": only the actas worth reviewing — flagged seeds, crowd-
+                # published, or voted. A bounded set, so order + paginate in Python.
+                review_ids = set(popularity) | set(_published_count_by_doc())
+                id_list = list(review_ids)
+                ph = ",".join("?" for _ in id_list) or "NULL"
+                rows = db.execute(
+                    f"{_ACTA_SUMMARY_SELECT} WHERE {clause} GROUP BY d.document_id "
+                    f"HAVING SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) > 0 "
+                    f"   OR d.document_id IN ({ph})",
+                    [*params, *id_list],
                 ).fetchall()
-            doc_rows = list(head) + list(rest_rows)
+                rows.sort(key=lambda r: (
+                    -popularity.get(r["document_id"], 0),
+                    -(r["n_flagged"] or 0),
+                    r["department_code"] or "", r["document_id"],
+                ))
+                total_actas = len(rows)
+                doc_rows = rows[offset : offset + BROWSE_ACTAS_PER_PAGE]
+            else:
+                total_actas = db.execute(
+                    f"SELECT COUNT(*) c FROM ("
+                    f"  SELECT d.document_id FROM documents d "
+                    f"  JOIN vote_fields vf ON vf.document_id=d.document_id "
+                    f"  WHERE {clause} GROUP BY d.document_id)",
+                    params,
+                ).fetchone()["c"]
+                # Ordering: the most-voted actas float to the very top (silently — crowd
+                # attention compounds), then the flagged seeds, then the rest by region.
+                # The voted rows are paginated as a prefix; the "rest" query excludes them.
+                voted_rows, voted_ids = _voted_doc_rows(db, popularity, clause, params, VOTED_FLOAT_CAP)
+                head = voted_rows[offset : offset + BROWSE_ACTAS_PER_PAGE]
+                rest_rows: list = []
+                rest_count = BROWSE_ACTAS_PER_PAGE - len(head)
+                if rest_count > 0:
+                    rest_clause, rest_params = clause, list(params)
+                    if voted_ids:
+                        rest_clause += f" AND d.document_id NOT IN ({','.join('?' for _ in voted_ids)})"
+                        rest_params += voted_ids
+                    rest_rows = db.execute(
+                        f"{_ACTA_SUMMARY_SELECT} WHERE {rest_clause} GROUP BY d.document_id "
+                        f"{_ACTA_FLAGGED_ORDER} LIMIT ? OFFSET ?",
+                        [*rest_params, rest_count, max(0, offset - len(voted_rows))],
+                    ).fetchall()
+                doc_rows = list(head) + list(rest_rows)
             departments = _departments(db)
             # Dependent drop-downs: each level is populated only once its parent is chosen.
             municipios = _municipios(db, department)
             zonas = _zonas(db, department, municipality)
             puestos = _puestos(db, department, municipality, zone)
-            # Hotlist (page 1, unfiltered): the actas to review *now* — the ones
-            # people are flagging most, backfilled with Gemma's seed findings so the
-            # list is never empty. Gives them traction and shared attention. No vote
-            # numbers are shown (the counter stays private); it is a ranking only.
-            hotlist = []
-            if page == 1 and not any_filter:
-                hotlist = _build_hotlist(db, popularity)
+            # The "review now" hotlist is global (most-flagged/voted), shown on every
+            # browse view (not the dedicated review page, which already *is* that list).
+            hotlist = [] if review else _build_hotlist(db, popularity)
             progress = compute_sync_progress(db)
         pub_counts = _published_count_by_doc()
         # Appeals that reversed a Gemma seed: subtract them so a cleared false positive
@@ -784,6 +801,7 @@ def create_app(
                     "puesto": puesto or "",
                     "q": q or "",
                 },
+                "review": bool(review),
                 "page": page,
                 "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
                 "total": total_actas,

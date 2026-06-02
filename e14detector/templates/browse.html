@@ -38,7 +38,9 @@
     .chip.seed { border-color: #d4a72c; color: #7a5c00; background: #fff8e1; }
     .go { margin-left: auto; font-weight: 600; color: var(--accent); }
     .hot { border: 1px solid #f1d27a; background: #fffdf5; border-radius: 10px; padding: 14px; margin: 18px 0; }
+    .hot-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
     .hot h2 { margin: 0 0 4px; font-size: 16px; }
+    .hot-all { font-size: 13px; font-weight: 600; white-space: nowrap; }
     .hot .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
     .hot-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
     .hot-item { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; color: inherit; }
@@ -90,8 +92,11 @@
 
     {% if hotlist %}
     <section class="hot">
-      <h2>Actas para revisar ahora</h2>
-      <div class="sub">Las que la gente est&aacute; revisando y algunas que un an&aacute;lisis autom&aacute;tico se&ntilde;al&oacute;. &Aacute;brelas y ay&uacute;danos a confirmar.</div>
+      <div class="hot-head">
+        <h2>Actas para revisar ahora</h2>
+        <a class="hot-all" href="/browse?review=1" target="_blank" rel="noopener">Ver todas &rarr;</a>
+      </div>
+      <div class="sub">Las que la comunidad est&aacute; revisando con m&aacute;s atenci&oacute;n. &Aacute;brelas y ay&uacute;danos a confirmar.</div>
       <div class="hot-list">
         {% for h in hotlist %}
         {% set d = h.doc %}
@@ -105,7 +110,10 @@
     </section>
     {% endif %}
 
+    {% if review %}<h2 style="margin:0 0 6px">Todas las actas para revisar</h2>
+    <div class="muted" style="margin-bottom:12px">Las actas que la comunidad est&aacute; revisando con m&aacute;s atenci&oacute;n. Puedes filtrarlas por ubicaci&oacute;n.</div>{% endif %}
     <form class="filters" method="get" action="/browse" id="drill">
+      {% if review %}<input type="hidden" name="review" value="1">{% endif %}
       <label>Departamento
         <select name="department" data-level="0">
           <option value="">Todos</option>
@@ -181,7 +189,7 @@
       {% endfor %}
     </div>
 
-    {% set qs = "department=" ~ filters.department|urlencode ~ "&municipality=" ~ filters.municipality|urlencode ~ "&zone=" ~ filters.zone|urlencode ~ "&puesto=" ~ filters.puesto|urlencode ~ "&q=" ~ filters.q|urlencode %}
+    {% set qs = "department=" ~ filters.department|urlencode ~ "&municipality=" ~ filters.municipality|urlencode ~ "&zone=" ~ filters.zone|urlencode ~ "&puesto=" ~ filters.puesto|urlencode ~ "&q=" ~ filters.q|urlencode ~ ("&review=1" if review else "") %}
     <nav class="pager">
       {% if page > 1 %}<a href="/browse?{{ qs }}&page={{ page - 1 }}">&larr; Anterior</a>{% endif %}
       {% if page < pages %}<a href="/browse?{{ qs }}&page={{ page + 1 }}">Siguiente &rarr;</a>{% endif %}

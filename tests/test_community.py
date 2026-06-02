@@ -362,6 +362,44 @@ def test_browse_floats_most_voted_to_top_silently(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_review_page_lists_only_flagged_or_voted_and_hotlist_always_shows(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = output_dir / "crops" / "c.png"
+    crop.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (24, 16), (255, 255, 255)).save(crop)
+
+    store = DetectorStore(db)
+    for doc_id, klass in (("doc-seed", FieldClassification.SUSPICIOUS_OVERLAP), ("doc-voted", None), ("doc-plain", None)):
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf",
+                                               department_code="01", department_name="ANTIOQUIA"))
+        store.insert_vote_field(VoteField(
+            document_id=doc_id, page_number=1, row_type="candidate", row_number=1,
+            candidate_name="A", raw_crop_path=str(crop), vlm_classification=klass,
+        ))
+    store.commit()
+    store.close()
+
+    community = CommunityStore(tmp_path / "community.sqlite")
+    community.record_flag(field_key_of("doc-voted", 1, 1, None), "v1")
+    community.close()
+    app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "community.sqlite")
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            review = (await client.get("/browse?review=1")).text
+            assert "/acta/doc-seed" in review and "/acta/doc-voted" in review
+            assert "/acta/doc-plain" not in review  # plain acta is not "to review"
+
+            # Hotlist shows even when a filter is applied.
+            filtered = (await client.get("/browse?department=01")).text
+            assert "Actas para revisar ahora" in filtered
+            assert 'href="/browse?review=1"' in filtered  # "Ver todas" link present
+
+    asyncio.run(run())
+
+
 def test_form_token_roundtrip_and_timing() -> None:
     tok = issue_form_token("s", "sid1", now=1000.0)
     # Too fast (age 0.5s < 2s min) is rejected; aged enough passes.
