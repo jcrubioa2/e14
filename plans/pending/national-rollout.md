@@ -130,13 +130,26 @@ Ranking goal: flagged seeds first, **and the most-voted actas floated to the top
       logging to `logs/national_crop.log`. Directory walk = naturally department-grouped.
 - [ ] Monitor to ~1.58M: `find data/detector_national/crops -name '*candidate*' | wc -l`.
 
-### Phase 3 — the publisher loop (the "progressive" engine) — NEXT
-- [x] (3) Upload candidate crops → Tigris: `publish-crops` (incremental).
-- [ ] (1) Seed-pass new sampled actas (Gemma `vlm-review --sample-rate`, or local-Claude `label-*`).
+### Phase 3 — the publisher loop (the "progressive" engine)
+- [x] (3) Upload candidate crops → Tigris: `publish-crops` (incremental, manifest-skip).
+- [x] (4) **Ship the DB → Fly (BULLETPROOF, done):** `publish-db` snapshots via `VACUUM INTO`,
+      uploads a content-hashed immutable object, flips `db/latest.json` last. The Fly app
+      (env `E14_DB_SYNC=1`) polls the pointer, verifies sha256, and `os.replace()`s it in —
+      atomic swap, no torn reads, retries on failure, stdlib-only reader (no boto3 in image).
+- [ ] (1) Seed-pass new sampled actas (Gemma `vlm-review --all-candidates --limit N`, or `label-*`).
 - [ ] (2) Confirm-tier (`vlm-confirm`) over newly-flagged crops → demote false positives.
-- [ ] (4) **Ship new DB rows to the Fly volume** — DESIGN DECISION PENDING (see open questions):
-      sftp the sqlite via `flyctl ssh`, vs upload DB to Tigris + app-side pull/swap. Start simple.
-- [ ] Glue: a `cron`/`while` loop (or `/loop`) that runs the above each ~hour.
+- [ ] Glue loop (run on the PC once Tigris creds are in `.env`):
+      ```bash
+      while :; do
+        .venv/bin/e14detector vlm-review --provider openrouter --output-dir data/detector_national --all-candidates --limit 2000 --concurrency 32
+        .venv/bin/e14detector vlm-confirm   --output-dir data/detector_national
+        .venv/bin/e14detector publish-crops --output-dir data/detector_national
+        .venv/bin/e14detector publish-db    --output-dir data/detector_national
+        sleep 1800
+      done
+      ```
+- [ ] Fly env for national: `E14_DB_SYNC=1`, `E14_RESULTS_DB=/data/results.sqlite`,
+      `E14_OUTPUT_DIR=/data`, `E14_CDN_BASE_URL=https://<bucket>.fly.storage.tigris.dev`.
 
 ### Phase 4 — verify & harden
 - [ ] Watch the site grow each hour from a small first batch.
