@@ -684,6 +684,29 @@ def create_app(
         )
         return Response(body, media_type="application/xml")
 
+    @app.get("/api/places")
+    async def api_places(
+        department: str | None = None,
+        municipality: str | None = None,
+        zone: str | None = None,
+    ):
+        # Cascading drill-down options for the NEXT level — cheap (DISTINCT over the small
+        # documents table), so the dropdowns update without reloading the whole /browse page.
+        with conn() as db:
+            if department and municipality and zone:
+                opts = [{"value": r["puesto"], "label": r["puesto"]} for r in _puestos(db, department, municipality, zone)]
+            elif department and municipality:
+                opts = [{"value": r["zone"], "label": r["zone"]} for r in _zonas(db, department, municipality)]
+            elif department:
+                opts = [
+                    {"value": r["municipality_code"] or r["municipality_name"],
+                     "label": f"{r['municipality_code'] or ''} {r['municipality_name'] or ''}".strip()}
+                    for r in _municipios(db, department)
+                ]
+            else:
+                opts = []
+        return {"options": opts}
+
     @app.get("/api/flagged")
     async def api_flagged(
         department: str | None = None,

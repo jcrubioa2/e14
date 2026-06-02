@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -70,6 +71,13 @@ def test_browse_cascading_dropdowns(tmp_path: Path) -> None:
         # A child filter without its parent is ignored (not 500).
         html = await get("/browse?municipality=001")
         assert "/acta/doc-a" in html and "/acta/doc-c" in html
+
+        # The AJAX places endpoint returns the next level's options (no full reload).
+        places = json.loads(await get("/api/places?department=01"))
+        labels = {o["label"] for o in places["options"]}
+        assert "001 MEDELLIN" in labels and "088 BELLO" in labels
+        zonas = json.loads(await get("/api/places?department=01&municipality=001"))
+        assert any(o["value"] == "001" for o in zonas["options"])
 
     asyncio.run(run())
 

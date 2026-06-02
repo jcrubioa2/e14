@@ -169,17 +169,38 @@
       <button class="filter" type="submit">Filtrar</button>
     </form>
     <script>
-      // Cascading drill-down: changing a level clears the deeper levels and reloads, so
-      // the next drop-down is populated for the new selection (like the official site).
-      document.querySelectorAll('#drill select[data-level]').forEach((sel) => {
-        sel.addEventListener('change', () => {
-          const lvl = +sel.dataset.level;
-          document.querySelectorAll('#drill select[data-level]').forEach((s) => {
-            if (+s.dataset.level > lvl) s.value = '';
-          });
-          document.getElementById('drill').submit();
+      // Cascading drill-down WITHOUT reloading the page: changing a level fetches just the
+      // next level's options from /api/places and fills its dropdown. The acta list only
+      // reloads when you press "Filtrar" (avoids a heavy full-page render per selection).
+      const drill = document.getElementById('drill');
+      const sels = [...drill.querySelectorAll('select[data-level]')];
+      sels.forEach((sel) => sel.addEventListener('change', async () => {
+        const lvl = +sel.dataset.level;
+        sels.filter((s) => +s.dataset.level > lvl).forEach((s) => {
+          s.innerHTML = '<option value="">&mdash;</option>';
+          s.disabled = true;
         });
-      });
+        const next = sels.find((s) => +s.dataset.level === lvl + 1);
+        if (!next || !sel.value) return;
+        const p = new URLSearchParams();
+        if (sels[0].value) p.set('department', sels[0].value);
+        if (lvl >= 1 && sels[1].value) p.set('municipality', sels[1].value);
+        if (lvl >= 2 && sels[2].value) p.set('zone', sels[2].value);
+        next.disabled = true;
+        try {
+          const data = await (await fetch('/api/places?' + p)).json();
+          next.innerHTML = '';
+          const ph = document.createElement('option');
+          ph.value = ''; ph.textContent = data.options.length ? 'Todos' : '—';
+          next.appendChild(ph);
+          for (const o of data.options) {
+            const opt = document.createElement('option');
+            opt.value = o.value; opt.textContent = o.label;
+            next.appendChild(opt);
+          }
+          next.disabled = data.options.length === 0;
+        } catch (e) { next.disabled = false; }
+      }));
     </script>
 
     <div class="muted" style="margin-bottom:10px">{{ total }} acta(s) &middot; p&aacute;gina {{ page }} de {{ pages }}. Abre cualquier acta para ver sus casillas y marcar lo que se vea raro.</div>
