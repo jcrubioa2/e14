@@ -22,12 +22,14 @@ from .vlm.factory import build_reviewer
 STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.DIGIT_SHAPE_ANOMALY)
 # /browse paginates over ACTAS (grouped), not individual crops.
 BROWSE_ACTAS_PER_PAGE = 12
-# Silent prioritization signal: the Gemma (LLM) verdict, NOT CV. CV was dropped —
-# it over-fired (flagged plain placeholder dots) and biased the crowd. This only
-# orders actas; it is never shown to the public. Documents Gemma did not screen
-# (most, at a 5%% sample) have a NULL verdict and stay neutral.
+HOTLIST_SIZE = 8
+# The visible "basis" signal: a CONFIDENT Gemma verdict (not CV — CV was dropped for
+# over-firing on plain placeholder dots). The proactive Gemma pass seeds the first
+# batch of crops worth reviewing; these are shown ("para revisar") and sorted first.
+# UNCLEAR is treated as clean (not shown). Documents Gemma did not screen (most, at a
+# 5%% national sample) have a NULL verdict and stay neutral.
 _ALGO_FLAG_SQL = (
-    "(vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY','UNCLEAR'))"
+    "(vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY'))"
 )
 
 VISIBLE_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY", "UNCLEAR")
@@ -386,6 +388,37 @@ def create_app(
             counts[doc] = counts.get(doc, 0) + 1
         return counts
 
+    def _build_hotlist(db: sqlite3.Connection) -> list[dict]:
+        popularity = community.acta_popularity()
+        items: dict[str, dict] = {}
+        # Gemma's seed findings (the initial "stranges" to review).
+        for r in db.execute(
+            f"""
+            SELECT d.document_id, d.department_name, d.municipality_name, d.place_name,
+                   SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS g
+            FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
+            WHERE vf.row_type='candidate'
+            GROUP BY d.document_id HAVING g > 0
+            ORDER BY g DESC LIMIT 50
+            """
+        ).fetchall():
+            items[r["document_id"]] = {"doc": r, "pop": popularity.get(r["document_id"], 0), "seed": True}
+        # Popular actas the crowd is flagging (even if Gemma did not seed them).
+        for doc_id, votes in popularity.items():
+            if doc_id in items:
+                items[doc_id]["pop"] = votes
+                continue
+            dr = db.execute(
+                "SELECT document_id, department_name, municipality_name, place_name "
+                "FROM documents WHERE document_id=?",
+                (doc_id,),
+            ).fetchone()
+            if dr:
+                items[doc_id] = {"doc": dr, "pop": votes, "seed": False}
+        # Rank by popularity first (traction), then Gemma seeds; hide exact counts.
+        ranked = sorted(items.values(), key=lambda x: (x["pop"], x["seed"]), reverse=True)
+        return ranked[:HOTLIST_SIZE]
+
     @app.get("/browse")
     async def browse(
         request: Request,
@@ -430,6 +463,13 @@ def create_app(
                 [*params, BROWSE_ACTAS_PER_PAGE, (page - 1) * BROWSE_ACTAS_PER_PAGE],
             ).fetchall()
             departments = _departments(db)
+            # Hotlist (page 1, unfiltered): the actas to review *now* — the ones
+            # people are flagging most, backfilled with Gemma's seed findings so the
+            # list is never empty. Gives them traction and shared attention. No vote
+            # numbers are shown (the counter stays private); it is a ranking only.
+            hotlist = []
+            if page == 1 and not department and not q:
+                hotlist = _build_hotlist(db)
         pub_counts = _published_count_by_doc()
         actas = [
             {
@@ -445,6 +485,7 @@ def create_app(
             "browse.html",
             {
                 "actas": actas,
+                "hotlist": hotlist,
                 "departments": departments,
                 "filters": {"department": department or "", "q": q or ""},
                 "page": page,

@@ -54,6 +54,7 @@
     .chip { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; }
     .chip.alert { border-color: #f1a7a0; color: var(--bad); background: #fff1f0; }
     .chip.people { border-color: #b42318; color: #fff; background: #b42318; }
+    .chip.seed { border-color: #d4a72c; color: #7a5c00; background: #fff8e1; }
     table.rows { width: 100%; border-collapse: collapse; }
     table.rows td { border-top: 1px solid var(--line); padding: 10px 12px; vertical-align: middle; }
     tr.flagged { background: #fff7f6; }
@@ -71,7 +72,9 @@
 <body>
   <header>
     <div class="back"><a href="/browse">&larr; Volver a la lista de actas</a></div>
-    <h1>{{ doc.department_name or doc.department_code or "" }}{% if doc.municipality_name %} &middot; {{ doc.municipality_name }}{% endif %}</h1>
+    <h1>{{ doc.department_name or doc.department_code or "" }}{% if doc.municipality_name %} &middot; {{ doc.municipality_name }}{% endif %}
+      {% if flagged %}<span class="chip seed">se&ntilde;alada para revisar</span>{% endif %}
+    </h1>
     <div class="acta-meta">
       {% if doc.place_name %}{{ doc.place_name }}<br>{% endif %}
       {% if doc.zone %}zona {{ doc.zone }} &middot; {% endif %}{% if doc.puesto %}puesto {{ doc.puesto }} &middot; {% endif %}{% if doc.mesa %}mesa {{ doc.mesa }} &middot; {% endif %}{{ doc.document_id }}
@@ -89,11 +92,12 @@
     <table class="rows">
       {% for it in crops %}
       {% set r = it.row %}
-      <tr class="{% if it.published %}flagged{% endif %}">
+      <tr class="{% if it.published or it.algo_flagged %}flagged{% endif %}">
         <td class="who"><b>Candidato {{ r.candidate_number or r.row_number }}</b>{{ r.candidate_name or "" }}</td>
         <td><img class="crop" loading="lazy" src="/crop?path={{ r.raw_crop_path|urlencode }}" alt="votos del candidato {{ r.candidate_number or r.row_number }}"></td>
         <td class="status">
-          {% if it.published %}<span class="chip people">marcada como sospechosa</span>{% endif %}
+          {% if it.published %}<span class="chip people">marcada como sospechosa</span>
+          {% elif it.algo_flagged %}<span class="chip seed">para revisar</span>{% endif %}
         </td>
         <td class="act"><button class="flag" data-field-key="{{ it.field_key }}">Marcar como extra&ntilde;o</button></td>
       </tr>

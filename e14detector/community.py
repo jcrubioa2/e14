@@ -237,6 +237,16 @@ class CommunityStore:
                 "SELECT * FROM field_state WHERE field_key=?", (field_key,)
             ).fetchone()
 
+    def acta_popularity(self) -> dict[str, int]:
+        """Distinct voters who flagged anything in each acta (for the hotlist ranking)."""
+        voters: dict[str, set] = {}
+        with self._lock:
+            rows = self.conn.execute("SELECT field_key, voter_token FROM flags").fetchall()
+        for r in rows:
+            doc = r["field_key"].rsplit(":", 3)[0]
+            voters.setdefault(doc, set()).add(r["voter_token"])
+        return {doc: len(v) for doc, v in voters.items()}
+
     def published_keys(self) -> list[str]:
         """All field keys currently published as strange (few — only confirmed ones)."""
         with self._lock:

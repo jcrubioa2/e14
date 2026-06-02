@@ -32,7 +32,15 @@
     .chip { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; }
     .chip.alert { border-color: #f1a7a0; color: var(--bad); background: #fff1f0; }
     .chip.people { border-color: #b42318; color: #fff; background: #b42318; }
+    .chip.seed { border-color: #d4a72c; color: #7a5c00; background: #fff8e1; }
     .go { margin-left: auto; font-weight: 600; color: var(--accent); }
+    .hot { border: 1px solid #f1d27a; background: #fffdf5; border-radius: 10px; padding: 14px; margin: 18px 0; }
+    .hot h2 { margin: 0 0 4px; font-size: 16px; }
+    .hot .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+    .hot-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+    .hot-item { display: block; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fff; color: inherit; }
+    .hot-item:hover { border-color: var(--accent); text-decoration: none; }
+    .hot-title { font-weight: 600; font-size: 13px; }
     .pager { display: flex; gap: 12px; justify-content: flex-end; margin-top: 18px; }
     @media (max-width: 720px) { form.filters { grid-template-columns: 1fr; } .steps { grid-template-columns: 1fr; } }
   </style>
@@ -48,6 +56,23 @@
     </div>
   </header>
   <main>
+    {% if hotlist %}
+    <section class="hot">
+      <h2>Actas para revisar ahora</h2>
+      <div class="sub">Las que la gente est&aacute; revisando y algunas que un an&aacute;lisis autom&aacute;tico se&ntilde;al&oacute;. &Aacute;brelas y ay&uacute;danos a confirmar.</div>
+      <div class="hot-list">
+        {% for h in hotlist %}
+        {% set d = h.doc %}
+        <a class="hot-item" href="/acta/{{ d.document_id }}">
+          <div class="hot-title">{{ d.department_name or "" }}{% if d.municipality_name %} &middot; {{ d.municipality_name }}{% endif %}</div>
+          <div class="muted">{{ d.place_name or d.document_id }}</div>
+          {% if h.seed %}<span class="chip seed">se&ntilde;alada para revisar</span>{% endif %}
+        </a>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
     <form class="filters" method="get" action="/browse">
       <label>Departamento
         <select name="department">
@@ -76,7 +101,8 @@
         </div>
         <div class="badges">
           <span class="chip">{{ acta.n_candidates }} candidatos</span>
-          {% if acta.n_published %}<span class="chip people">marcada por la gente ({{ acta.n_published }})</span>{% endif %}
+          {% if acta.n_published %}<span class="chip people">marcada por la gente</span>
+          {% elif acta.n_flagged %}<span class="chip seed">se&ntilde;alada para revisar</span>{% endif %}
           <span class="go">Revisar &rarr;</span>
         </div>
       </a>
