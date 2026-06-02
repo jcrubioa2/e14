@@ -75,6 +75,8 @@ VLM_CONCURRENCY = int(os.environ.get("E14_VLM_CONCURRENCY", "16"))
 OPENROUTER_API_KEY = os.environ.get("E14_OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = os.environ.get("E14_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "qwen/qwen-2.5-vl-7b-instruct")
+# Cap the answer length (a CLEAN/DIRTY verdict is tiny) to cut latency + output cost.
+OPENROUTER_MAX_TOKENS = int(os.environ.get("E14_OPENROUTER_MAX_TOKENS", "40"))
 
 # --- Public community-flag poll --------------------------------------------
 # The public report lets anyone flag a candidate crop. Crossing the threshold only

@@ -59,6 +59,8 @@ class AlibabaQwenVisionReviewer:
         max_retries: int = 4,
         send_thinking: bool = True,
         send_response_format: bool = True,
+        max_tokens: int | None = None,
+        provider_routing: dict | None = None,
     ):
         if not api_key:
             raise ValueError("API key is required for the live VLM provider.")
@@ -74,6 +76,10 @@ class AlibabaQwenVisionReviewer:
         # them with a 400, so they can be suppressed per provider.
         self.send_thinking = send_thinking
         self.send_response_format = send_response_format
+        # Speed levers: cap output length, and (OpenRouter) route to the fastest
+        # provider. A verdict answer is tiny, so a low max_tokens cuts latency.
+        self.max_tokens = max_tokens
+        self.provider_routing = provider_routing
 
     def review_vote_field(
         self,
@@ -103,6 +109,10 @@ class AlibabaQwenVisionReviewer:
             # DashScope deep-thinking controls. A budget of 0 disables reasoning.
             payload["enable_thinking"] = budget > 0
             payload["thinking_budget"] = max(budget, 0)
+        if self.max_tokens:
+            payload["max_tokens"] = self.max_tokens
+        if self.provider_routing:
+            payload["provider"] = self.provider_routing  # OpenRouter routing hint
         text = self._post_with_retry(payload)
         return parse_vlm_json(text)
 

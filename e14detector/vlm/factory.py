@@ -37,5 +37,9 @@ def build_reviewer(provider: str | None = None) -> VisionReviewer:
             max_image_px=config.QWEN_MAX_IMAGE_PX,
             send_thinking=False,
             send_response_format=False,
+            # A CLEAN/DIRTY verdict is tiny — cap output and route OpenRouter to the
+            # fastest provider, since Gemma there is otherwise slow.
+            max_tokens=config.OPENROUTER_MAX_TOKENS,
+            provider_routing={"sort": "throughput"},
         )
     return MockVisionReviewer()

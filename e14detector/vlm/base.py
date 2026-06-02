@@ -37,7 +37,16 @@ def parse_vlm_json(text: str) -> VLMReviewResult:
         except json.JSONDecodeError as nested_exc:
             raise ValueError("VLM_INVALID_JSON") from nested_exc
     try:
-        classification = FieldClassification(str(payload["classification"]))
+        if "verdict" in payload and "classification" not in payload:
+            # Compact CLEAN/DIRTY prompt: DIRTY maps to the overlap fraud we target.
+            verdict = str(payload["verdict"]).strip().upper()
+            classification = (
+                FieldClassification.SUSPICIOUS_OVERLAP
+                if verdict.startswith("DIRTY")
+                else FieldClassification.CLEAN
+            )
+        else:
+            classification = FieldClassification(str(payload["classification"]))
     except Exception as exc:
         raise ValueError("VLM_INVALID_JSON") from exc
     confidence = float(payload.get("confidence", 0.0))
