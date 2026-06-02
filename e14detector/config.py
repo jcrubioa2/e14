@@ -37,6 +37,10 @@ DEFAULT_RESULTS_JSONL = DEFAULT_OUTPUT_DIR / "results" / "results.jsonl"
 # rollout progress ("X de Y actas sincronizadas"); override per-deployment.
 NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
 
+# A crop flagged by at least this many distinct voters gets a strong "muy reportada"
+# badge regardless of the model verdict (the crowd signal stands on its own).
+HIGH_VOTE_THRESHOLD = int(os.environ.get("E14_HIGH_VOTE_THRESHOLD", "100"))
+
 # Base URL of the crop CDN (Fly Tigris / S3). When set, the public page serves crops
 # from "<CDN>/crops/<file>" instead of the in-app /crop endpoint (which can't scale to
 # ~1.58M files). Unset (the pilot) keeps the baked-in crops served via /crop.

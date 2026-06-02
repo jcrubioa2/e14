@@ -774,12 +774,14 @@ def create_app(
         for key in community.cleared_keys():
             d = key.rsplit(":", 3)[0]
             cleared_by_doc[d] = cleared_by_doc.get(d, 0) + 1
+        high_voted_docs = {k.rsplit(":", 3)[0] for k in community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)}
         actas = [
             {
                 "doc": r,
                 "n_candidates": r["n_candidates"],
                 "n_flagged": max(0, (r["n_flagged"] or 0) - cleared_by_doc.get(r["document_id"], 0)),
                 "n_published": pub_counts.get(r["document_id"], 0),
+                "high_voted": r["document_id"] in high_voted_docs,
             }
             for r in doc_rows
         ]
@@ -841,12 +843,16 @@ def create_app(
         keys = [c["field_key"] for c in crops]
         published = community.published_among(keys)
         cleared = community.cleared_among(keys)
+        high_voted = community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)
         for c in crops:
             c["cleared"] = c["field_key"] in cleared
             # Shown as strange = a Gemma seed or a live-published crop, UNLESS an appeal
             # already cleared it. Only such crops expose the "Se ve normal" button.
             c["published"] = c["field_key"] in published and not c["cleared"]
             c["strange"] = (c["algo_flagged"] or c["published"]) and not c["cleared"]
+            # Independent crowd signal: flagged by many people, shown even if the model
+            # called it clean (and even if no appeal cleared it).
+            c["high_voted"] = c["field_key"] in high_voted
         flagged = any(c["strange"] for c in crops)
         # Issue a stable session id so a subsequent flag POST has an identity, and a
         # signed form token bound to it (the in-app bot check; no CAPTCHA needed).

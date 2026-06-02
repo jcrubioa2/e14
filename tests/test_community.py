@@ -400,6 +400,43 @@ def test_review_page_lists_only_flagged_or_voted_and_hotlist_always_shows(tmp_pa
     asyncio.run(run())
 
 
+def test_high_vote_label_shows_even_when_model_clean(tmp_path: Path, monkeypatch) -> None:
+    from e14detector import config
+    monkeypatch.setattr(config, "HIGH_VOTE_THRESHOLD", 3)
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = output_dir / "crops" / "c.png"
+    crop.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (24, 16), (255, 255, 255)).save(crop)
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf"))
+    store.insert_vote_field(VoteField(  # model says nothing (clean / unseeded)
+        document_id="doc1", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    community = CommunityStore(tmp_path / "community.sqlite")
+    fkey = field_key_of("doc1", 1, 1, None)
+    for i in range(3):  # 3 distinct voters >= threshold
+        community.record_flag(fkey, f"voter{i}")
+    community.close()
+    app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "community.sqlite")
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            acta = (await client.get("/acta/doc1")).text
+            assert "muy reportada por la comunidad" in acta
+            assert 'chip seed">para revisar' not in acta  # not a seed; crowd label stands alone
+            browse = (await client.get("/browse")).text
+            assert "muy reportada por la comunidad" in browse
+
+    asyncio.run(run())
+
+
 def test_form_token_roundtrip_and_timing() -> None:
     tok = issue_form_token("s", "sid1", now=1000.0)
     # Too fast (age 0.5s < 2s min) is rejected; aged enough passes.

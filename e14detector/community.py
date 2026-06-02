@@ -411,6 +411,17 @@ class CommunityStore:
                 "SELECT * FROM field_state WHERE field_key=?", (field_key,)
             ).fetchone()
 
+    def high_voted_fields(self, threshold: int) -> set[str]:
+        """Field keys flagged by >= ``threshold`` distinct voters — a strong crowd signal,
+        independent of any model verdict. Few crops reach this, so the set is small."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT field_key FROM flags GROUP BY field_key "
+                "HAVING COUNT(DISTINCT voter_token) >= ?",
+                (threshold,),
+            ).fetchall()
+        return {r["field_key"] for r in rows}
+
     def acta_popularity(self) -> dict[str, int]:
         """Distinct voters who flagged anything in each acta (for the hotlist ranking)."""
         voters: dict[str, set] = {}
