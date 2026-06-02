@@ -140,22 +140,27 @@ def cmd_publish_loop(args: argparse.Namespace) -> int:
     last_db = 0.0
     while True:
         started = time.time()
-        crops = publish_crops(output_dir, bucket=args.bucket, workers=args.workers, verbose=False)
-        # Decoupled cadence: upload crops every tick (cheap delta), but republish the DB
-        # only every --db-interval (the gzipped snapshot is the bigger transfer).
-        db_note = "db not due"
-        if args.once or (time.time() - last_db) >= args.db_interval:
-            info = publish_db(output_dir, bucket=args.bucket, only_uploaded=True, verbose=False)
-            if info is not None:
-                last_db = time.time()
-                db_note = f"frontier {info['kept']} actas (sha {info['sha256'][:8]})"
-            else:
-                db_note = "frontier empty"
-        print(
-            f"[publish-loop] +{crops['uploaded']} crops (fail {crops['failed']}) · "
-            f"{db_note} · {time.time()-started:.0f}s",
-            flush=True,
-        )
+        try:
+            crops = publish_crops(output_dir, bucket=args.bucket, workers=args.workers,
+                                  limit=args.upload_limit, verbose=False)
+            # Decoupled cadence: upload crops every tick (cheap delta), but republish the DB
+            # only every --db-interval (the gzipped snapshot is the bigger transfer).
+            db_note = "db not due"
+            if args.once or (time.time() - last_db) >= args.db_interval:
+                info = publish_db(output_dir, bucket=args.bucket, only_uploaded=True, verbose=False)
+                if info is not None:
+                    last_db = time.time()
+                    db_note = f"frontier {info['kept']} actas (sha {info['sha256'][:8]})"
+                else:
+                    db_note = "frontier empty"
+            print(
+                f"[publish-loop] +{crops['uploaded']} crops (fail {crops['failed']}) · "
+                f"{db_note} · {time.time()-started:.0f}s",
+                flush=True,
+            )
+        except Exception as exc:  # never let one bad cycle kill the loop
+            print(f"[publish-loop] cycle error ({type(exc).__name__}): {exc} · "
+                  f"{time.time()-started:.0f}s — continuing", flush=True)
         if args.once:
             return 0
         time.sleep(args.interval)
@@ -336,6 +341,8 @@ def build_parser() -> argparse.ArgumentParser:
     publish_loop.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
     publish_loop.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
     publish_loop.add_argument("--workers", type=int, default=32, help="crop upload concurrency")
+    publish_loop.add_argument("--upload-limit", type=int, default=12000,
+                              help="max crops uploaded per cycle (caps cycle time so the frontier publishes often)")
     publish_loop.add_argument("--interval", type=int, default=60, help="seconds between crop-upload ticks")
     publish_loop.add_argument("--db-interval", type=int, default=300, help="seconds between DB publishes")
     publish_loop.add_argument("--once", action="store_true", help="run a single cycle and exit")

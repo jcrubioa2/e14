@@ -23,8 +23,13 @@ def _results_db(output_dir: Path) -> Path:
     return Path(output_dir) / "results" / "results.sqlite"
 
 
-def crop_upload_plan(output_dir: Path) -> list[tuple[Path, str]]:
-    """(local_path, object_key) for every candidate crop that exists on disk."""
+def crop_upload_plan(output_dir: Path, skip_keys: set[str] | None = None) -> list[tuple[Path, str]]:
+    """(local_path, object_key) for candidate crops that need uploading.
+
+    ``skip_keys`` (already-uploaded keys) are skipped BEFORE touching the filesystem, so
+    enumeration is O(new crops) not O(all crops) — critical once the manifest is large.
+    """
+    skip_keys = skip_keys or set()
     store = DetectorStore(_results_db(output_dir))
     try:
         paths = store.candidate_crop_paths()
@@ -33,16 +38,16 @@ def crop_upload_plan(output_dir: Path) -> list[tuple[Path, str]]:
     plan: list[tuple[Path, str]] = []
     out = Path(output_dir)
     for p in paths:
+        key = crop_key(p)
+        if key in skip_keys:
+            continue  # already uploaded — don't even stat it
         local = Path(p)
         if not local.is_absolute():
-            # Stored relative (e.g. "data/detector_national/crops/x.png"); try as-is and
-            # under the output dir's parent layout.
             local = local if local.exists() else (out / Path(p).name)
         if not local.exists():
-            # Last resort: <output_dir>/<crops/...> from the key suffix.
-            local = out / crop_key(p)
+            local = out / key
         if local.exists():
-            plan.append((local, crop_key(p)))
+            plan.append((local, key))
     return plan
 
 
@@ -84,16 +89,15 @@ def publish_crops(
         raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
     manifest = manifest or (output_dir / "review" / "uploaded_crops.txt")
 
-    plan = crop_upload_plan(output_dir)
     done = _load_manifest(manifest)
-    pending = [(p, k) for (p, k) in plan if k not in done]
+    pending = crop_upload_plan(output_dir, skip_keys=done)  # only crops not yet uploaded
     if limit is not None:
         pending = pending[:limit]
-    totals = {"uploaded": 0, "skipped": len(plan) - len(pending), "failed": 0}
+    totals = {"uploaded": 0, "skipped": len(done), "failed": 0}
 
     if verbose:
         print(
-            f"publish-crops: {len(plan)} candidate crop(s), {len(pending)} new "
+            f"publish-crops: {len(pending)} new crop(s) "
             f"-> bucket={bucket or '(dry-run)'}{' [dry-run]' if dry_run else ''}",
             flush=True,
         )

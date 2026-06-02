@@ -151,7 +151,9 @@ def publish_db(
         # gzip the snapshot — a paths/metadata DB (mostly NULL columns + repetitive crop
         # paths) compresses ~10x, so the upload is far smaller and cycles stay short.
         gz = Path(str(snap) + ".gz")
-        with open(snap, "rb") as f_in, gzip.open(gz, "wb", compresslevel=6) as f_out:
+        # Level 1: ~3-4x faster than 6 for a small size penalty — the snapshot grows with
+        # the rollout, so keep per-cycle compression cheap (the reader auto-detects level).
+        with open(snap, "rb") as f_in, gzip.open(gz, "wb", compresslevel=1) as f_out:
             shutil.copyfileobj(f_in, f_out, 1 << 20)
         raw_size, gz_size = snap.stat().st_size, gz.stat().st_size
         if verbose:
