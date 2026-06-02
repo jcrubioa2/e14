@@ -176,6 +176,42 @@ def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def _municipios(conn: sqlite3.Connection, department: str | None) -> list[sqlite3.Row]:
+    if not department:
+        return []
+    return conn.execute(
+        "SELECT municipality_code, municipality_name FROM documents "
+        "WHERE (department_code=? OR department_name=?) "
+        "AND (municipality_code IS NOT NULL OR municipality_name IS NOT NULL) "
+        "GROUP BY municipality_code, municipality_name ORDER BY municipality_code, municipality_name",
+        (department, department),
+    ).fetchall()
+
+
+def _zonas(conn: sqlite3.Connection, department: str | None, municipality: str | None) -> list[sqlite3.Row]:
+    if not (department and municipality):
+        return []
+    return conn.execute(
+        "SELECT DISTINCT zone FROM documents "
+        "WHERE (department_code=? OR department_name=?) AND (municipality_code=? OR municipality_name=?) "
+        "AND zone IS NOT NULL AND zone<>'' ORDER BY zone",
+        (department, department, municipality, municipality),
+    ).fetchall()
+
+
+def _puestos(
+    conn: sqlite3.Connection, department: str | None, municipality: str | None, zone: str | None
+) -> list[sqlite3.Row]:
+    if not (department and municipality and zone):
+        return []
+    return conn.execute(
+        "SELECT DISTINCT puesto FROM documents "
+        "WHERE (department_code=? OR department_name=?) AND (municipality_code=? OR municipality_name=?) "
+        "AND zone=? AND puesto IS NOT NULL AND puesto<>'' ORDER BY puesto",
+        (department, department, municipality, municipality, zone),
+    ).fetchall()
+
+
 def _qualifying_docs(
     conn: sqlite3.Connection,
     department: str | None,
@@ -635,22 +671,42 @@ def create_app(
     async def browse(
         request: Request,
         department: str | None = None,
+        municipality: str | None = None,
+        zone: str | None = None,
+        puesto: str | None = None,
         q: str | None = None,
         page: int = Query(1, ge=1),
     ):
-        # LEVEL 1: a browsable summary, one entry per ACTA (a polling table). Actas the
-        # automatic pipeline flagged come first. Click through to /acta/{id} to see the
-        # candidate crops and flag them. Acta identity stays visible (no anonymization).
+        # LEVEL 1: a browsable summary, one entry per ACTA (a polling table). Drill down
+        # department -> municipio -> zona -> puesto (like the official site). Actas the
+        # crowd/algorithm flagged float to the top. Acta identity stays visible.
+        # Cascading: ignore a child filter whose parent isn't set.
+        if not department:
+            municipality = zone = puesto = None
+        elif not municipality:
+            zone = puesto = None
+        elif not zone:
+            puesto = None
         where = ["vf.row_type='candidate'", "vf.raw_crop_path IS NOT NULL"]
         params: list[Any] = []
         if department:
             where.append("(d.department_code=? OR d.department_name=?)")
             params.extend([department, department])
+        if municipality:
+            where.append("(d.municipality_code=? OR d.municipality_name=?)")
+            params.extend([municipality, municipality])
+        if zone:
+            where.append("d.zone=?")
+            params.append(zone)
+        if puesto:
+            where.append("d.puesto=?")
+            params.append(puesto)
         if q:
             where.append("(d.document_id LIKE ? OR d.place_name LIKE ? OR d.municipality_name LIKE ?)")
             needle = f"%{q}%"
             params.extend([needle, needle, needle])
         clause = " AND ".join(where)
+        any_filter = bool(department or municipality or zone or puesto or q)
         with conn() as db:
             total_actas = db.execute(
                 f"SELECT COUNT(*) c FROM ("
@@ -680,12 +736,16 @@ def create_app(
                 ).fetchall()
             doc_rows = list(head) + list(rest_rows)
             departments = _departments(db)
+            # Dependent drop-downs: each level is populated only once its parent is chosen.
+            municipios = _municipios(db, department)
+            zonas = _zonas(db, department, municipality)
+            puestos = _puestos(db, department, municipality, zone)
             # Hotlist (page 1, unfiltered): the actas to review *now* — the ones
             # people are flagging most, backfilled with Gemma's seed findings so the
             # list is never empty. Gives them traction and shared attention. No vote
             # numbers are shown (the counter stays private); it is a ranking only.
             hotlist = []
-            if page == 1 and not department and not q:
+            if page == 1 and not any_filter:
                 hotlist = _build_hotlist(db, popularity)
             progress = compute_sync_progress(db)
         pub_counts = _published_count_by_doc()
@@ -712,7 +772,16 @@ def create_app(
                 "hotlist": hotlist,
                 "progress": progress,
                 "departments": departments,
-                "filters": {"department": department or "", "q": q or ""},
+                "municipios": municipios,
+                "zonas": zonas,
+                "puestos": puestos,
+                "filters": {
+                    "department": department or "",
+                    "municipality": municipality or "",
+                    "zone": zone or "",
+                    "puesto": puesto or "",
+                    "q": q or "",
+                },
                 "page": page,
                 "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
                 "total": total_actas,

@@ -18,6 +18,62 @@ def _crop(path: Path) -> Path:
     return path
 
 
+def test_browse_cascading_dropdowns(tmp_path: Path) -> None:
+    """Department -> Municipio -> Zona -> Puesto populate only once the parent is chosen."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    # Two departments; ANTIOQUIA has Medellin z001/p01 and Bello z002/p03.
+    specs = [
+        ("doc-a", "01", "ANTIOQUIA", "001", "MEDELLIN", "001", "01"),
+        ("doc-b", "01", "ANTIOQUIA", "088", "BELLO", "002", "03"),
+        ("doc-c", "76", "VALLE", "001", "CALI", "010", "05"),
+    ]
+    for did, dc, dn, mc, mn, z, p in specs:
+        store.upsert_document(DocumentMetadata(
+            document_id=did, source_path=f"{did}.pdf", department_code=dc, department_name=dn,
+            municipality_code=mc, municipality_name=mn, zone=z, puesto=p,
+        ))
+        store.insert_vote_field(VoteField(
+            document_id=did, page_number=1, row_type="candidate", row_number=1,
+            candidate_name="A", raw_crop_path=str(crop),
+        ))
+    store.commit()
+    store.close()
+
+    async def get(path: str) -> str:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            return (await client.get(path)).text
+
+    async def run() -> None:
+        # No department: municipality select is disabled, no municipio options (the
+        # "code name" label only appears in the dropdown, not the acta cards).
+        html = await get("/browse")
+        assert 'name="municipality" data-level="1" disabled' in html
+        assert "001 MEDELLIN" not in html
+
+        # Pick ANTIOQUIA: its municipio options appear; VALLE's CALI is gone; zona disabled.
+        html = await get("/browse?department=01")
+        assert "001 MEDELLIN" in html and "088 BELLO" in html and "CALI" not in html
+        assert 'name="zone" data-level="2" disabled' in html
+
+        # Pick Medellin: zona drop-down is now enabled (populated).
+        html = await get("/browse?department=01&municipality=001")
+        assert 'name="zone" data-level="2" disabled' not in html
+
+        # Full drill-down narrows to the one acta.
+        html = await get("/browse?department=01&municipality=001&zone=001&puesto=01")
+        assert "/acta/doc-a" in html and "/acta/doc-b" not in html
+
+        # A child filter without its parent is ignored (not 500).
+        html = await get("/browse?municipality=001")
+        assert "/acta/doc-a" in html and "/acta/doc-c" in html
+
+    asyncio.run(run())
+
+
 def test_browse_shows_national_sync_progress(tmp_path: Path, monkeypatch) -> None:
     """The public /browse page shows rollout progress: synced/total, %, and an ETA."""
     monkeypatch.setattr(config, "NATIONAL_TOTAL_ACTAS", 100)
