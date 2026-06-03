@@ -340,3 +340,52 @@ def test_origin_allowlist_blocks_cross_site_votes(tmp_path: Path, monkeypatch) -
     assert _origin_allowed(req("https://veeduria-ciudadana-elecciones-colombia-2026.com")) is True
     assert _origin_allowed(req("https://veeduria-ciudadana-elecciones-colombia-2026.com/")) is True  # trailing slash
     assert _origin_allowed(req(None)) is True                              # non-browser client
+
+
+def test_api_session_mints_token_when_turnstile_off(tmp_path: Path) -> None:
+    """With Turnstile off, /api/session returns a usable form token (uniform client flow)."""
+    db = tmp_path / "results.sqlite"
+    DetectorStore(db).close()
+
+    async def run():
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=tmp_path / "out"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.post("/api/session", json={})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["ok"] is True and body["form_token"]
+
+    asyncio.run(run())
+
+
+def test_api_session_requires_turnstile_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    """With Turnstile on, /api/session gates the form token on a passing challenge."""
+    import dataclasses
+    from e14detector import webapp as wa
+    from e14detector.community import PollConfig
+
+    db = tmp_path / "results.sqlite"
+    DetectorStore(db).close()
+    cfg = dataclasses.replace(
+        PollConfig.from_config(), turnstile_enabled=True,
+        turnstile_sitekey="0xSITE", turnstile_secret="sekret",
+    )
+
+    async def run(expect_ok: bool):
+        app = create_app(results_db=db, output_dir=tmp_path / "out", poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            # /votar withholds the inline token and ships the widget when Turnstile is on.
+            page = (await client.get("/votar")).text
+            assert 'window.__formToken = "";' in page
+            assert "challenges.cloudflare.com/turnstile" in page
+            r = await client.post("/api/session", json={"turnstile_token": "tok"})
+            return r
+
+    monkeypatch.setattr(wa, "verify_turnstile", lambda *a, **k: False)
+    r = asyncio.run(run(False))
+    assert r.status_code == 403 and r.json()["error"] == "challenge_failed"
+
+    monkeypatch.setattr(wa, "verify_turnstile", lambda *a, **k: True)
+    r = asyncio.run(run(True))
+    assert r.status_code == 200 and r.json()["form_token"]

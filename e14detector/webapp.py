@@ -846,14 +846,21 @@ def create_app(
         # signed form token (in-app bot check); the deck itself is loaded from /api/feed
         # and votes go to /api/vote.
         sid = request.cookies.get("sid") or uuid.uuid4().hex
+        # When Turnstile is on, withhold the form token from the raw page load: the client must
+        # solve the challenge and exchange it at /api/session for a token. That gates *starting*
+        # to vote on a real-browser proof, with no per-swipe friction. Off => mint inline as before.
+        turnstile_on = poll_cfg.turnstile_enabled and bool(poll_cfg.turnstile_sitekey)
         form_token = (
-            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
+            ""
+            if turnstile_on
+            else (issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else "")
         )
         response = templates.TemplateResponse(
             request,
             "swipe.html",
             {
                 "form_token": form_token,
+                "turnstile_sitekey": poll_cfg.turnstile_sitekey if turnstile_on else "",
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/votar",
                 "page_title": "Vota las casillas — Veeduría ciudadana E-14 2026",
@@ -998,6 +1005,30 @@ def create_app(
         ]
         random.shuffle(items)
         return {"items": items}
+
+    @app.post("/api/session")
+    async def api_session(request: Request, payload: dict = Body(...)):
+        """Exchange a solved Turnstile challenge for a signed form token.
+
+        This is the bot gate for the swipe feed: when Turnstile is enabled the page ships
+        WITHOUT a usable form token, so a client must POST a valid ``turnstile_token`` here to
+        receive one (then votes carry it as before). One solve per session covers the whole
+        deck — no per-swipe challenge. When Turnstile is off this still mints a token, so the
+        client can use the same flow uniformly.
+        """
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        if not _origin_allowed(request):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        if poll_cfg.turnstile_enabled and not await asyncio.to_thread(
+            verify_turnstile, poll_cfg.turnstile_secret,
+            payload.get("turnstile_token"), _client_ip(request),
+        ):
+            return _flag_response({"ok": False, "error": "challenge_failed"}, 403, sid, new_sid)
+        form_token = (
+            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
+        )
+        return _flag_response({"ok": True, "form_token": form_token}, 200, sid, new_sid)
 
     @app.post("/api/vote")
     async def api_vote(request: Request, payload: dict = Body(...)):

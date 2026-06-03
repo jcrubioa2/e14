@@ -14,10 +14,15 @@
   <meta property="og:url" content="{{ canonical }}">
   <meta name="twitter:card" content="summary">
   <script>
-    // In-app bot check (no CAPTCHA): a signed token issued with this page load is sent
-    // back with each vote; the server rejects forged or impossibly-fast submits.
+    // In-app bot check: a signed token sent back with each vote; the server rejects forged
+    // or impossibly-fast submits. When Turnstile is on, this starts EMPTY and is fetched from
+    // /api/session after a challenge solve (see __tsInit / establishSession below).
     window.__formToken = "{{ form_token }}";
+    window.__turnstileSitekey = "{{ turnstile_sitekey }}";
   </script>
+  {% if turnstile_sitekey %}
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=__tsInit" async defer></script>
+  {% endif %}
   <style>
     :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --good:#1a7f37; --ink:#202124; --accent:#0969da; }
     * { box-sizing: border-box; }
@@ -61,6 +66,10 @@
     <input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"
            aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
 
+    <!-- Cloudflare Turnstile (invisible): solved once on load, exchanged at /api/session for
+         the form token. Only present when a sitekey is configured. -->
+    {% if turnstile_sitekey %}<div id="ts" style="display:none"></div>{% endif %}
+
     <div class="deck" id="deck">
       <div class="empty" id="loading">Cargando casillas…</div>
     </div>
@@ -79,6 +88,50 @@
     let queue = [];
     let voted = 0;
     let fetching = false;
+
+    // --- Turnstile session gate ---------------------------------------------------------
+    // When a sitekey is configured the page loads without a form token; we solve an invisible
+    // Turnstile challenge once and exchange it at /api/session for the token that votes carry.
+    const turnstileOn = !!window.__turnstileSitekey;
+    let tsWidget = null;
+    let establishing = false;
+
+    // Called by Turnstile's api.js once it loads (?onload=__tsInit). Renders an invisible
+    // widget that auto-executes and hands the token to establishSession via its callback.
+    window.__tsInit = function () {
+      try {
+        tsWidget = window.turnstile.render('#ts', {
+          sitekey: window.__turnstileSitekey,
+          size: 'invisible',
+          callback: function (token) { establishSession(token); },
+          'expired-callback': function () { window.__formToken = ''; ensureSession(); },
+          'error-callback': function () { establishing = false; },
+        });
+      } catch (e) {}
+    };
+
+    // Trigger a fresh challenge solve (re-mint on expiry or a rejected token).
+    function ensureSession() {
+      if (!turnstileOn || establishing || !window.turnstile || tsWidget === null) return;
+      establishing = true;
+      try { window.turnstile.reset(tsWidget); window.turnstile.execute(tsWidget); }
+      catch (e) { establishing = false; }
+    }
+
+    async function establishSession(token) {
+      try {
+        const res = await fetch('/api/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turnstile_token: token }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok && data.form_token) window.__formToken = data.form_token;
+      } catch (e) {} finally { establishing = false; }
+    }
+
+    // True once we hold a usable form token (always true when Turnstile is off).
+    function voteReady() { return !turnstileOn || !!window.__formToken; }
 
     function rememberSeen(cid) {
       seen.add(cid);
@@ -139,10 +192,16 @@
     async function castVote(card, value) {
       const goodBtn = document.getElementById('vote-good');
       const badBtn = document.getElementById('vote-bad');
+      const tally = document.getElementById('tally');
+      // Not verified yet (Turnstile still solving): nudge it along and let the user retry.
+      if (!voteReady()) {
+        tally.textContent = 'Verificando…';
+        ensureSession();
+        return;
+      }
       goodBtn.disabled = badBtn.disabled = true;
       rememberSeen(card.cid);
       const hp = document.getElementById('hp-website');
-      const tally = document.getElementById('tally');
       try {
         const res = await fetch('/api/vote', {
           method: 'POST',
@@ -161,7 +220,10 @@
           voted++;
           setTimeout(next, 550);
         } else {
-          tally.textContent = 'No se pudo enviar';
+          // A rejected token (expired after the 1h window, or the rare too-fast first swipe)
+          // comes back here; refresh the session so the next attempt carries a fresh token.
+          if (turnstileOn) { window.__formToken = ''; ensureSession(); }
+          tally.textContent = 'No se pudo enviar, reintenta';
           goodBtn.disabled = badBtn.disabled = false;
         }
       } catch (e) {
