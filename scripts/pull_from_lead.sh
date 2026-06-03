@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-LEAD="${E14_LEAD_HOST:-ryzen9}"     # WSL Tailscale MagicDNS name or 100.x IP
+LEAD="${E14_LEAD_HOST:-ryzen9-1}"   # WSL Tailscale MagicDNS name or 100.x IP
 PORT="${E14_LEAD_SSH_PORT:-22}"
 USER="${E14_LEAD_USER:-quicazan}"
 REMOTE="${USER}@${LEAD}"

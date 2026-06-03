@@ -36,17 +36,35 @@ flowchart TB
 
 **Important:** Never point two PCs at the same `output-dir` over NFS. Each machine should have its own local `data/detector_national` (or named variant) and sync through Tigris.
 
-## Recommended: split by department
+## Recommended: fleet queue (one department per assignment)
 
-Disjoint department ranges avoid races and make progress easy to read:
+The **fleet scheduler** on the lead PC assigns the next largest incomplete department to each idle worker. Workers crop `--depto` one at a time, publish completion, and pick up the next assignment. State lives in `data/detector_national/fleet/queue.json` and syncs via Tigris (`pull-fleet` / `publish-fleet`).
 
-| Machine | Env | Departments |
-|---------|-----|-------------|
-| PC 1 | `E14_DEPT_FROM=00` `E14_DEPT_TO=16` | 00–16 |
-| PC 2 | `E14_DEPT_FROM=17` `E14_DEPT_TO=33` | 17–33 |
-| PC 3 | `E14_DEPT_FROM=34` `E14_DEPT_TO=99` | 34–99 |
+| Role | Machine | Script |
+|------|---------|--------|
+| Coordinator | ryzen9 WSL (`ryzen9-1`) | `scripts/fleet_scheduler.sh` |
+| Worker | each PC | `scripts/start_crop_fleet_worker.sh` |
 
-Adjust ranges to match [`data/mesa_universe.csv`](data/mesa_universe.csv) counts (`make detector-crop-progress` shows per-dept %).
+```bash
+# Both machines — WSL Tailscale hostnames must match worker ids
+export E14_FLEET_WORKERS=ryzen9-1,legion-1
+export E14_FLEET_COORDINATOR=ryzen9-1
+export E14_WORKER_ID=ryzen9-1   # or legion-1 on the other PC
+
+# Lead (ryzen9) — stop unbounded crop_supervisor.sh first, then:
+nohup bash scripts/fleet_scheduler.sh >> logs/fleet_scheduler.log 2>&1 & disown
+nohup bash scripts/start_crop_fleet_worker.sh >> logs/crop_supervisor.log 2>&1 & disown
+
+# Worker (legion) — after pull_from_lead.sh:
+export E14_WORKER_ID=legion-1
+nohup bash scripts/start_crop_fleet_worker.sh >> logs/crop_supervisor.log 2>&1 & disown
+```
+
+Manual ops: `e14detector fleet-status`, `fleet-schedule`, `fleet-current --worker legion-1`.
+
+### Legacy: static department ranges
+
+Fixed ranges still work (`E14_DEPT_FROM` / `E14_DEPT_TO` + `scripts/start_crop_worker.sh`). Prefer fleet mode when two PCs should stay busy without overlapping.
 
 ## Setup per machine
 
@@ -64,7 +82,7 @@ Install Tailscale **inside WSL** on each machine (same account). Direct WSL→WS
 
 ```bash
 bash scripts/wsl-tailscale-setup.sh   # both machines; rename hosts in Tailscale admin
-ssh quicazan@ryzen9                   # test from worker → lead
+ssh quicazan@ryzen9-1                 # test from worker → lead (WSL Tailscale name)
 ```
 
 Copy PDFs + `.env` from the lead:
@@ -76,14 +94,13 @@ bash scripts/pull_from_lead.sh           # rsync data/actas/ + .env (~22 GB)
 
 Override lead host/repo if needed: `E14_LEAD_HOST=100.x.x.x` or `E14_LEAD_REPO=/path/to/e14`.
 
-### Worker env + supervisor
+### Worker env
 
 ```bash
-source scripts/crop_worker_env.sh    # set E14_DEPT_FROM / E14_DEPT_TO / workers
-nohup bash scripts/start_crop_worker.sh >> logs/crop_supervisor.log 2>&1 & disown
+source scripts/crop_worker_env.sh    # E14_WORKER_ID, E14_FLEET_WORKERS, workers
 ```
 
-The supervisor runs **`pull-db`** before each crop pass so restarts pick up other machines' progress.
+Fleet workers run **`pull-db`** and **`pull-fleet`** before each department; the coordinator runs **`fleet-schedule`** every ~2 min.
 
 ## Manual commands
 
@@ -108,7 +125,11 @@ The supervisor runs **`pull-db`** before each crop pass so restarts pick up othe
 | `BUCKET_NAME` / `AWS_*` | S3 API for pull/publish |
 | `E14_DB_MERGE_BEFORE_PUBLISH` | `1` (default): merge remote before `publish-db` |
 | `E14_DEPT_FROM` / `E14_DEPT_TO` | Department slice for crop supervisor |
-| `E14_WORKER_ID` | Label in supervisor logs only |
+| `E14_WORKER_ID` | Fleet worker id (WSL Tailscale name, e.g. `legion-1`) |
+| `E14_FLEET_WORKERS` | Comma-separated ids for scheduling |
+| `E14_FLEET_COORDINATOR` | Lead worker id (runs `fleet-schedule`) |
+| `E14_FLEET_SCHEDULE_INTERVAL` | Coordinator loop seconds (default `120`) |
+| `E14_FLEET_STALE_SEC` | Reclaim stale claims (default `7200`) |
 
 ## One designated publisher (optional)
 
