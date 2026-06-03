@@ -27,7 +27,10 @@ CREATE TABLE IF NOT EXISTS documents (
     official_lookup_url TEXT,
     metadata_confidence REAL,
     metadata_source TEXT,
-    processing_timestamp TEXT
+    processing_timestamp TEXT,
+    -- Count of candidate rows with a crop, maintained incrementally (see insert_vote_field /
+    -- clear_document_results). Lets /browse list+filter actas without joining vote_fields.
+    n_candidates INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS vote_fields (
@@ -165,6 +168,8 @@ class DetectorStore:
         return bool(row and row["source_sha256"] == source_sha256)
 
     def clear_document_results(self, document_id: str) -> None:
+        # Reset the candidate tally; insert_vote_field rebuilds it as fields are re-inserted.
+        self.conn.execute("UPDATE documents SET n_candidates=0 WHERE document_id=?", (document_id,))
         self.conn.execute("DELETE FROM vote_fields WHERE document_id=?", (document_id,))
         self.conn.execute("DELETE FROM cv_features WHERE document_id=?", (document_id,))
         self.conn.execute("DELETE FROM digit_comparisons WHERE document_id=?", (document_id,))
@@ -199,6 +204,13 @@ class DetectorStore:
             f"INSERT INTO vote_fields ({cols}) VALUES ({placeholders})",
             tuple(data.values()),
         )
+        # Keep the per-acta candidate tally current (the document row already exists: the
+        # processor upserts it before inserting fields). Only candidate rows with a crop count.
+        if field.row_type == "candidate" and field.raw_crop_path:
+            self.conn.execute(
+                "UPDATE documents SET n_candidates=n_candidates+1 WHERE document_id=?",
+                (field.document_id,),
+            )
         if features is not None:
             self.conn.execute(
                 "INSERT INTO cv_features (document_id,page_number,row_number,features_json) VALUES (?,?,?,?)",

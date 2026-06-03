@@ -1,0 +1,4 @@
+# Pinned for CDK CLI 2.1125+. Scale-to-zero Aurora Serverless v2 (minCapacity 0)
+# requires aws-cdk-lib >= 2.177.
+aws-cdk-lib>=2.177.0,<3.0.0
+constructs>=10.0.0,<11.0.0

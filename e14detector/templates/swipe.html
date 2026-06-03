@@ -14,10 +14,15 @@
   <meta property="og:url" content="{{ canonical }}">
   <meta name="twitter:card" content="summary">
   <script>
-    // In-app bot check (no CAPTCHA): a signed token issued with this page load is sent
-    // back with each vote; the server rejects forged or impossibly-fast submits.
+    // In-app bot check: a signed token sent back with each vote; the server rejects forged
+    // or impossibly-fast submits. When Turnstile is on, this starts EMPTY and is fetched from
+    // /api/session after a challenge solve (see __tsInit / establishSession below).
     window.__formToken = "{{ form_token }}";
+    window.__turnstileSitekey = "{{ turnstile_sitekey }}";
   </script>
+  {% if turnstile_sitekey %}
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=__tsInit" async defer></script>
+  {% endif %}
   <style>
     :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --good:#1a7f37; --ink:#202124; --accent:#0969da; }
     * { box-sizing: border-box; }
@@ -49,6 +54,14 @@
     .sib .c { font-size: 11px; color: var(--muted); margin-top: 4px; }
     .empty, .err { text-align: center; color: var(--muted); padding: 40px 0; }
     .progress { text-align: center; color: var(--muted); font-size: 12px; margin-top: 10px; }
+    /* Non-blocking toast: the thank-you shows here so the next card can render instantly
+       underneath without waiting for it. */
+    .toast { position: fixed; left: 50%; top: 14px; transform: translate(-50%, -12px); z-index: 50;
+             background: var(--good); color: #fff; font-size: 14px; font-weight: 600;
+             padding: 9px 16px; border-radius: 999px; box-shadow: 0 4px 14px rgba(0,0,0,.18);
+             opacity: 0; pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .toast.warn { background: #9a6700; }
   </style>
 </head>
 <body>
@@ -56,10 +69,15 @@
     <h1>¿Se ve bien o extraña?</h1>
     <div class="sub">Casillas de votos al azar y anónimas · <a href="/browse">buscar un acta &rarr;</a></div>
   </header>
+  <div class="toast" id="toast" aria-live="polite"></div>
   <main>
     <!-- Honeypot: hidden from people, tripped by form-filling bots. -->
     <input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"
            aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
+
+    <!-- Cloudflare Turnstile (invisible): solved once on load, exchanged at /api/session for
+         the form token. Only present when a sitekey is configured. -->
+    {% if turnstile_sitekey %}<div id="ts" style="display:none"></div>{% endif %}
 
     <div class="deck" id="deck">
       <div class="empty" id="loading">Cargando casillas…</div>
@@ -79,6 +97,58 @@
     let queue = [];
     let voted = 0;
     let fetching = false;
+
+    // Rotating thank-you shown after each vote. We deliberately do NOT reveal a crop's tally
+    // while voting (avoids anchoring/herding the next voter); the billboard shows aggregates.
+    const THANKS = [
+      '¡Gracias por tu voto!', '¡Voto registrado, gracias!', '¡Listo! Gracias por participar.',
+      '¡Gracias! Sigamos con la siguiente.', '¡Gracias por ayudar en la veeduría!',
+    ];
+    function thanks() { return THANKS[Math.floor(Math.random() * THANKS.length)]; }
+
+    // --- Turnstile session gate ---------------------------------------------------------
+    // When a sitekey is configured the page loads without a form token; we solve an invisible
+    // Turnstile challenge once and exchange it at /api/session for the token that votes carry.
+    const turnstileOn = !!window.__turnstileSitekey;
+    let tsWidget = null;
+    let establishing = false;
+
+    // Called by Turnstile's api.js once it loads (?onload=__tsInit). Renders an invisible
+    // widget that auto-executes and hands the token to establishSession via its callback.
+    window.__tsInit = function () {
+      try {
+        tsWidget = window.turnstile.render('#ts', {
+          sitekey: window.__turnstileSitekey,
+          size: 'invisible',
+          callback: function (token) { establishSession(token); },
+          'expired-callback': function () { window.__formToken = ''; ensureSession(); },
+          'error-callback': function () { establishing = false; },
+        });
+      } catch (e) {}
+    };
+
+    // Trigger a fresh challenge solve (re-mint on expiry or a rejected token).
+    function ensureSession() {
+      if (!turnstileOn || establishing || !window.turnstile || tsWidget === null) return;
+      establishing = true;
+      try { window.turnstile.reset(tsWidget); window.turnstile.execute(tsWidget); }
+      catch (e) { establishing = false; }
+    }
+
+    async function establishSession(token) {
+      try {
+        const res = await fetch('/api/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turnstile_token: token }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok && data.form_token) window.__formToken = data.form_token;
+      } catch (e) {} finally { establishing = false; }
+    }
+
+    // True once we hold a usable form token (always true when Turnstile is off).
+    function voteReady() { return !turnstileOn || !!window.__formToken; }
 
     function rememberSeen(cid) {
       seen.add(cid);
@@ -114,7 +184,6 @@
       el.innerHTML =
         '<div class="prompt">¿El número de esta casilla se ve normal o alterado?</div>' +
         '<img class="crop" alt="votos escritos a mano" src="' + card.img_url + '">' +
-        '<div class="tally" id="tally"></div>' +
         '<div class="buttons">' +
         '  <button class="b-good" id="vote-good">Se ve bien</button>' +
         '  <button class="b-bad" id="vote-bad">Se ve extraña</button>' +
@@ -136,38 +205,43 @@
       next();
     }
 
-    async function castVote(card, value) {
-      const goodBtn = document.getElementById('vote-good');
-      const badBtn = document.getElementById('vote-bad');
-      goodBtn.disabled = badBtn.disabled = true;
+    let toastTimer = null;
+    function showToast(msg, warn) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.toggle('warn', !!warn);
+      t.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove('show'), 1100);
+    }
+
+    // Optimistic: thank + advance to the next card INSTANTLY, and let the vote fly in the
+    // background (no await). The vote is durable server-side (enqueued to the queue) and
+    // dedup'd, so not waiting for the response never loses or double-counts — it just makes
+    // voting feel immediate, which matters for casting many quickly.
+    function castVote(card, value) {
+      if (!voteReady()) { showToast('Verificando…', true); ensureSession(); return; }
       rememberSeen(card.cid);
+      voted++;
+      showToast(thanks());
+      sendVote(card.cid, value);
+      next();
+    }
+
+    function sendVote(cid, value) {
       const hp = document.getElementById('hp-website');
-      const tally = document.getElementById('tally');
-      try {
-        const res = await fetch('/api/vote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cid: card.cid, value: value,
-                                 form_token: window.__formToken, website: hp ? hp.value : '' }),
-        });
-        if (res.status === 429) {
-          tally.textContent = 'Vas muy rápido, espera un momento…';
-          goodBtn.disabled = badBtn.disabled = false;
-          return;
-        }
+      fetch('/api/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cid: cid, value: value,
+                               form_token: window.__formToken, website: hp ? hp.value : '' }),
+      }).then(async (res) => {
+        if (res.status === 429) { showToast('Vas muy rápido…', true); return; }
         const data = await res.json().catch(() => ({}));
-        if (data && data.ok) {
-          tally.innerHTML = '¡Gracias! · <b class="s">' + (data.strange || 0) + ' extrañas</b> · <b class="g">' + (data.good || 0) + ' bien</b>';
-          voted++;
-          setTimeout(next, 550);
-        } else {
-          tally.textContent = 'No se pudo enviar';
-          goodBtn.disabled = badBtn.disabled = false;
-        }
-      } catch (e) {
-        tally.textContent = 'Error de red';
-        goodBtn.disabled = badBtn.disabled = false;
-      }
+        // Rejected token (expired after the 1h window, or rare too-fast first vote): silently
+        // refresh the session so the next vote carries a fresh token.
+        if (!(data && data.ok) && turnstileOn) { window.__formToken = ''; ensureSession(); }
+      }).catch(() => {});  // a dropped vote on a hard network error is acceptable (rare)
     }
 
     async function loadSiblings(card) {
@@ -182,8 +256,8 @@
         for (const s of (data.items || [])) {
           const d = document.createElement('div');
           d.className = 'sib';
-          d.innerHTML = '<img loading="lazy" src="' + s.img_url + '" alt="casilla de la misma acta">' +
-                        '<div class="c">' + s.strange + ' extrañas · ' + s.good + ' bien</div>';
+          // Context only — no tallies while voting (same reason as the post-vote message).
+          d.innerHTML = '<img loading="lazy" src="' + s.img_url + '" alt="casilla de la misma acta">';
           box.appendChild(d);
         }
         if (!box.children.length) box.innerHTML = '<div class="c">Sin más casillas.</div>';
@@ -199,6 +273,8 @@
         if (!queue.length) { renderEmpty('No hay más casillas por ahora. ¡Gracias por participar!'); return; }
       }
       renderCard(queue.shift());
+      // Warm the next crop image so the following swap is instant (decode ahead of time).
+      if (queue[0]) { const im = new Image(); im.src = queue[0].img_url; }
     }
 
     (async function start() {

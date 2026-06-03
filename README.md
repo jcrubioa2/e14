@@ -100,6 +100,9 @@ data/
   actas/{dep}/{muni}/{zona}/{puesto}/E14_PRE_{dep}_{muni}_{zona}_{puesto}_{mesa}_delegados.pdf
 logs/e14.log
 docs/ENDPOINTS.md           # reverse-engineered API + verified field mapping
+docs/ARCHITECTURE.md        # the live platform: Fly web + SQLite corpus + SQS/Lambda/Aurora votes
+docs/PUBLISHING.md          # sync a detector machine's crops + DB to the deployment (publish-reconcile/-loop)
+docs/SEEDING.md             # labeling samples into public "strange" seeds
 checklist.md                # living progress tracker
 ```
 

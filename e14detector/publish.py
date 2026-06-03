@@ -57,6 +57,53 @@ def _load_manifest(manifest: Path) -> set[str]:
     return set()
 
 
+def reconcile_manifest(
+    output_dir: Path,
+    *,
+    bucket: str | None = None,
+    client=None,
+    prefix: str = "crops/",
+    manifest: Path | None = None,
+    verbose: bool = True,
+) -> dict[str, int]:
+    """Rebuild the upload manifest from the *bucket* (the source of truth).
+
+    Lets any machine resume incremental publishing: it lists every ``crops/`` object already
+    in the store and writes their keys to the manifest, so a later ``publish-crops`` /
+    ``publish-loop`` only sends the delta instead of re-uploading everything. The object key
+    is exactly the manifest key (``crops/<file>`` — see ``webapp.crop_key``), so no mapping is
+    needed. Unions with any existing manifest, so a just-uploaded key is never forgotten.
+    """
+    output_dir = Path(output_dir)
+    bucket = bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
+    if not bucket:
+        raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
+    manifest = manifest or (output_dir / "review" / "uploaded_crops.txt")
+    if client is None:
+        client = _default_client()
+
+    keys = _load_manifest(manifest)
+    before = len(keys)
+    listed = 0
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.add(obj["Key"])
+            listed += 1
+        if verbose:
+            print(f"reconcile: listed {listed} object(s)…", end="\r", flush=True)
+
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write: build beside the file and replace, so an interrupted run never leaves a
+    # half-written manifest that would cause re-uploads.
+    tmp = manifest.with_suffix(manifest.suffix + ".tmp")
+    tmp.write_text("\n".join(sorted(keys)) + "\n", encoding="utf-8")
+    tmp.replace(manifest)
+    if verbose:
+        print(f"\nreconcile: {listed} crop object(s) in bucket; manifest {before} -> {len(keys)} key(s)",
+              flush=True)
+    return {"listed": listed, "before": before, "after": len(keys)}
+
+
 def _default_client(workers: int = 16):
     import boto3  # local-only dep; imported lazily so the lean serve image never needs it
     from botocore.config import Config

@@ -132,6 +132,20 @@ def cmd_publish_db(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_publish_reconcile(args: argparse.Namespace) -> int:
+    """Rebuild the upload manifest from the bucket so a fresh machine resumes incrementally."""
+    from .publish import reconcile_manifest
+
+    info = reconcile_manifest(
+        output_dir=Path(args.output_dir), bucket=args.bucket, prefix=args.prefix
+    )
+    print(
+        f"reconcile: bucket had {info['listed']} crop object(s); "
+        f"manifest {info['before']} -> {info['after']} key(s)"
+    )
+    return 0
+
+
 def cmd_publish_loop(args: argparse.Namespace) -> int:
     """Continuous, no-pause publisher: upload new crops, then publish the fully-uploaded
     frontier DB. Runs alongside the crop run; the live page grows on its own."""
@@ -341,6 +355,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the guard that refuses to replace the live DB with one <50% its size",
     )
     publish_db.set_defaults(func=cmd_publish_db)
+
+    reconcile = sub.add_parser(
+        "publish-reconcile",
+        help="rebuild the upload manifest from the bucket so any machine resumes incrementally "
+        "(run once before publish-loop on a new publisher)",
+    )
+    reconcile.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    reconcile.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    reconcile.add_argument("--prefix", default="crops/", help="object key prefix to list")
+    reconcile.set_defaults(func=cmd_publish_reconcile)
 
     publish_loop = sub.add_parser(
         "publish-loop",

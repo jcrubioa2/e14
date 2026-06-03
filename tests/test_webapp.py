@@ -147,7 +147,7 @@ def test_acta_crop_src_uses_cdn_when_configured(tmp_path: Path, monkeypatch) -> 
     assert "/crop?path=" not in html
 
 
-def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_path: Path) -> None:
+def test_retired_verdict_routes_gone_and_crop_traversal_blocked(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     candidate_crop = _crop(output_dir / "crops" / "candidate.png")
@@ -239,25 +239,13 @@ def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_
     async def run_checks() -> None:
         transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            payload = (await client.get("/api/flagged")).json()
-            assert payload["total"] == 3
-            # doc-veto (strong CV, VLM CLEAN) is protected; doc-clean (marginal
-            # UNCLEAR, VLM CLEAN) is correctly pruned by the VLM.
-            assert {item["document_id"] for item in payload["items"]} == {
-                "doc-veto",
-                "doc-candidate",
-                "doc-unclear",
-            }
-
-            # The analyst dashboard moved to /panel; / now redirects to the public /browse.
+            # The verdict/anomaly analyst surface was retired with the move to crowd-only
+            # vote counting — these routes no longer exist.
+            assert (await client.get("/api/flagged")).status_code == 404
+            assert (await client.get("/panel")).status_code == 404
+            assert (await client.get("/doc/doc-candidate")).status_code == 404
+            # / still redirects to the public crowd-voting browser.
             assert (await client.get("/")).status_code == 308
-            dashboard = await client.get("/panel")
-            assert dashboard.status_code == 200
-            assert "doc-candidate" in dashboard.text
-            assert "doc-unclear" in dashboard.text
-            assert "doc-veto" in dashboard.text
-            assert "doc-summary" not in dashboard.text
-            assert "doc-clean" not in dashboard.text
 
             crop_path = os.path.relpath(candidate_crop, Path.cwd())
             assert resolve_crop_path(crop_path, output_dir) == candidate_crop.resolve()
@@ -265,3 +253,139 @@ def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_
             assert traversal.status_code == 403
 
     asyncio.run(run_checks())
+
+
+def test_feed_random_pk_sampling(tmp_path: Path) -> None:
+    """The swipe feed (random-PK sampling) fills to n, dedups, and never serves
+    non-candidate or crop-less rows. See _feed_payload."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-feed", source_path="doc-feed.pdf"))
+    # 12 valid candidate crops (the only things the feed may return).
+    for i in range(12):
+        store.insert_vote_field(VoteField(
+            document_id="doc-feed", page_number=1, row_type="candidate", row_number=i + 1,
+            candidate_name=f"C{i}", raw_crop_path=str(crop),
+        ))
+    # An invalid pair the feed must skip: a non-candidate row, and a crop-less candidate.
+    store.insert_vote_field(VoteField(
+        document_id="doc-feed", page_number=1, row_type="summary", row_number=99,
+        section="total", raw_crop_path=str(crop),
+    ))
+    store.insert_vote_field(VoteField(
+        document_id="doc-feed", page_number=2, row_type="candidate", row_number=1,
+        candidate_name="no-crop", raw_crop_path=None,
+    ))
+    store.commit()
+    store.close()
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            # Asking for more than exist returns exactly the 12 valid candidates (the 2
+            # invalid rows are filtered out), all distinct.
+            big = (await client.get("/api/feed?n=50")).json()["items"]
+            cids = [it["cid"] for it in big]
+            assert len(cids) == 12
+            assert len(set(cids)) == 12
+            assert all(it["img_url"] == f"/c/{it['cid']}" for it in big)
+
+            # exclude is honored: excluding 4 cids yields 4 different ones.
+            excl = ",".join(cids[:4])
+            rest = (await client.get(f"/api/feed?n=4&exclude={excl}")).json()["items"]
+            got = {it["cid"] for it in rest}
+            assert len(got) == 4
+            assert got.isdisjoint(set(cids[:4]))
+
+    asyncio.run(run())
+
+
+def test_security_headers_and_docs_hidden(tmp_path: Path) -> None:
+    """Hardening: docs/openapi are 404 by default, and baseline headers are on every response."""
+    db = tmp_path / "results.sqlite"
+    output_dir = tmp_path / "out"
+    DetectorStore(db).close()
+
+    async def run():
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            for p in ("/docs", "/redoc", "/openapi.json"):
+                assert (await client.get(p)).status_code == 404
+            r = await client.get("/votar")
+            assert r.headers.get("x-content-type-options") == "nosniff"
+            assert r.headers.get("x-frame-options") == "DENY"
+            assert "frame-ancestors" in r.headers.get("content-security-policy", "")
+
+    asyncio.run(run())
+
+
+def test_origin_allowlist_blocks_cross_site_votes(tmp_path: Path, monkeypatch) -> None:
+    """With an allowlist set, a foreign Origin is rejected; same-origin and header-less pass."""
+    from e14detector.webapp import _origin_allowed
+    from types import SimpleNamespace
+
+    def req(origin=None):
+        h = {} if origin is None else {"origin": origin}
+        return SimpleNamespace(headers=h)
+
+    # Not configured -> never blocks.
+    monkeypatch.setattr(config, "ALLOWED_ORIGINS", [])
+    assert _origin_allowed(req("https://evil.example")) is True
+
+    monkeypatch.setattr(config, "ALLOWED_ORIGINS", ["https://veeduria-ciudadana-elecciones-colombia-2026.com"])
+    assert _origin_allowed(req("https://evil.example")) is False           # cross-site browser
+    assert _origin_allowed(req("https://veeduria-ciudadana-elecciones-colombia-2026.com")) is True
+    assert _origin_allowed(req("https://veeduria-ciudadana-elecciones-colombia-2026.com/")) is True  # trailing slash
+    assert _origin_allowed(req(None)) is True                              # non-browser client
+
+
+def test_api_session_mints_token_when_turnstile_off(tmp_path: Path) -> None:
+    """With Turnstile off, /api/session returns a usable form token (uniform client flow)."""
+    db = tmp_path / "results.sqlite"
+    DetectorStore(db).close()
+
+    async def run():
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=tmp_path / "out"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.post("/api/session", json={})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["ok"] is True and body["form_token"]
+
+    asyncio.run(run())
+
+
+def test_api_session_requires_turnstile_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    """With Turnstile on, /api/session gates the form token on a passing challenge."""
+    import dataclasses
+    from e14detector import webapp as wa
+    from e14detector.community import PollConfig
+
+    db = tmp_path / "results.sqlite"
+    DetectorStore(db).close()
+    cfg = dataclasses.replace(
+        PollConfig.from_config(), turnstile_enabled=True,
+        turnstile_sitekey="0xSITE", turnstile_secret="sekret",
+    )
+
+    async def run(expect_ok: bool):
+        app = create_app(results_db=db, output_dir=tmp_path / "out", poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            # /votar withholds the inline token and ships the widget when Turnstile is on.
+            page = (await client.get("/votar")).text
+            assert 'window.__formToken = "";' in page
+            assert "challenges.cloudflare.com/turnstile" in page
+            r = await client.post("/api/session", json={"turnstile_token": "tok"})
+            return r
+
+    monkeypatch.setattr(wa, "verify_turnstile", lambda *a, **k: False)
+    r = asyncio.run(run(False))
+    assert r.status_code == 403 and r.json()["error"] == "challenge_failed"
+
+    monkeypatch.setattr(wa, "verify_turnstile", lambda *a, **k: True)
+    r = asyncio.run(run(True))
+    assert r.status_code == 200 and r.json()["form_token"]
