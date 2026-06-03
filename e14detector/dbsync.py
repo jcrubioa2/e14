@@ -61,6 +61,90 @@ def make_snapshot(src_db: Path, dest: Path) -> str:
     return _sha256(dest)
 
 
+# The only columns the public vote-counting site reads from vote_fields. The detector's
+# working DB carries ~30 columns (CV scores, VLM json, debug/slot/comparison crop paths)
+# plus a cv_features table — ~2 GB the site never queries. Serving just the candidate
+# registry keeps the whole DB small enough to sit in the box's page cache, so the feed
+# stays warm. ``vlm_classification`` is kept: it's a short, mostly-NULL enum still read by
+# the appeal seed flag (lookup_candidate_appeal), and costs almost nothing.
+_SERVE_VF_COLS = (
+    "id, document_id, page_number, row_number, row_type, section, "
+    "candidate_number, candidate_name, raw_crop_path, vlm_classification"
+)
+_SERVE_VF_DDL = """
+CREATE TABLE vote_fields (
+    id INTEGER PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    page_number INTEGER NOT NULL,
+    row_number INTEGER NOT NULL,
+    row_type TEXT NOT NULL,
+    section TEXT,
+    candidate_number INTEGER,
+    candidate_name TEXT,
+    raw_crop_path TEXT,
+    vlm_classification TEXT
+)
+"""
+
+
+def build_serving_db(src_db: Path, dest: Path) -> str:
+    """Build the slim public-serving DB and return its sha256.
+
+    Copies only the candidate registry (the columns above) + the full ``documents`` table
+    (the /acta view does ``SELECT *``) + the indexes the live queries use. ``id`` values are
+    preserved verbatim so the feed's dense random-PK sampling still works. The source is
+    read read-only (``mode=ro``), so this is safe while the local crop writer runs under WAL.
+    """
+    src_db = Path(src_db)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    con = sqlite3.connect(dest, uri=True, timeout=120.0)
+    try:
+        con.execute(f"ATTACH DATABASE 'file:{src_db.resolve()}?mode=ro' AS src")
+        con.executescript(_SERVE_VF_DDL)
+        con.execute(
+            f"INSERT INTO vote_fields ({_SERVE_VF_COLS}) "
+            f"SELECT {_SERVE_VF_COLS} FROM src.vote_fields"
+        )
+        # documents copied whole, with its original schema (PK + columns) reproduced.
+        doc_sql = con.execute(
+            "SELECT sql FROM src.sqlite_master WHERE type='table' AND name='documents'"
+        ).fetchone()[0]
+        con.execute(doc_sql)
+        con.execute("INSERT INTO documents SELECT * FROM src.documents")
+        # Precompute candidate-crop count per acta so /browse never has to join+GROUP BY the
+        # 1.5M-row vote_fields table on every page load (that was ~4s). With this column the
+        # browse list is a pure documents-table query (~100k rows). Newer source DBs already
+        # carry n_candidates (maintained by DetectorStore); older ones don't — add it if
+        # missing, then recompute here so the served value is always correct and authoritative.
+        if "n_candidates" not in {r[1] for r in con.execute("PRAGMA table_info(documents)")}:
+            con.execute("ALTER TABLE documents ADD COLUMN n_candidates INTEGER NOT NULL DEFAULT 0")
+        # Build the vote_fields indexes FIRST: the n_candidates recompute below is a correlated
+        # COUNT subquery keyed on (document_id, row_type), so without this index it degrades to a
+        # full vote_fields scan per document (~113k × 1.5M rows = minutes). With it, each count is
+        # an index range probe and the whole UPDATE runs in seconds.
+        con.execute("CREATE INDEX idx_vf_doc_type ON vote_fields(document_id, row_type)")
+        con.execute("CREATE INDEX idx_vf_crop ON vote_fields(raw_crop_path)")
+        con.execute(
+            "UPDATE documents SET n_candidates = COALESCE("
+            "(SELECT COUNT(*) FROM vote_fields vf WHERE vf.document_id = documents.document_id "
+            "AND vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL), 0)"
+        )
+        # Remaining indexes the live site relies on: geo drill-down and the browse list order
+        # (only over actas that have candidate crops).
+        doc_cols = {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+        if "department_code" in doc_cols:
+            con.execute("CREATE INDEX idx_doc_browse ON documents(department_code, document_id) WHERE n_candidates>0")
+        if {"department_code", "municipality_code", "zone", "puesto"} <= doc_cols:
+            con.execute("CREATE INDEX idx_doc_geo ON documents(department_code, municipality_code, zone, puesto)")
+        con.commit()
+    finally:
+        con.close()
+    return _sha256(dest)
+
+
 def _s3_client():
     import boto3  # local-only; lazy so the reader/serve path never imports it
 
@@ -132,7 +216,9 @@ def publish_db(
 
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "snapshot.sqlite"
-        make_snapshot(src, snap)
+        # Slim public-serving snapshot (registry + geo only), not a full copy of the
+        # detector working DB — see build_serving_db.
+        build_serving_db(src, snap)
         if only_uploaded:
             manifest = Path(manifest) if manifest else Path(output_dir) / "review" / "uploaded_crops.txt"
             uploaded = set(manifest.read_text(encoding="utf-8").split()) if manifest.exists() else set()

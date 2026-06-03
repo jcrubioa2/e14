@@ -147,7 +147,7 @@ def test_acta_crop_src_uses_cdn_when_configured(tmp_path: Path, monkeypatch) -> 
     assert "/crop?path=" not in html
 
 
-def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_path: Path) -> None:
+def test_retired_verdict_routes_gone_and_crop_traversal_blocked(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     candidate_crop = _crop(output_dir / "crops" / "candidate.png")
@@ -239,25 +239,13 @@ def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_
     async def run_checks() -> None:
         transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            payload = (await client.get("/api/flagged")).json()
-            assert payload["total"] == 3
-            # doc-veto (strong CV, VLM CLEAN) is protected; doc-clean (marginal
-            # UNCLEAR, VLM CLEAN) is correctly pruned by the VLM.
-            assert {item["document_id"] for item in payload["items"]} == {
-                "doc-veto",
-                "doc-candidate",
-                "doc-unclear",
-            }
-
-            # The analyst dashboard moved to /panel; / now redirects to the public /browse.
+            # The verdict/anomaly analyst surface was retired with the move to crowd-only
+            # vote counting — these routes no longer exist.
+            assert (await client.get("/api/flagged")).status_code == 404
+            assert (await client.get("/panel")).status_code == 404
+            assert (await client.get("/doc/doc-candidate")).status_code == 404
+            # / still redirects to the public crowd-voting browser.
             assert (await client.get("/")).status_code == 308
-            dashboard = await client.get("/panel")
-            assert dashboard.status_code == 200
-            assert "doc-candidate" in dashboard.text
-            assert "doc-unclear" in dashboard.text
-            assert "doc-veto" in dashboard.text
-            assert "doc-summary" not in dashboard.text
-            assert "doc-clean" not in dashboard.text
 
             crop_path = os.path.relpath(candidate_crop, Path.cwd())
             assert resolve_crop_path(crop_path, output_dir) == candidate_crop.resolve()
@@ -265,3 +253,51 @@ def test_flagged_api_excludes_summary_only_confirmations_and_crop_traversal(tmp_
             assert traversal.status_code == 403
 
     asyncio.run(run_checks())
+
+
+def test_feed_random_pk_sampling(tmp_path: Path) -> None:
+    """The swipe feed (random-PK sampling) fills to n, dedups, and never serves
+    non-candidate or crop-less rows. See _feed_payload."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-feed", source_path="doc-feed.pdf"))
+    # 12 valid candidate crops (the only things the feed may return).
+    for i in range(12):
+        store.insert_vote_field(VoteField(
+            document_id="doc-feed", page_number=1, row_type="candidate", row_number=i + 1,
+            candidate_name=f"C{i}", raw_crop_path=str(crop),
+        ))
+    # An invalid pair the feed must skip: a non-candidate row, and a crop-less candidate.
+    store.insert_vote_field(VoteField(
+        document_id="doc-feed", page_number=1, row_type="summary", row_number=99,
+        section="total", raw_crop_path=str(crop),
+    ))
+    store.insert_vote_field(VoteField(
+        document_id="doc-feed", page_number=2, row_type="candidate", row_number=1,
+        candidate_name="no-crop", raw_crop_path=None,
+    ))
+    store.commit()
+    store.close()
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            # Asking for more than exist returns exactly the 12 valid candidates (the 2
+            # invalid rows are filtered out), all distinct.
+            big = (await client.get("/api/feed?n=50")).json()["items"]
+            cids = [it["cid"] for it in big]
+            assert len(cids) == 12
+            assert len(set(cids)) == 12
+            assert all(it["img_url"] == f"/c/{it['cid']}" for it in big)
+
+            # exclude is honored: excluding 4 cids yields 4 different ones.
+            excl = ",".join(cids[:4])
+            rest = (await client.get(f"/api/feed?n=4&exclude={excl}")).json()["items"]
+            got = {it["cid"] for it in rest}
+            assert len(got) == 4
+            assert got.isdisjoint(set(cids[:4]))
+
+    asyncio.run(run())

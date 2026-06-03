@@ -9,19 +9,27 @@ from e14detector import dbsync
 
 
 def _make_db(path: Path, rows: int) -> None:
-    """A minimal results DB with the served tables (documents + vote_fields) the snapshot copies."""
+    """A results DB shaped like the detector's working DB: the served registry columns plus
+    the fat columns/tables (cv_features, debug paths, vlm_raw_json) the serving snapshot drops."""
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
     con.execute("CREATE TABLE IF NOT EXISTS documents (document_id TEXT PRIMARY KEY, source_path TEXT, "
                 "department_code TEXT, municipality_code TEXT, zone TEXT, puesto TEXT)")
+    # Served columns + fat columns that build_serving_db must NOT copy.
     con.execute("CREATE TABLE IF NOT EXISTS vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, "
-                "row_type TEXT, raw_crop_path TEXT)")
+                "page_number INTEGER, row_number INTEGER, row_type TEXT, section TEXT, "
+                "candidate_number INTEGER, candidate_name TEXT, raw_crop_path TEXT, "
+                "vlm_classification TEXT, "
+                "debug_crop_path TEXT, cv_score REAL, vlm_raw_json TEXT)")
     con.execute("CREATE TABLE IF NOT EXISTS cv_features (id INTEGER PRIMARY KEY, features_json TEXT)")  # must NOT be copied
     start = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]  # cumulative, unique ids
     con.executemany("INSERT INTO documents (document_id, source_path) VALUES (?, ?)",
                     [(f"d{i}", f"d{i}.pdf") for i in range(start, start + rows)])
-    con.executemany("INSERT INTO vote_fields (document_id, row_type, raw_crop_path) VALUES (?, 'candidate', ?)",
-                    [(f"d{i}", f"crops/c{i}.png") for i in range(start, start + rows)])
+    con.executemany(
+        "INSERT INTO vote_fields (document_id, page_number, row_number, row_type, candidate_name, "
+        "raw_crop_path, vlm_classification, debug_crop_path, cv_score, vlm_raw_json) "
+        "VALUES (?, 1, 1, 'candidate', ?, ?, 'CLEAN', 'crops/dbg.png', 0.5, '{\"k\":1}')",
+        [(f"d{i}", f"C{i}", f"crops/c{i}.png") for i in range(start, start + rows)])
     con.execute("INSERT INTO cv_features (features_json) VALUES ('x')")
     con.commit()
     con.close()
@@ -129,13 +137,15 @@ def test_publish_db_only_uploaded_publishes_the_frontier(tmp_path: Path) -> None
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT)")
     con.execute(
-        "CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, row_type TEXT, "
-        "raw_crop_path TEXT)"
+        "CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, page_number INTEGER, "
+        "row_number INTEGER, row_type TEXT, section TEXT, candidate_number INTEGER, "
+        "candidate_name TEXT, raw_crop_path TEXT, vlm_classification TEXT)"
     )
     for d in ("doc-0", "doc-1"):
         con.execute("INSERT INTO documents VALUES (?, ?)", (d, f"{d}.pdf"))
         con.execute(
-            "INSERT INTO vote_fields (document_id, row_type, raw_crop_path) VALUES (?,?,?)",
+            "INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+            "VALUES (?,1,1,?,?)",
             (d, "candidate", f"data/x/crops/{d}.png"),
         )
     con.commit()
@@ -175,9 +185,12 @@ def test_publish_db_only_uploaded_empty_frontier_returns_none(tmp_path: Path) ->
     db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT)")
-    con.execute("CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, row_type TEXT, raw_crop_path TEXT)")
+    con.execute("CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, page_number INTEGER, "
+                "row_number INTEGER, row_type TEXT, section TEXT, candidate_number INTEGER, "
+                "candidate_name TEXT, raw_crop_path TEXT, vlm_classification TEXT)")
     con.execute("INSERT INTO documents VALUES ('d', 'd.pdf')")
-    con.execute("INSERT INTO vote_fields (document_id, row_type, raw_crop_path) VALUES ('d','candidate','data/x/crops/d.png')")
+    con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                "VALUES ('d',1,1,'candidate','data/x/crops/d.png')")
     con.commit(); con.close()
     (out / "review").mkdir(parents=True, exist_ok=True)
     (out / "review" / "uploaded_crops.txt").write_text("")  # nothing uploaded
@@ -246,3 +259,37 @@ def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) ->
     assert info["key"] in s3.objects
     pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
     assert pointer["sha256"] == info["sha256"] and pointer["key"] == info["key"]
+
+
+def test_build_serving_db_drops_fat_columns_and_tables(tmp_path: Path) -> None:
+    """The serving snapshot keeps only the registry the live site reads: fat columns
+    (debug paths, cv_score, vlm_raw_json) and whole working tables (cv_features) are gone,
+    while id values and row counts are preserved so the feed's random-PK sampling works."""
+    src = tmp_path / "src" / "results.sqlite"
+    _make_db(src, 7)
+    dest = tmp_path / "serve.sqlite"
+    digest = dbsync.build_serving_db(src, dest)
+    assert len(digest) == 64 and dest.exists()
+
+    con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+    try:
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "vote_fields" in tables and "documents" in tables
+        assert "cv_features" not in tables  # working table dropped
+
+        cols = {r[1] for r in con.execute("PRAGMA table_info(vote_fields)")}
+        assert {"id", "document_id", "page_number", "row_number", "row_type", "section",
+                "candidate_number", "candidate_name", "raw_crop_path", "vlm_classification"} <= cols
+        assert {"debug_crop_path", "cv_score", "vlm_raw_json"} & cols == set()  # fat columns dropped
+
+        # Registry preserved: row count + dense ids intact.
+        assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 7
+        ids = [r[0] for r in con.execute("SELECT id FROM vote_fields ORDER BY id")]
+        assert ids == list(range(1, 8))
+        assert con.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 7
+
+        # Indexes the live queries rely on are present.
+        idx = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert {"idx_vf_doc_type", "idx_vf_crop", "idx_doc_geo"} <= idx
+    finally:
+        con.close()

@@ -633,3 +633,30 @@ class CommunityStore:
             ).fetchall()
         return [{"field_key": r["field_key"], "good": r["good"] or 0,
                  "strange": r["strange"] or 0} for r in rows]
+
+
+def make_store(sqlite_path: str | Path | None = None):
+    """Open the community store, picking the backend by environment.
+
+    If ``AURORA_CLUSTER_ARN`` + ``AURORA_SECRET_ARN`` are set, votes go to the
+    durable Aurora/Postgres backend (over the RDS Data API); otherwise the local
+    SQLite store is used (tests, local dev, the single-machine fallback). Both
+    expose the same API, so callers (``webapp.py``, ``vote_worker.py``) are
+    identical either way. ``sqlite_path`` is required only on the SQLite path.
+    """
+    import os
+
+    cluster = os.environ.get("AURORA_CLUSTER_ARN")
+    secret = os.environ.get("AURORA_SECRET_ARN")
+    if cluster and secret:
+        from .community_pg import PgCommunityStore  # lazy: keeps boto3 off the SQLite path
+
+        return PgCommunityStore(
+            cluster, secret, database=os.environ.get("AURORA_DATABASE", "e14")
+        )
+    if sqlite_path is None:
+        raise RuntimeError(
+            "make_store: no Aurora env (AURORA_CLUSTER_ARN/AURORA_SECRET_ARN) and no "
+            "sqlite_path given"
+        )
+    return CommunityStore(sqlite_path)

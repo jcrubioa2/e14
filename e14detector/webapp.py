@@ -18,8 +18,8 @@ from fastapi.templating import Jinja2Templates
 
 from . import config
 from .community import (
-    CommunityStore,
     PollConfig,
+    make_store,
     crop_id,
     field_key_of,
     issue_form_token,
@@ -28,6 +28,7 @@ from .community import (
     voter_token,
 )
 from .schemas import FieldClassification
+from .vote_queue import make_publisher
 from .vlm.base import VisionReviewer
 from .vlm.factory import build_reviewer
 from .vlm.prompt import VOTE_FIELD_APPEAL_PROMPT, VOTE_FIELD_CONFIRM_PROMPT, VOTE_FIELD_SCREEN_PROMPT
@@ -48,24 +49,15 @@ _ALGO_FLAG_SQL = (
     "(vf.vlm_classification IN ('SUSPICIOUS_OVERLAP','DIGIT_SHAPE_ANOMALY'))"
 )
 
-# One acta-summary row for the /browse list (grouped per document). Shared by the
-# main, "most-voted-float", and "rest" queries so their columns stay identical.
+# One acta-summary row for the /browse list (one entry per document). Reads the precomputed
+# per-acta candidate count straight off the small documents table — no join/GROUP BY over the
+# 1.5M-row vote_fields table. Every served DB carries n_candidates: DetectorStore maintains it
+# incrementally, and dbsync.build_serving_db recomputes it into the slim serving snapshot.
 _ACTA_SUMMARY_SELECT = (
     "SELECT d.document_id, d.department_code, d.department_name, "
     "d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
-    "COUNT(*) AS n_candidates "
-    "FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id"
+    "d.n_candidates AS n_candidates FROM documents d"
 )
-
-VISIBLE_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY", "UNCLEAR")
-# Strong deterministic CV signals. The VLM second pass is allowed to PRUNE the
-# marginal UNCLEAR band (where it reduces false positives), but it must NOT be
-# able to hide a strong CV catch by returning CLEAN: the VLM is non-deterministic
-# and proven unreliable on faint placeholder-overlaps, so a CV overlap/shape flag
-# stays in the human queue regardless of the VLM verdict (VLM stays advisory there).
-STRONG_CV_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY")
-PAGE_SIZE = 50
-
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.resolve()}?mode=ro"
@@ -76,89 +68,21 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return dict(row)
+def _warm_db(db_path: Path) -> None:
+    """Pull the served DB's pages into the OS page cache by reading the file through.
 
-
-def _filters(
-    department: str | None,
-    anomaly_type: str | None,
-    min_confidence: float,
-    q: str | None,
-) -> tuple[str, list[Any]]:
-    # Non-vetoing union: a row qualifies if the VLM flags it (confidently enough)
-    # OR the CV pass raised a strong deterministic signal. The latter clause means
-    # a VLM CLEAN can never hide a CV overlap/shape catch — it can only prune the
-    # marginal UNCLEAR band, which is the half of the join the VLM is reliable on.
-    where = [
-        "vf.row_type='candidate'",
-        (
-            "("
-            f"(vf.vlm_classification IN ({','.join('?' for _ in VISIBLE_CLASSES)})"
-            " AND COALESCE(vf.vlm_confidence, 0) >= ?)"
-            f" OR vf.final_classification IN ({','.join('?' for _ in STRONG_CV_CLASSES)})"
-            ")"
-        ),
-    ]
-    params: list[Any] = [*VISIBLE_CLASSES, min_confidence, *STRONG_CV_CLASSES]
-    if department:
-        where.append("(d.department_code=? OR d.department_name=?)")
-        params.extend([department, department])
-    if anomaly_type:
-        if anomaly_type not in VISIBLE_CLASSES:
-            raise HTTPException(status_code=400, detail="invalid anomaly type")
-        # Match the effective alert: a VLM verdict, or a strong CV verdict the VLM
-        # did not override.
-        where.append("(vf.vlm_classification=? OR vf.final_classification=?)")
-        params.extend([anomaly_type, anomaly_type])
-    if q:
-        where.append("(d.document_id LIKE ? OR d.filename LIKE ? OR d.place_name LIKE ?)")
-        needle = f"%{q}%"
-        params.extend([needle, needle, needle])
-    return " AND ".join(where), params
-
-
-def _summary(conn: sqlite3.Connection, min_confidence: float) -> dict[str, Any]:
-    total_docs = conn.execute("SELECT COUNT(*) c FROM documents").fetchone()["c"]
-    total_fields = conn.execute("SELECT COUNT(*) c FROM vote_fields").fetchone()["c"]
-    class_counts = {
-        row["classification"] or "NULL": row["c"]
-        for row in conn.execute(
-            "SELECT final_classification classification, COUNT(*) c "
-            "FROM vote_fields GROUP BY final_classification"
-        )
-    }
-    vlm_counts = {
-        row["classification"] or "NULL": row["c"]
-        for row in conn.execute(
-            "SELECT vlm_classification classification, COUNT(*) c "
-            "FROM vote_fields WHERE vlm_classification IS NOT NULL "
-            "GROUP BY vlm_classification"
-        )
-    }
-    qualifying_docs = conn.execute(
-        f"""
-        SELECT COUNT(*) c FROM (
-            SELECT d.document_id
-            FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
-            WHERE vf.row_type='candidate'
-              AND (
-                (vf.vlm_classification IN ({','.join('?' for _ in VISIBLE_CLASSES)})
-                 AND COALESCE(vf.vlm_confidence, 0) >= ?)
-                OR vf.final_classification IN ({','.join('?' for _ in STRONG_CV_CLASSES)})
-              )
-            GROUP BY d.document_id
-        )
-        """,
-        (*VISIBLE_CLASSES, min_confidence, *STRONG_CV_CLASSES),
-    ).fetchone()["c"]
-    return {
-        "total_docs": total_docs,
-        "qualifying_docs": qualifying_docs,
-        "total_fields": total_fields,
-        "class_counts": class_counts,
-        "vlm_counts": vlm_counts,
-    }
+    The feed samples random rows across the whole DB, so the *first* request after a boot
+    or after a sync swaps in a fresh (cold) file would otherwise fault to disk — slow. The
+    slim serving DB fits comfortably in RAM, so one sequential read makes every subsequent
+    read a memory hit. Best-effort and silent: a warm failure must never affect serving.
+    Run this in a thread (it blocks on I/O).
+    """
+    try:
+        with open(db_path, "rb", buffering=0) as fh:
+            while fh.read(1 << 22):  # 4 MiB chunks
+                pass
+    except Exception:  # noqa: BLE001 — warming is purely an optimization
+        pass
 
 
 def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -209,46 +133,6 @@ def _puestos(
         "AND zone=? AND puesto IS NOT NULL AND puesto<>'' ORDER BY puesto",
         (department, department, municipality, municipality, zone),
     ).fetchall()
-
-
-def _qualifying_docs(
-    conn: sqlite3.Connection,
-    department: str | None,
-    anomaly_type: str | None,
-    min_confidence: float,
-    q: str | None,
-    limit: int,
-    offset: int,
-) -> tuple[list[sqlite3.Row], int]:
-    where, params = _filters(department, anomaly_type, min_confidence, q)
-    count_row = conn.execute(
-        f"""
-        SELECT COUNT(*) c FROM (
-            SELECT d.document_id
-            FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
-            WHERE {where}
-            GROUP BY d.document_id
-            HAVING COUNT(*) > 0
-        )
-        """,
-        params,
-    ).fetchone()
-    rows = conn.execute(
-        f"""
-        SELECT d.*,
-               COUNT(*) AS n_confirmed,
-               MAX(vf.vlm_confidence) AS max_confidence,
-               GROUP_CONCAT(DISTINCT vf.vlm_classification) AS anomaly_types
-        FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
-        WHERE {where}
-        GROUP BY d.document_id
-        HAVING n_confirmed > 0
-        ORDER BY n_confirmed DESC, max_confidence DESC, d.document_id
-        LIMIT ? OFFSET ?
-        """,
-        [*params, limit, offset],
-    ).fetchall()
-    return rows, count_row["c"]
 
 
 def crop_key(raw_crop_path: str) -> str:
@@ -400,8 +284,7 @@ def _voted_doc_rows(
     rank = {doc: i for i, doc in enumerate(top_ids)}
     placeholders = ",".join("?" for _ in top_ids)
     rows = conn.execute(
-        f"{_ACTA_SUMMARY_SELECT} WHERE {clause} AND d.document_id IN ({placeholders}) "
-        "GROUP BY d.document_id",
+        f"{_ACTA_SUMMARY_SELECT} WHERE {clause} AND d.document_id IN ({placeholders})",
         [*params, *top_ids],
     ).fetchall()
     rows = sorted(rows, key=lambda r: rank[r["document_id"]])
@@ -445,7 +328,10 @@ def create_app(
     output_dir = Path(output_dir).resolve()
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
     poll_cfg = poll or PollConfig.from_config()
-    community = CommunityStore(community_db or (output_dir / "community.sqlite"))
+    community = make_store(community_db or (output_dir / "community.sqlite"))
+    # Durable vote path: when SQS is configured, votes are enqueued (worker drains to
+    # Postgres) instead of written synchronously. None => synchronous write (local/tests).
+    vote_publisher = make_publisher()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -458,14 +344,21 @@ def create_app(
 
             interval = int(os.environ.get("E14_DB_SYNC_INTERVAL", "60"))
 
-            async def _pull() -> None:
-                await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
+            async def _warm() -> None:
+                await asyncio.to_thread(_warm_db, results_db)
+
+            async def _pull() -> str | None:
+                # Returns the new sha when a fresh snapshot was swapped in, else None.
+                return await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
 
             async def _sync_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
                     try:
-                        await _pull()
+                        if await _pull():
+                            # A new (cold) file was just swapped in — warm it so the next
+                            # feed request is a memory hit, not a disk fault.
+                            await _warm()
                     except Exception as exc:  # noqa: BLE001 — never let sync crash serving
                         print(f"db-sync: {exc}", flush=True)
 
@@ -477,6 +370,11 @@ def create_app(
                     await asyncio.wait_for(_pull(), timeout=180)
                 except Exception as exc:  # noqa: BLE001
                     print(f"db-sync (initial): {exc}", flush=True)
+            # Warm the page cache in the background so the first feed after a boot/deploy
+            # doesn't fault to cold disk. Non-blocking: serving starts immediately.
+            warm_task = asyncio.create_task(_warm())
+            app.state._bg_tasks.add(warm_task)
+            warm_task.add_done_callback(app.state._bg_tasks.discard)
             sync_task = asyncio.create_task(_sync_loop())
         yield
         if sync_task is not None:
@@ -540,67 +438,8 @@ def create_app(
 
     @app.get("/")
     async def home():
-        # The public landing is the poll (/browse); the analyst dashboard lives at /panel.
+        # The public landing is the crowd-voting browser.
         return RedirectResponse("/browse", status_code=308)
-
-    @app.get("/panel")
-    async def dashboard(
-        request: Request,
-        department: str | None = None,
-        anomaly_type: str | None = None,
-        min_confidence: float = Query(0.0, ge=0.0, le=1.0),
-        q: str | None = None,
-        page: int = Query(1, ge=1),
-    ):
-        with conn() as db:
-            docs, total = _qualifying_docs(
-                db, department, anomaly_type, min_confidence, q, PAGE_SIZE, (page - 1) * PAGE_SIZE
-            )
-            return templates.TemplateResponse(
-                request,
-                "dashboard.html",
-                {
-                    "summary": _summary(db, min_confidence),
-                    "departments": _departments(db),
-                    "docs": docs,
-                    "visible_classes": VISIBLE_CLASSES,
-                    "filters": {
-                        "department": department or "",
-                        "anomaly_type": anomaly_type or "",
-                        "min_confidence": min_confidence,
-                        "q": q or "",
-                    },
-                    "page": page,
-                    "pages": max(1, math.ceil(total / PAGE_SIZE)),
-                    "total": total,
-                },
-            )
-
-    @app.get("/doc/{document_id}")
-    async def doc_detail(request: Request, document_id: str, min_confidence: float = Query(0.0, ge=0.0, le=1.0)):
-        with conn() as db:
-            doc = db.execute("SELECT * FROM documents WHERE document_id=?", (document_id,)).fetchone()
-            if not doc:
-                raise HTTPException(status_code=404, detail="document not found")
-            fields = db.execute(
-                """
-                SELECT *
-                FROM vote_fields
-                WHERE document_id=?
-                ORDER BY CASE row_type WHEN 'candidate' THEN 0 ELSE 1 END, page_number, row_number
-                """,
-                (document_id,),
-            ).fetchall()
-            return templates.TemplateResponse(
-                request,
-                "doc.html",
-                {
-                    "doc": doc,
-                    "fields": fields,
-                    "visible_classes": VISIBLE_CLASSES,
-                    "min_confidence": min_confidence,
-                },
-            )
 
     @app.get("/crop")
     async def crop(path: str):
@@ -731,9 +570,7 @@ def create_app(
             "Allow: /browse\n"
             "Allow: /acta/\n"
             "Allow: /votar\n"
-            "Disallow: /panel\n"
             "Disallow: /admin\n"
-            "Disallow: /doc/\n"
             "Disallow: /api/\n"
             "Disallow: /crop\n"
             f"Sitemap: {config.SITE_URL}/sitemap.xml\n"
@@ -783,19 +620,6 @@ def create_app(
                 opts = []
         return {"options": opts}
 
-    @app.get("/api/flagged")
-    async def api_flagged(
-        department: str | None = None,
-        anomaly_type: str | None = None,
-        min_confidence: float = Query(0.0, ge=0.0, le=1.0),
-        q: str | None = None,
-        limit: int = Query(100, ge=1, le=1000),
-        offset: int = Query(0, ge=0),
-    ):
-        with conn() as db:
-            docs, total = _qualifying_docs(db, department, anomaly_type, min_confidence, q, limit, offset)
-            return {"total": total, "items": [_row_dict(row) for row in docs]}
-
     @app.get("/browse")
     async def browse(
         request: Request,
@@ -818,7 +642,8 @@ def create_app(
             zone = puesto = None
         elif not zone:
             puesto = None
-        where = ["vf.row_type='candidate'", "vf.raw_crop_path IS NOT NULL"]
+        # Only actas that actually have candidate crops (precomputed; no vote_fields join).
+        where = ["d.n_candidates>0"]
         params: list[Any] = []
         if department:
             where.append("(d.department_code=? OR d.department_name=?)")
@@ -847,8 +672,7 @@ def create_app(
                 id_list = list(popularity)
                 ph = ",".join("?" for _ in id_list) or "NULL"
                 rows = db.execute(
-                    f"{_ACTA_SUMMARY_SELECT} WHERE {clause} AND d.document_id IN ({ph}) "
-                    f"GROUP BY d.document_id",
+                    f"{_ACTA_SUMMARY_SELECT} WHERE {clause} AND d.document_id IN ({ph})",
                     [*params, *id_list],
                 ).fetchall()
                 rows.sort(key=lambda r: (
@@ -859,10 +683,7 @@ def create_app(
                 doc_rows = rows[offset : offset + BROWSE_ACTAS_PER_PAGE]
             else:
                 total_actas = db.execute(
-                    f"SELECT COUNT(*) c FROM ("
-                    f"  SELECT d.document_id FROM documents d "
-                    f"  JOIN vote_fields vf ON vf.document_id=d.document_id "
-                    f"  WHERE {clause} GROUP BY d.document_id)",
+                    f"SELECT COUNT(*) c FROM documents d WHERE {clause}",
                     params,
                 ).fetchone()["c"]
                 # The most-voted actas float to the very top (crowd attention compounds),
@@ -878,7 +699,7 @@ def create_app(
                         rest_clause += f" AND d.document_id NOT IN ({','.join('?' for _ in voted_ids)})"
                         rest_params += voted_ids
                     rest_rows = db.execute(
-                        f"{_ACTA_SUMMARY_SELECT} WHERE {rest_clause} GROUP BY d.document_id "
+                        f"{_ACTA_SUMMARY_SELECT} WHERE {rest_clause} "
                         f"{region_order} LIMIT ? OFFSET ?",
                         [*rest_params, rest_count, max(0, offset - len(voted_rows))],
                     ).fetchall()
@@ -1039,31 +860,44 @@ def create_app(
 
         Random order over candidate crops so a voter can't tell which acta a crop is from.
         Registers every cid it hands out so /c/{cid} and /api/vote can resolve them.
+
+        Sampling: pick random primary keys and fetch by id, NOT ``ORDER BY RANDOM()``.
+        ``vote_fields`` is ~1.5M candidate rows in a multi-GB DB; ``ORDER BY RANDOM()``
+        full-scans + sorts it (≈1s warm, tens of seconds on a cold page cache after a
+        deploy). Random-PK is a handful of index seeks (sub-ms) and stays snappy cold.
+        ``id`` is a dense AUTOINCREMENT PK so every pick lands on a row; ~3/4 of rows are
+        candidates, so we over-sample and top up until we have ``n`` distinct, non-excluded
+        cards. Uniform over the id space — plenty random for an anonymized deck.
         """
         exclude = exclude or set()
-        # Over-fetch a little so client-side exclusions still leave a full batch.
-        want = min(200, max(n, n + len(exclude)))
-        with conn() as db:
-            rows = db.execute(
-                """
-                SELECT document_id, page_number, row_number, section, raw_crop_path
-                FROM vote_fields
-                WHERE row_type='candidate' AND raw_crop_path IS NOT NULL
-                ORDER BY RANDOM() LIMIT ?
-                """,
-                (want,),
-            ).fetchall()
         out: list[dict] = []
         reg: list[tuple[str, str, str, str]] = []
-        for r in rows:
-            fkey = field_key_of(r["document_id"], r["page_number"], r["row_number"], r["section"])
-            cid = crop_id(poll_cfg.form_token_secret, fkey)
-            if cid in exclude:
-                continue
-            reg.append((cid, fkey, r["raw_crop_path"], r["document_id"]))
-            out.append({"cid": cid, "img_url": f"/c/{cid}"})
-            if len(out) >= n:
-                break
+        seen: set[str] = set(exclude)
+        with conn() as db:
+            maxid = db.execute("SELECT max(id) AS m FROM vote_fields").fetchone()["m"] or 0
+            attempts = 0
+            while len(out) < n and maxid and attempts < 8:
+                attempts += 1
+                ids = [random.randint(1, maxid) for _ in range((n - len(out)) * 4)]
+                placeholders = ",".join("?" * len(ids))
+                rows = db.execute(
+                    f"SELECT document_id, page_number, row_number, section, raw_crop_path "
+                    f"FROM vote_fields WHERE id IN ({placeholders}) "
+                    f"AND row_type='candidate' AND raw_crop_path IS NOT NULL",
+                    ids,
+                ).fetchall()
+                for r in rows:
+                    fkey = field_key_of(
+                        r["document_id"], r["page_number"], r["row_number"], r["section"]
+                    )
+                    cid = crop_id(poll_cfg.form_token_secret, fkey)
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    reg.append((cid, fkey, r["raw_crop_path"], r["document_id"]))
+                    out.append({"cid": cid, "img_url": f"/c/{cid}"})
+                    if len(out) >= n:
+                        break
         community.register_cids(reg)
         return out
 
@@ -1170,11 +1004,21 @@ def create_app(
         if not row:
             raise HTTPException(status_code=404, detail="unknown crop")
         field_key = row["field_key"]
-        if value == "strange":
-            community.record_flag(field_key, token)
+        if vote_publisher is not None:
+            # Durable path: enqueue (never lost) and return an OPTIMISTIC tally
+            # (current + 1 for the voted direction), reconciled once the worker
+            # commits. A duplicate vote is dedup'd downstream; the count just shows
+            # +1 too high until the next read. Acceptable for crowd voting.
+            tally = community.counts_among([field_key])[field_key]
+            vote_publisher.publish(field_key, token, value)
+            tally[value] += 1
         else:
-            community.record_appeal(field_key, token)
-        tally = community.counts_among([field_key])[field_key]
+            # Synchronous path (SQLite local/tests / single-machine fallback).
+            if value == "strange":
+                community.record_flag(field_key, token)
+            else:
+                community.record_appeal(field_key, token)
+            tally = community.counts_among([field_key])[field_key]
         return _flag_response(
             {"ok": True, "good": tally["good"], "strange": tally["strange"]}, 200, sid, new_sid
         )

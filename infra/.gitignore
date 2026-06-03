@@ -1,0 +1,7 @@
+.venv/
+cdk.out/
+__pycache__/
+*.pyc
+# AWS CLI installer cruft, if extracted here
+awscliv2.zip
+aws/
