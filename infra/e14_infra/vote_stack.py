@@ -49,7 +49,17 @@ AURORA_MAX_ACU = 8
 # SQS visibility timeout must exceed the worker's batch processing time.
 QUEUE_VISIBILITY = Duration.seconds(60)
 QUEUE_RETENTION = Duration.days(14)
-DLQ_MAX_RECEIVE = 5
+# Receives before a message is moved to the DLQ. Every vote is irreplaceable, so this is
+# the tolerance for a *transient* Aurora outage: at 60s visibility, 5 receives = only ~5min
+# before a still-valid vote would DLQ. 60 buys ~hours of outage headroom; poison messages
+# (which can never commit) just retry more, which is cheap and harmless.
+DLQ_MAX_RECEIVE = 60
+
+# Cap how many vote-drain Lambdas SQS runs concurrently. Unbounded fan-out under a 50-500/s
+# spike would stampede the RDS Data API (it throttles) -> batch failures -> redelivery ->
+# more concurrency, a feedback loop. A cap keeps the queue the smooth buffer it exists to be;
+# backlog is recoverable, a throttle storm is not. Tune up from the staging load test.
+DRAIN_MAX_CONCURRENCY = 20
 
 
 class VoteStack(Stack):
@@ -210,6 +220,7 @@ class VoteStack(Stack):
                 batch_size=10,
                 max_batching_window=Duration.seconds(5),
                 report_batch_item_failures=True,
+                max_concurrency=DRAIN_MAX_CONCURRENCY,  # protect Aurora/Data API from a stampede
             )
         )
         CfnOutput(self, "VoteDrainFn", value=fn.function_name)
