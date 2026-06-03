@@ -301,3 +301,42 @@ def test_feed_random_pk_sampling(tmp_path: Path) -> None:
             assert got.isdisjoint(set(cids[:4]))
 
     asyncio.run(run())
+
+
+def test_security_headers_and_docs_hidden(tmp_path: Path) -> None:
+    """Hardening: docs/openapi are 404 by default, and baseline headers are on every response."""
+    db = tmp_path / "results.sqlite"
+    output_dir = tmp_path / "out"
+    DetectorStore(db).close()
+
+    async def run():
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            for p in ("/docs", "/redoc", "/openapi.json"):
+                assert (await client.get(p)).status_code == 404
+            r = await client.get("/votar")
+            assert r.headers.get("x-content-type-options") == "nosniff"
+            assert r.headers.get("x-frame-options") == "DENY"
+            assert "frame-ancestors" in r.headers.get("content-security-policy", "")
+
+    asyncio.run(run())
+
+
+def test_origin_allowlist_blocks_cross_site_votes(tmp_path: Path, monkeypatch) -> None:
+    """With an allowlist set, a foreign Origin is rejected; same-origin and header-less pass."""
+    from e14detector.webapp import _origin_allowed
+    from types import SimpleNamespace
+
+    def req(origin=None):
+        h = {} if origin is None else {"origin": origin}
+        return SimpleNamespace(headers=h)
+
+    # Not configured -> never blocks.
+    monkeypatch.setattr(config, "ALLOWED_ORIGINS", [])
+    assert _origin_allowed(req("https://evil.example")) is True
+
+    monkeypatch.setattr(config, "ALLOWED_ORIGINS", ["https://veeduria-ciudadana-elecciones-colombia-2026.com"])
+    assert _origin_allowed(req("https://evil.example")) is False           # cross-site browser
+    assert _origin_allowed(req("https://veeduria-ciudadana-elecciones-colombia-2026.com")) is True
+    assert _origin_allowed(req("https://veeduria-ciudadana-elecciones-colombia-2026.com/")) is True  # trailing slash
+    assert _origin_allowed(req(None)) is True                              # non-browser client

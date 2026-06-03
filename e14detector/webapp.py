@@ -391,7 +391,25 @@ def create_app(
             sync_task.cancel()
         community.close()
 
-    app = FastAPI(title="Revision de posibles irregularidades E-14", lifespan=lifespan)
+    # Hide the interactive docs / OpenAPI schema in prod (they publish the whole route+param
+    # surface). Re-enable locally with E14_EXPOSE_DOCS=1.
+    _docs = {} if config.EXPOSE_DOCS else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    app = FastAPI(title="Revision de posibles irregularidades E-14", lifespan=lifespan, **_docs)
+
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        """Baseline hardening headers on every response. Deliberately NO restrictive
+        ``default-src`` CSP (would break the inline JS/Turnstile widget); only frame-ancestors
+        (anti-clickjacking) plus the cheap, universally-safe headers."""
+        resp = await call_next(request)
+        h = resp.headers
+        h.setdefault("X-Content-Type-Options", "nosniff")
+        h.setdefault("X-Frame-Options", "DENY")
+        h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return resp
+
     app.state.results_db = results_db
     app.state.output_dir = output_dir
     app.state.community = community
@@ -996,6 +1014,10 @@ def create_app(
 
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         new_sid = "sid" not in request.cookies
+
+        # Reject cross-site browser vote casting (see _origin_allowed). Cheap, before any DB work.
+        if not _origin_allowed(request):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
         token = voter_token(poll_cfg.voter_salt, _client_ip(request))
 
         # The store calls below are blocking boto3 (Aurora Data API) / SQS round-trips. In an
@@ -1054,6 +1076,24 @@ def bot_check(payload: dict, sid: str, poll: PollConfig) -> str:
     ):
         return "bad_token"
     return ""
+
+
+def _origin_allowed(request: Request) -> bool:
+    """Block cross-site (CSRF-style) vote casting from a browser.
+
+    Policy: only reject when an ``Origin`` header is present AND not in the allowlist — the
+    unambiguous cross-site-browser case. A same-origin fetch sends a matching Origin; a
+    non-browser client (no Origin) is left to the rate-limit/Turnstile controls rather than
+    blocked here, so we never lock out legitimate traffic. No allowlist configured => allow
+    (local dev / tests). CORS can't do this — it governs response *reads*, not the request.
+    """
+    allowed = config.ALLOWED_ORIGINS
+    if not allowed:
+        return True
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    return origin.rstrip("/") in allowed
 
 
 def _flag_response(body: dict, status: int, sid: str, set_sid: bool) -> JSONResponse:

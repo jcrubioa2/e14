@@ -167,6 +167,17 @@ TURNSTILE_ENABLED = os.environ.get("E14_TURNSTILE_ENABLED", "").lower() in ("1",
 # Operator-only poll dashboard (/admin/poll): private vote counts + AI verdicts. Disabled
 # (404) unless this token is set; access requires ?key=<token>.
 ADMIN_TOKEN = os.environ.get("E14_ADMIN_TOKEN", "")
+
+# --- Web hardening -------------------------------------------------------------------------
+# Origins permitted to cast votes (comma-separated, e.g. "https://e14-poll.fly.dev,https://
+# midomain.org"). When set, /api/vote rejects a request whose Origin header is present but not
+# in this list — blocking cross-site (CSRF-style) auto-voting from another page using a
+# visitor's session. Empty => not enforced (local dev / tests). A request with NO Origin (a
+# non-browser client) is left to the rate-limit / Turnstile controls, not blocked here.
+ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("E14_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# Interactive API docs (/docs, /redoc, /openapi.json) publish the full route+schema surface.
+# Off by default (prod); set E14_EXPOSE_DOCS=1 for local exploration.
+EXPOSE_DOCS = os.environ.get("E14_EXPOSE_DOCS", "").lower() in ("1", "true", "yes")
 # Salt for the daily, rotating voter-identity hash (privacy: no raw IPs stored).
 VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
 # In-app bot check (replaces Turnstile when there is no owned domain). The acta page
