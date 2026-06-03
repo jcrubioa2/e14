@@ -76,8 +76,6 @@ bash scripts/pull_from_lead.sh           # rsync data/actas/ + .env (~22 GB)
 
 Override lead host/repo if needed: `E14_LEAD_HOST=100.x.x.x` or `E14_LEAD_REPO=/path/to/e14`.
 
-**Fallback:** Windows-hosted SSH via portproxy — `scripts/windows-wsl-ssh-portproxy.ps1` (Admin PowerShell on the lead).
-
 ### Worker env + supervisor
 
 ```bash

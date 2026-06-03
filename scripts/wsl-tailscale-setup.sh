@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install Tailscale inside WSL (run on BOTH LEGION and RYZEN9).
-# After this: SSH/rsync WSL→WSL on port 22 — no Windows portproxy needed.
+# Install Tailscale inside WSL (run on BOTH machines).
+# After this: SSH/rsync WSL→WSL on port 22.
 set -euo pipefail
 
 if ! command -v tailscale >/dev/null 2>&1; then
