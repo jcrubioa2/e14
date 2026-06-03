@@ -47,14 +47,6 @@
     .sib .c { font-size: 11px; color: var(--muted); margin-top: 4px; }
     .empty, .err { text-align: center; color: var(--muted); padding: 40px 0; }
     .progress { text-align: center; color: var(--muted); font-size: 12px; margin-top: 10px; }
-    /* Billboard */
-    .board { margin-top: 26px; border-top: 1px solid var(--line); padding-top: 16px; }
-    .board h2 { font-size: 15px; margin: 0 0 10px; }
-    .board-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
-    .board-item { border: 1px solid var(--line); border-radius: 8px; padding: 6px; text-align: center; }
-    .board-item img { max-width: 100%; max-height: 70px; object-fit: contain; }
-    .board-item .c { font-size: 11px; margin-top: 4px; }
-    .board-item .c .s { color: var(--bad); font-weight: 700; } .board-item .c .g { color: var(--good); font-weight: 700; }
   </style>
 </head>
 <body>
@@ -71,20 +63,6 @@
       <div class="empty" id="loading">Cargando casillas…</div>
     </div>
     <div class="progress" id="progress"></div>
-
-    {% if billboard %}
-    <section class="board" id="board">
-      <h2>Las más votadas por la comunidad</h2>
-      <div class="board-list">
-        {% for b in billboard %}
-        <div class="board-item">
-          <img loading="lazy" src="{{ b.img_url }}" alt="casilla de votos">
-          <div class="c"><span class="s">{{ b.strange }} extrañas</span> · <span class="g">{{ b.good }} bien</span></div>
-        </div>
-        {% endfor %}
-      </div>
-    </section>
-    {% endif %}
   </main>
 
   <script>

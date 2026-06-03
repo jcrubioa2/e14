@@ -994,19 +994,17 @@ def create_app(
     @app.get("/votar")
     async def votar(request: Request):
         # The headline product: an anonymized, mobile-first swipe feed. The page ships a
-        # signed form token (in-app bot check) and an initial billboard of hot crops; the
-        # deck itself is loaded from /api/feed and votes go to /api/vote.
+        # signed form token (in-app bot check); the deck itself is loaded from /api/feed
+        # and votes go to /api/vote.
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         form_token = (
             issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
         )
-        billboard = _hot_crops_payload()
         response = templates.TemplateResponse(
             request,
             "swipe.html",
             {
                 "form_token": form_token,
-                "billboard": billboard,
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/votar",
                 "page_title": "Vota las casillas — Veeduría ciudadana E-14 2026",
