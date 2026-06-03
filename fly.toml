@@ -34,7 +34,7 @@ primary_region = 'dfw'
   # Origins allowed to cast votes (/api/vote rejects a foreign browser Origin). The custom
   # domain is the real frontend; the *.fly.dev origin is kept so direct access still works
   # during the DNS transition — drop it once the app is served only via the custom domain.
-  E14_ALLOWED_ORIGINS = 'https://veeduria-ciudadana-elecciones-colombia-2026.com,https://e14-poll.fly.dev'
+  E14_ALLOWED_ORIGINS = 'https://veeduria-ciudadana-elecciones-colombia-2026.com,https://www.veeduria-ciudadana-elecciones-colombia-2026.com,https://e14-poll.fly.dev'
 
 # Web-only app. Votes are enqueued by web to SQS and durably committed by the e14-vote-drain
 # Lambda (see infra/), so neither web nor the DB being momentarily down loses a vote (SQS
