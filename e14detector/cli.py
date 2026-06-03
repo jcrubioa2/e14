@@ -27,6 +27,9 @@ def cmd_process(args: argparse.Namespace) -> int:
         force=args.force,
         workers=args.workers,
         crop_only=args.crop_only,
+        depto=args.depto,
+        dept_from=args.dept_from,
+        dept_to=args.dept_to,
     )
     print(
         f"done={totals['done']} skipped={totals['skipped']} "
@@ -113,6 +116,21 @@ def cmd_publish_crops(args: argparse.Namespace) -> int:
         f"uploaded={totals['uploaded']} skipped={totals['skipped']} failed={totals['failed']}"
     )
     return 1 if totals["failed"] else 0
+
+
+def cmd_pull_db(args: argparse.Namespace) -> int:
+    from .dbsync import pull_db
+
+    info = pull_db(Path(args.output_dir), bucket=args.bucket, verbose=True)
+    if info is None:
+        print("pull-db: nothing to merge (no live pointer yet)")
+        return 0
+    print(
+        f"pull-db: merged remote@{info.get('sha256', '?')} "
+        f"(+{info['docs_added']} actas, +{info['fields_added']} fields, "
+        f"{info['docs_total']:,} total)"
+    )
+    return 0
 
 
 def cmd_publish_db(args: argparse.Namespace) -> int:
@@ -282,7 +300,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip CV analysis; only render+crop (fast national first pass, Gemma is the analyzer)",
     )
+    process.add_argument("--depto", help="only process this department code (e.g. 16)")
+    process.add_argument("--dept-from", help="inclusive start of department code range (e.g. 17)")
+    process.add_argument("--dept-to", help="inclusive end of department code range (e.g. 33)")
     process.set_defaults(func=cmd_process)
+
+    pull_db_cmd = sub.add_parser(
+        "pull-db",
+        help="download the live published results DB from Tigris/CDN and merge into local (multi-PC sync)",
+    )
+    pull_db_cmd.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    pull_db_cmd.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    pull_db_cmd.set_defaults(func=cmd_pull_db)
 
     process_one = sub.add_parser("process-one", help="process a single PDF (fast iteration) and optionally refresh its audit page")
     process_one.add_argument("--pdf", required=True)

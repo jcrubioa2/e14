@@ -226,6 +226,35 @@ def test_publish_db_refuses_to_shrink_live_db(tmp_path: Path) -> None:
     assert info2 is not None and not info2.get("guarded")
 
 
+def test_merge_results_db_union_without_overwriting_local(tmp_path: Path) -> None:
+    """Remote actas are merged in; local actas are kept; vote_fields follow new docs only."""
+    local = tmp_path / "local" / "results.sqlite"
+    remote = tmp_path / "remote" / "results.sqlite"
+    _make_db(local, 2)  # d0, d1
+    remote.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(remote)
+    con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT, "
+                "department_code TEXT, municipality_code TEXT, zone TEXT, puesto TEXT)")
+    con.execute("CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, row_type TEXT, raw_crop_path TEXT)")
+    for i in range(2, 5):
+        con.execute("INSERT INTO documents VALUES (?, ?, NULL, NULL, NULL, NULL)", (f"d{i}", f"d{i}.pdf"))
+        con.execute(
+            "INSERT INTO vote_fields (document_id, row_type, raw_crop_path) VALUES (?, 'candidate', ?)",
+            (f"d{i}", f"crops/remote_{i}.png"),
+        )
+    con.commit()
+    con.close()
+
+    stats = dbsync.merge_results_db(local, remote, verbose=False)
+    assert stats["docs_added"] == 3
+    assert stats["fields_added"] == 3
+    con = sqlite3.connect(local)
+    docs = {r[0] for r in con.execute("SELECT document_id FROM documents")}
+    assert docs == {"d0", "d1", "d2", "d3", "d4"}
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 5
+    con.close()
+
+
 def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) -> None:
     src_dir = tmp_path / "out"
     _make_db(src_dir / "results" / "results.sqlite", 2)
