@@ -11,3 +11,6 @@ files/
 
 # transient: core-affinity choice written by scripts/cpu_throttle.sh
 .cpu_set
+.gitsecret/keys/random_seed
+!*.secret
+.gitsecret/keys/*~
