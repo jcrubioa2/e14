@@ -58,14 +58,31 @@ pip install -e ".[publish]"   # boto3 for pull-db / publish
 # .env from fly storage create (AWS_* + BUCKET_NAME + E14_CDN_BASE_URL)
 ```
 
-## Supervisor (pull → crop loop)
+### WSL fleet networking (Tailscale)
+
+Install Tailscale **inside WSL** on each machine (same account). Direct WSL→WSL SSH on port 22 — no Windows port forwarding needed.
 
 ```bash
-# PC 2 example
-export E14_DEPT_FROM=17
-export E14_DEPT_TO=33
-export E14_WORKER_ID=pc2
-nohup bash scripts/crop_supervisor.sh >> logs/crop_supervisor.log 2>&1 & disown
+bash scripts/wsl-tailscale-setup.sh   # both machines; rename hosts in Tailscale admin
+ssh quicazan@ryzen9                   # test from worker → lead
+```
+
+Copy PDFs + `.env` from the lead:
+
+```bash
+bash scripts/pull_from_lead.sh --probe   # inspect remote paths
+bash scripts/pull_from_lead.sh           # rsync data/actas/ + .env (~22 GB)
+```
+
+Override lead host/repo if needed: `E14_LEAD_HOST=100.x.x.x` or `E14_LEAD_REPO=/path/to/e14`.
+
+**Fallback:** Windows-hosted SSH via portproxy — `scripts/windows-wsl-ssh-portproxy.ps1` (Admin PowerShell on the lead).
+
+### Worker env + supervisor
+
+```bash
+source scripts/crop_worker_env.sh    # set E14_DEPT_FROM / E14_DEPT_TO / workers
+nohup bash scripts/start_crop_worker.sh >> logs/crop_supervisor.log 2>&1 & disown
 ```
 
 The supervisor runs **`pull-db`** before each crop pass so restarts pick up other machines' progress.
