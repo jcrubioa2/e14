@@ -62,6 +62,8 @@ nohup bash scripts/start_crop_fleet_worker.sh >> logs/crop_supervisor.log 2>&1 &
 
 Manual ops: `e14detector fleet-status`, `fleet-schedule`, `fleet-current --worker legion-1`.
 
+Only **one** `crop_supervisor_fleet.sh` per `E14_WORKER_ID` (file lock under `/tmp/e14-crop-supervisor-<worker>.lock`). A second start exits immediately — check with `pgrep -af crop_supervisor_fleet`.
+
 ### Legacy: static department ranges
 
 Fixed ranges still work (`E14_DEPT_FROM` / `E14_DEPT_TO` + `scripts/start_crop_worker.sh`). Prefer fleet mode when two PCs should stay busy without overlapping.
@@ -81,7 +83,13 @@ git checkout feature/multi-machine-crop-sync && git pull
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[publish]"   # boto3 for pull-db / publish
 
-# .env from fly storage create (AWS_* + BUCKET_NAME + E14_CDN_BASE_URL)
+# .env (Tigris / Fly): encrypted in git as .env.secret (git-secret + GPG)
+# Install once: git clone https://github.com/sobolevn/git-secret.git /tmp/git-secret && \
+#   cd /tmp/git-secret && make build PREFIX=$HOME/.local && make install PREFIX=$HOME/.local
+# Reveal (interactive WSL terminal — enter GPG passphrase if you set one at keygen):
+bash scripts/reveal_env.sh
+# Or: export PATH="$HOME/.local/bin:$PATH" && git secret reveal
+# Fallback: pull_from_lead.sh copies plaintext .env from Ryzen if already revealed there.
 ```
 
 ### WSL fleet networking (Tailscale)
