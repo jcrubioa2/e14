@@ -89,6 +89,14 @@
     let voted = 0;
     let fetching = false;
 
+    // Rotating thank-you shown after each vote. We deliberately do NOT reveal a crop's tally
+    // while voting (avoids anchoring/herding the next voter); the billboard shows aggregates.
+    const THANKS = [
+      '¡Gracias por tu voto!', '¡Voto registrado, gracias!', '¡Listo! Gracias por participar.',
+      '¡Gracias! Sigamos con la siguiente.', '¡Gracias por ayudar en la veeduría!',
+    ];
+    function thanks() { return THANKS[Math.floor(Math.random() * THANKS.length)]; }
+
     // --- Turnstile session gate ---------------------------------------------------------
     // When a sitekey is configured the page loads without a form token; we solve an invisible
     // Turnstile challenge once and exchange it at /api/session for the token that votes carry.
@@ -216,7 +224,7 @@
         }
         const data = await res.json().catch(() => ({}));
         if (data && data.ok) {
-          tally.innerHTML = '¡Gracias! · <b class="s">' + (data.strange || 0) + ' extrañas</b> · <b class="g">' + (data.good || 0) + ' bien</b>';
+          tally.textContent = thanks();
           voted++;
           setTimeout(next, 550);
         } else {
@@ -244,8 +252,8 @@
         for (const s of (data.items || [])) {
           const d = document.createElement('div');
           d.className = 'sib';
-          d.innerHTML = '<img loading="lazy" src="' + s.img_url + '" alt="casilla de la misma acta">' +
-                        '<div class="c">' + s.strange + ' extrañas · ' + s.good + ' bien</div>';
+          // Context only — no tallies while voting (same reason as the post-vote message).
+          d.innerHTML = '<img loading="lazy" src="' + s.img_url + '" alt="casilla de la misma acta">';
           box.appendChild(d);
         }
         if (!box.children.length) box.innerHTML = '<div class="c">Sin más casillas.</div>';
