@@ -73,6 +73,19 @@ CREATE TABLE IF NOT EXISTS rate_buckets (
     tokens REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+
+-- Reverse map for anonymized crop ids. The swipe feed hands out opaque ``cid``s
+-- (see ``crop_id``); to serve the image and to record a vote we must resolve a cid
+-- back to its field key + crop path WITHOUT the client ever seeing them. We register
+-- a row here the moment a cid is surfaced (feed / billboard / acta-siblings), so the
+-- table only holds crops actually shown, survives restarts (shareable /c/{cid} links
+-- keep working), and never needs the full multi-million-row crop set in memory.
+CREATE TABLE IF NOT EXISTS cid_index (
+    cid TEXT PRIMARY KEY,
+    field_key TEXT NOT NULL,
+    crop_rel TEXT NOT NULL,
+    document_id TEXT NOT NULL
+);
 """
 
 
@@ -83,6 +96,19 @@ def _now_iso() -> str:
 def field_key_of(document_id: str, page_number: int, row_number: int, section: str | None) -> str:
     """Stable identity for a vote field; survives detector re-runs."""
     return f"{document_id}:{page_number}:{row_number}:{section or ''}"
+
+
+def crop_id(secret: str, field_key: str) -> str:
+    """Opaque, anonymized public id for a crop.
+
+    The swipe feed must NOT leak which acta/location a crop belongs to, but the server
+    still needs to map a vote back to its ``field_key``. An HMAC over the field key gives
+    an id that is (a) un-guessable without the secret, so it reveals nothing about the
+    acta, and (b) deterministic, so the same crop always gets the same id. The reverse
+    direction (cid -> field_key/path) is stored server-side in ``cid_index`` as crops are
+    surfaced; see [[CommunityStore.register_cid]].
+    """
+    return hmac.new(secret.encode("utf-8"), field_key.encode("utf-8"), hashlib.sha1).hexdigest()[:12]
 
 
 def voter_token(salt: str, client_ip: str, day: str | None = None) -> str:
@@ -522,3 +548,88 @@ class CommunityStore:
             )
             self.conn.commit()
             return allowed
+
+    # -- anonymized crop ids (swipe feed) -----------------------------------
+    def register_cid(self, cid: str, field_key: str, crop_rel: str, document_id: str) -> None:
+        """Remember how to resolve an opaque ``cid`` back to its crop (server-side only)."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO cid_index (cid, field_key, crop_rel, document_id) "
+                "VALUES (?,?,?,?)",
+                (cid, field_key, crop_rel, document_id),
+            )
+            self.conn.commit()
+
+    def register_cids(self, rows: list[tuple[str, str, str, str]]) -> None:
+        """Batch ``register_cid`` for a whole feed/billboard page in one commit."""
+        if not rows:
+            return
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO cid_index (cid, field_key, crop_rel, document_id) "
+                "VALUES (?,?,?,?)",
+                rows,
+            )
+            self.conn.commit()
+
+    def resolve_cid(self, cid: str) -> sqlite3.Row | None:
+        """(field_key, crop_rel, document_id) for a cid, or None if never surfaced."""
+        with self._lock:
+            return self.conn.execute(
+                "SELECT field_key, crop_rel, document_id FROM cid_index WHERE cid=?", (cid,)
+            ).fetchone()
+
+    # -- public tallies (now shown to everyone, not just admin) -------------
+    def strange_count(self, field_key: str) -> int:
+        """Distinct voters who marked this crop 'se ve extraño' (the flags tally)."""
+        return self.distinct_votes(field_key)
+
+    def good_count(self, field_key: str) -> int:
+        """Distinct voters who marked this crop 'se ve bien' (the appeals tally)."""
+        return self.distinct_appeals(field_key)
+
+    def counts_among(self, field_keys: list[str]) -> dict[str, dict[str, int]]:
+        """Batch public tallies: ``{field_key: {'good': n, 'strange': n}}`` for a page."""
+        out = {k: {"good": 0, "strange": 0} for k in field_keys}
+        if not field_keys:
+            return out
+        with self._lock:
+            ph = ",".join("?" for _ in field_keys)
+            for r in self.conn.execute(
+                f"SELECT field_key, COUNT(DISTINCT voter_token) n FROM flags "
+                f"WHERE field_key IN ({ph}) GROUP BY field_key", field_keys):
+                out[r["field_key"]]["strange"] = r["n"]
+            for r in self.conn.execute(
+                f"SELECT field_key, COUNT(DISTINCT voter_token) n FROM appeals "
+                f"WHERE field_key IN ({ph}) GROUP BY field_key", field_keys):
+                out[r["field_key"]]["good"] = r["n"]
+        return out
+
+    def hot_crops(self, limit: int) -> list[dict]:
+        """Crops with the most community attention, for the public billboard.
+
+        Ranked by 'strange' weight first (the signal people care about), then total
+        engagement. Returns ``{field_key, good, strange}`` — the webapp resolves each to
+        an anonymized cid + image url. Only crops with at least one vote appear, so the
+        scan is over the (small) vote tables, never the multi-million-row crop set.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT field_key,
+                       SUM(strange) AS strange, SUM(good) AS good
+                FROM (
+                    SELECT field_key, COUNT(DISTINCT voter_token) AS strange, 0 AS good
+                      FROM flags GROUP BY field_key
+                    UNION ALL
+                    SELECT field_key, 0 AS strange, COUNT(DISTINCT voter_token) AS good
+                      FROM appeals GROUP BY field_key
+                )
+                GROUP BY field_key
+                ORDER BY strange DESC, (strange + good) DESC, field_key
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [{"field_key": r["field_key"], "good": r["good"] or 0,
+                 "strange": r["strange"] or 0} for r in rows]
