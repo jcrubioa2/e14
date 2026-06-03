@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -53,12 +54,59 @@ _ALGO_FLAG_SQL = (
 # One acta-summary row for the /browse list (one entry per document). Reads the precomputed
 # per-acta candidate count straight off the small documents table — no join/GROUP BY over the
 # 1.5M-row vote_fields table. Every served DB carries n_candidates: DetectorStore maintains it
-# incrementally, and dbsync.build_serving_db recomputes it into the slim serving snapshot.
+# incrementally, dbsync.build_serving_db recomputes it into the slim serving snapshot, and
+# ensure_n_candidates() backfills it at load for any snapshot that somehow lacks it.
 _ACTA_SUMMARY_SELECT = (
     "SELECT d.document_id, d.department_code, d.department_name, "
     "d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
     "d.n_candidates AS n_candidates FROM documents d"
 )
+
+
+def ensure_n_candidates(db_path: Path) -> bool:
+    """Guarantee the served ``documents`` table carries the precomputed ``n_candidates`` column.
+
+    /browse reads ``d.n_candidates`` to list + filter actas without joining the 1.5M-row
+    vote_fields table. A snapshot that ships WITHOUT the column (a raw results.sqlite, or one
+    built before the column existed) makes every /browse request a hard 500 (``no such column``).
+
+    Rather than pay a per-request vote_fields scan forever, fix the data ONCE at load: add the
+    column if missing and backfill it from vote_fields — the same work build_serving_db does, and
+    with the (document_id,row_type) index it's a seconds-long pass, not minutes. Idempotent (a
+    no-op when the column is already there) and best-effort: if the file is read-only we log and
+    return False rather than crash boot. Returns True iff the column is present afterwards.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(db_path, timeout=60.0)
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_n_candidates: open failed: {exc}", flush=True)
+        return False
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+        if not cols:
+            return False  # no documents table at all — nothing to migrate
+        if "n_candidates" in cols:
+            return True
+        con.execute("ALTER TABLE documents ADD COLUMN n_candidates INTEGER NOT NULL DEFAULT 0")
+        # Keep the correlated COUNT an index range-probe per acta, not a full vote_fields scan.
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vf_doc_type ON vote_fields(document_id, row_type)"
+        )
+        con.execute(
+            "UPDATE documents SET n_candidates = COALESCE("
+            "(SELECT COUNT(*) FROM vote_fields vf WHERE vf.document_id = documents.document_id "
+            "AND vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL), 0)"
+        )
+        con.commit()
+        print(f"ensure_n_candidates: backfilled n_candidates on {db_path}", flush=True)
+        return True
+    except sqlite3.Error as exc:  # noqa: BLE001 — never let a migration failure crash boot
+        print(f"ensure_n_candidates: backfill failed (serving read-only?): {exc}", flush=True)
+        return False
+    finally:
+        con.close()
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.resolve()}?mode=ro"
@@ -327,6 +375,9 @@ def create_app(
 ) -> FastAPI:
     results_db = Path(results_db)
     output_dir = Path(output_dir).resolve()
+    # Backfill the precomputed n_candidates column if this snapshot lacks it, so /browse never
+    # 500s on `no such column`. No-op for an up-to-date DB; runs again after each db-sync swap.
+    ensure_n_candidates(results_db)
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
     poll_cfg = poll or PollConfig.from_config()
     community = make_store(community_db or (output_dir / "community.sqlite"))
@@ -359,7 +410,12 @@ def create_app(
 
             async def _pull() -> str | None:
                 # Returns the new sha when a fresh snapshot was swapped in, else None.
-                return await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
+                sha = await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
+                if sha:
+                    # A freshly pulled snapshot might predate the n_candidates column — backfill
+                    # it before serving so /browse stays on the fast precomputed path.
+                    await asyncio.to_thread(ensure_n_candidates, results_db)
+                return sha
 
             async def _sync_loop() -> None:
                 while True:
@@ -747,11 +803,16 @@ def create_app(
             }
             for r in doc_rows
         ]
+        # The community billboard (most-reported ACTAS) heads the directory on the first,
+        # unfiltered page — it's the social proof / "look what people found" hook. Skip it on
+        # deeper pages and the review view (which is itself a most-voted list).
+        hot_actas = _hot_actas_payload() if (page == 1 and not review) else []
         return templates.TemplateResponse(
             request,
             "browse.html",
             {
                 "actas": actas,
+                "hot_actas": hot_actas,
                 "progress": progress,
                 "departments": departments,
                 "municipios": municipios,
@@ -863,10 +924,11 @@ def create_app(
                 "turnstile_sitekey": poll_cfg.turnstile_sitekey if turnstile_on else "",
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/votar",
-                "page_title": "Vota las casillas — Veeduría ciudadana E-14 2026",
+                "page_title": "Marca las casillas alteradas — Veeduría ciudadana E-14 2026",
                 "meta_description": (
-                    "Mira casillas de votos escritas a mano, al azar y sin saber de qué mesa "
-                    "son, y vota si se ven bien o extrañas. Veeduría ciudadana elecciones 2026."
+                    "Revisa una mesa completa: mira las casillas de votos escritas a mano, sin "
+                    "saber de qué mesa son, y marca las que se vean alteradas. Veeduría "
+                    "ciudadana elecciones Colombia 2026."
                 ),
             },
         )
@@ -944,32 +1006,167 @@ def create_app(
         skip = {c for c in exclude.split(",") if c}
         return {"items": _feed_payload(n, skip)}
 
+    def _acta_deck_payload(exclude_docs: set[str] | None = None) -> list[dict]:
+        """All candidate crops of ONE randomly-picked acta, shuffled and anonymized.
+
+        Powers the grid-voting page: the contributor sees every casilla of a single mesa
+        at once (so the whole acta gets reviewed in one pass) WITHOUT learning which mesa
+        it is — the response carries only opaque cids + image urls, never the document id,
+        location or candidate names. Picks the acta the same cheap random-PK way the feed
+        samples crops (a few index seeks, snappy even on a cold page cache); see
+        [[_feed_payload]]. ``exclude_docs`` is unused server-side today but lets a caller
+        steer away from a just-served acta. Registers every cid so /c/{cid} and
+        /api/vote-batch can resolve them.
+        """
+        exclude_docs = exclude_docs or set()
+        with conn() as db:
+            maxid = db.execute("SELECT max(id) AS m FROM vote_fields").fetchone()["m"] or 0
+            document_id = None
+            attempts = 0
+            while document_id is None and maxid and attempts < 12:
+                attempts += 1
+                ids = [random.randint(1, maxid) for _ in range(8)]
+                placeholders = ",".join("?" * len(ids))
+                rows = db.execute(
+                    f"SELECT document_id FROM vote_fields WHERE id IN ({placeholders}) "
+                    f"AND row_type='candidate' AND raw_crop_path IS NOT NULL",
+                    ids,
+                ).fetchall()
+                for r in rows:
+                    if r["document_id"] not in exclude_docs:
+                        document_id = r["document_id"]
+                        break
+            if document_id is None:
+                return []
+            frows = db.execute(
+                "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
+                "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "
+                "ORDER BY page_number, row_number",
+                (document_id,),
+            ).fetchall()
+        reg: list[tuple[str, str, str, str]] = []
+        items: list[dict] = []
+        for fr in frows:
+            fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
+            cid = crop_id(poll_cfg.form_token_secret, fkey)
+            reg.append((cid, fkey, fr["raw_crop_path"], document_id))
+            items.append({"cid": cid, "img_url": f"/c/{cid}"})
+        community.register_cids(reg)
+        random.shuffle(items)  # break ballot order so position can't hint the candidate
+        return items
+
+    @app.get("/api/acta-deck")
+    async def api_acta_deck():
+        # One random anonymized acta as a grid of casillas. No acta id / location ever leaks.
+        return {"items": _acta_deck_payload()}
+
     def _hot_crops_payload() -> list[dict]:
-        """Resolve the hot-crop ranking into anonymized billboard cards with public tallies."""
+        """Resolve the hot-crop ranking into public billboard cards.
+
+        Unlike the swipe deck, the billboard is intentionally *de-anonymized*: the published
+        tally is public and a card links to its acta so people can investigate. Only the
+        voting act stays anonymous (no per-voter identity is ever exposed). Each item carries
+        the crop image, its acta ``document_id`` + a location label, and the public tallies.
+        """
         hot = community.hot_crops(HOTLIST_SIZE)
         if not hot:
             return []
         keys = [h["field_key"] for h in hot]
         with conn() as db:
-            crop_by_key: dict[str, tuple[str, str]] = {}
+            meta_by_key: dict[str, dict] = {}
             for fkey in keys:
                 looked = lookup_candidate_appeal(db, fkey)
-                if looked:
-                    doc_id = fkey.rsplit(":", 3)[0]
-                    crop_by_key[fkey] = (looked[0], doc_id)
+                if not looked:
+                    continue
+                doc_id = fkey.rsplit(":", 3)[0]
+                doc = db.execute(
+                    "SELECT department_name, department_code, municipality_name, mesa "
+                    "FROM documents WHERE document_id=?",
+                    (doc_id,),
+                ).fetchone()
+                loc = doc_id
+                if doc:
+                    loc = " · ".join(x for x in (
+                        doc["department_name"] or doc["department_code"],
+                        doc["municipality_name"],
+                        f"mesa {doc['mesa']}" if doc["mesa"] else None,
+                    ) if x) or doc_id
+                meta_by_key[fkey] = {"crop_rel": looked[0], "document_id": doc_id, "loc": loc}
         out = []
         for h in hot:
-            cr = crop_by_key.get(h["field_key"])
-            if not cr:
+            m = meta_by_key.get(h["field_key"])
+            if not m:
                 continue
-            cid = cid_for(h["field_key"], cr[0], cr[1])
-            out.append({"cid": cid, "img_url": f"/c/{cid}",
-                        "good": h["good"], "strange": h["strange"]})
+            # cid_for registers the cid so /c/{cid} resolves the image without exposing the path.
+            cid = cid_for(h["field_key"], m["crop_rel"], m["document_id"])
+            out.append({
+                "cid": cid,
+                "img_url": crop_cdn_url(m["crop_rel"], config.CDN_BASE_URL) or f"/c/{cid}",
+                "document_id": m["document_id"],
+                "loc": m["loc"],
+                "good": h["good"],
+                "strange": h["strange"],
+            })
+        return out
+
+    def _hot_actas_payload() -> list[dict]:
+        """Most-reported ACTAS for the public billboard — one card per mesa, not per crop.
+
+        Ranks actas by how many distinct people flagged anything in them (``acta_popularity`` —
+        the same crowd signal the ``/browse?review=1`` list uses, available on both the SQLite and
+        Aurora stores), then resolves each top acta to a location label, a representative
+        thumbnail (its most-flagged casilla), and a tally (distinct reporters + how many casillas
+        were flagged). De-anonymized on purpose: the billboard links straight to the acta so
+        people can investigate. Bounded to HOTLIST_SIZE, so this is ≤8 small per-acta lookups.
+        """
+        pop = community.acta_popularity()
+        if not pop:
+            return []
+        top = sorted(pop.items(), key=lambda kv: kv[1], reverse=True)[:HOTLIST_SIZE]
+        out: list[dict] = []
+        with conn() as db:
+            for doc_id, reporters in top:
+                doc = db.execute(
+                    "SELECT department_name, department_code, municipality_name, mesa, place_name "
+                    "FROM documents WHERE document_id=?",
+                    (doc_id,),
+                ).fetchone()
+                if not doc:
+                    continue
+                frows = db.execute(
+                    "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
+                    "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "
+                    "ORDER BY page_number, row_number",
+                    (doc_id,),
+                ).fetchall()
+                if not frows:
+                    continue
+                fkeys = [field_key_of(doc_id, r["page_number"], r["row_number"], r["section"]) for r in frows]
+                counts = community.counts_among(fkeys)
+                # Thumbnail = the acta's most-flagged casilla; tally = how many casillas got flagged.
+                best = max(range(len(frows)), key=lambda i: counts[fkeys[i]]["strange"])
+                flagged = sum(1 for k in fkeys if counts[k]["strange"] > 0)
+                loc = " · ".join(x for x in (
+                    doc["department_name"] or doc["department_code"],
+                    doc["municipality_name"],
+                    f"mesa {doc['mesa']}" if doc["mesa"] else None,
+                ) if x) or doc_id
+                crop_rel = frows[best]["raw_crop_path"]
+                img = crop_cdn_url(crop_rel, config.CDN_BASE_URL) or ("/crop?path=" + quote(crop_rel))
+                out.append({
+                    "document_id": doc_id,
+                    "img_url": img,
+                    "loc": loc,
+                    "place_name": doc["place_name"],
+                    "reporters": reporters,
+                    "flagged": flagged,
+                    "n_candidates": len(frows),
+                })
         return out
 
     @app.get("/api/billboard")
     async def api_billboard():
-        # Public, anonymized leaderboard of the most-voted crops (counts shown).
+        # Public leaderboard of the most-reported crops (tallies + acta link shown).
         return {"items": _hot_crops_payload()}
 
     @app.get("/api/acta-crops")
@@ -1091,6 +1288,65 @@ def create_app(
             tally = (await asyncio.to_thread(community.counts_among, [field_key]))[field_key]
         return _flag_response(
             {"ok": True, "good": tally["good"], "strange": tally["strange"]}, 200, sid, new_sid
+        )
+
+    @app.post("/api/vote-batch")
+    async def api_vote_batch(request: Request, payload: dict = Body(...)):
+        """Cast a whole acta's worth of votes at once: ``{strange:[cid...], good:[cid...]}``.
+
+        The grid-voting page (/votar) shows every casilla of one anonymized mesa; the
+        contributor marks the ones that look altered and sends. Marked cids become 'strange'
+        flags, the rest 'good' (appeal) votes. Same anti-abuse path as the single /api/vote
+        (origin, honeypot/form-token, optional Turnstile), but the rate limiter is charged
+        ONCE for the whole submit — a normal full acta is ~10-20 crops and must not exhaust
+        the token bucket. Duplicate votes are deduped downstream; a repeat submit is harmless.
+        """
+        strange = payload.get("strange") or []
+        good = payload.get("good") or []
+        if not isinstance(strange, list) or not isinstance(good, list):
+            raise HTTPException(status_code=400, detail="strange and good must be lists of cids")
+        # Bound the batch so one submit can't enqueue an unbounded amount of work.
+        strange = [str(c) for c in strange][:80]
+        good = [str(c) for c in good][:80]
+
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+
+        if not _origin_allowed(request):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
+        # One rate charge per submit (not per crop): a full-acta batch is one contribution.
+        if not await asyncio.to_thread(
+            community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
+        ):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        bot = bot_check(payload, sid, poll_cfg)
+        if bot == "honeypot":
+            return _flag_response({"ok": True, "strange": 0, "good": 0}, 200, sid, new_sid)
+        if bot:
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        if poll_cfg.turnstile_enabled and not verify_turnstile(
+            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
+        ):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+
+        async def record(cid: str, value: str) -> bool:
+            row = await asyncio.to_thread(resolve_cid_cached, cid)
+            if not row:
+                return False
+            field_key = row["field_key"]
+            if vote_publisher is not None:
+                await asyncio.to_thread(vote_publisher.publish, field_key, token, value)
+            elif value == "strange":
+                await asyncio.to_thread(community.record_flag, field_key, token)
+            else:
+                await asyncio.to_thread(community.record_appeal, field_key, token)
+            return True
+
+        n_strange = sum([await record(c, "strange") for c in strange])
+        n_good = sum([await record(c, "good") for c in good])
+        return _flag_response(
+            {"ok": True, "strange": n_strange, "good": n_good}, 200, sid, new_sid
         )
 
     return app

@@ -13,8 +13,11 @@
   <meta property="og:description" content="{{ meta_description }}">
   <meta property="og:url" content="{{ canonical }}">
   <meta name="twitter:card" content="summary">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <script>
-    // In-app bot check: a signed token sent back with each vote; the server rejects forged
+    // In-app bot check: a signed token sent back with each submit; the server rejects forged
     // or impossibly-fast submits. When Turnstile is on, this starts EMPTY and is fetched from
     // /api/session after a challenge solve (see __tsInit / establishSession below).
     window.__formToken = "{{ form_token }}";
@@ -24,52 +27,141 @@
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=__tsInit" async defer></script>
   {% endif %}
   <style>
-    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --good:#1a7f37; --ink:#202124; --accent:#0969da; }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; }
-    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: #fff; }
-    header { background: var(--bg); border-bottom: 1px solid var(--line); padding: 12px 16px; text-align: center; }
-    header h1 { margin: 0; font-size: 17px; }
-    header .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
-    header a { color: var(--accent); text-decoration: none; }
-    main { max-width: 560px; margin: 0 auto; padding: 14px 16px 28px; }
-    .deck { position: relative; min-height: 320px; display: flex; align-items: center; justify-content: center; }
-    .card { width: 100%; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); padding: 18px; background: #fff; text-align: center; touch-action: pan-y; }
-    .card .prompt { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
-    .card img.crop { max-width: 100%; max-height: 200px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
-    .tally { margin-top: 12px; font-size: 13px; color: var(--muted); min-height: 18px; }
-    .tally b.s { color: var(--bad); } .tally b.g { color: var(--good); }
-    .buttons { display: flex; gap: 12px; margin-top: 16px; }
-    .buttons button { flex: 1; height: 56px; border-radius: 12px; border: 2px solid; font-size: 16px; font-weight: 700; cursor: pointer; background: #fff; }
-    .b-good { color: var(--good); border-color: var(--good); }
-    .b-good:hover { background: #eaf6ec; }
-    .b-bad { color: var(--bad); border-color: var(--bad); }
-    .b-bad:hover { background: #fff1f0; }
-    .b-skip { display: block; width: 100%; height: 44px; margin-top: 10px; border-radius: 12px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 14px; font-weight: 600; cursor: pointer; }
-    .b-skip:hover { background: var(--bg); }
-    .siblings-toggle { display: block; width: 100%; margin-top: 14px; background: none; border: none; color: var(--accent); font-size: 13px; cursor: pointer; }
-    .siblings { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
-    .sib { border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
-    .sib img { max-width: 100%; max-height: 70px; object-fit: contain; }
-    .sib .c { font-size: 11px; color: var(--muted); margin-top: 4px; }
-    .empty, .err { text-align: center; color: var(--muted); padding: 40px 0; }
-    .progress { text-align: center; color: var(--muted); font-size: 12px; margin-top: 10px; }
-    /* Non-blocking toast: the thank-you shows here so the next card can render instantly
-       underneath without waiting for it. */
-    .toast { position: fixed; left: 50%; top: 14px; transform: translate(-50%, -12px); z-index: 50;
-             background: var(--good); color: #fff; font-size: 14px; font-weight: 600;
-             padding: 9px 16px; border-radius: 999px; box-shadow: 0 4px 14px rgba(0,0,0,.18);
-             opacity: 0; pointer-events: none; transition: opacity .18s ease, transform .18s ease; }
-    .toast.show { opacity: 1; transform: translate(-50%, 0); }
-    .toast.warn { background: #9a6700; }
+    :root {
+      color-scheme: light;
+      --paper:#FBFAF6; --paper-2:#F2EFE6; --card:#FFFFFF;
+      --ink:#1C1A15; --ink-soft:#6E695E; --ink-faint:#9A9488;
+      --line:#E6E1D4; --line-strong:#D8D2C2;
+      --red:#D93A28; --red-deep:#A82A1B; --red-tint:#FCEDE9; --red-line:#F0B5AB;
+      --green:#2F7D52;
+      --accent:#161410;             /* primary action — ink */
+      --link:#0E6E64;               /* sole non-red brand hue */
+      --r:15px;
+      --shadow:0 1px 1px rgba(28,26,21,.03), 0 6px 20px -8px rgba(28,26,21,.14);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin:0; }
+    body {
+      font-family:"Hanken Grotesk", system-ui, sans-serif; color:var(--ink);
+      background-color:var(--paper); padding-bottom:96px;
+      background-image:
+        radial-gradient(120% 80% at 100% -10%, rgba(217,58,40,.05), transparent 60%),
+        radial-gradient(circle at 1px 1px, rgba(28,26,21,.045) 1px, transparent 0);
+      background-size:auto, 22px 22px;
+      background-attachment:fixed, fixed;
+      -webkit-font-smoothing:antialiased;
+    }
+
+    header { border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.7), rgba(255,255,255,0)); }
+    .head-inner { max-width:780px; margin:0 auto; padding:22px 20px 18px; }
+    .eyebrow { display:flex; align-items:center; gap:9px; font-size:11.5px; font-weight:700;
+               letter-spacing:.16em; text-transform:uppercase; color:var(--red-deep); }
+    .eyebrow .tick { width:7px; height:7px; border-radius:2px; background:var(--red); transform:rotate(45deg); }
+    .head-top { display:flex; align-items:flex-end; justify-content:space-between; gap:14px; margin-top:9px; }
+    header h1 { margin:0; font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:33px;
+                line-height:1.02; letter-spacing:-.012em; }
+    header h1 em { font-style:italic; color:var(--red-deep); }
+    .browse { flex:0 0 auto; color:var(--ink); text-decoration:none; font-size:13px; font-weight:600;
+              border:1px solid var(--line-strong); border-radius:999px; padding:7px 13px; background:var(--card);
+              white-space:nowrap; transition:border-color .15s, transform .1s; }
+    .browse:hover { border-color:var(--ink-faint); transform:translateY(-1px); }
+    .sub { margin-top:13px; color:var(--ink-soft); font-size:14.5px; line-height:1.55; max-width:60ch; }
+    .sub b { color:var(--ink); font-weight:700; }
+    .sub .hl { color:var(--red-deep); font-weight:700; }
+
+    main { max-width:780px; margin:0 auto; padding:18px 20px 26px; }
+
+    .meta { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+    .tag { display:inline-flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line);
+           border-radius:999px; padding:6px 13px 6px 11px; font-size:13px; font-weight:700; color:var(--ink);
+           box-shadow:var(--shadow); }
+    .tag .n { font-variant-numeric:tabular-nums; }
+    .tag .dot { width:7px; height:7px; border-radius:50%; background:var(--link); box-shadow:0 0 0 3px rgba(14,110,100,.14); }
+    .reviewed { color:var(--ink-faint); font-size:12.5px; font-weight:600; }
+
+    .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
+    @media (max-width:470px) { .grid { grid-template-columns:repeat(2, 1fr); gap:11px; } }
+
+    .tile {
+      position:relative; border:1.5px solid var(--line); border-radius:var(--r); background:var(--card);
+      padding:13px 13px 10px; cursor:pointer; box-shadow:var(--shadow); outline:none;
+      display:flex; flex-direction:column; gap:7px; min-height:114px;
+      transition:transform .14s cubic-bezier(.2,.7,.2,1), border-color .14s, box-shadow .14s, background .14s;
+      animation:rise .5s cubic-bezier(.2,.7,.2,1) both; animation-delay:calc(var(--i,0) * 34ms);
+    }
+    @keyframes rise { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+    .tile:hover { transform:translateY(-3px); border-color:var(--line-strong); box-shadow:0 2px 2px rgba(28,26,21,.04), 0 14px 28px -12px rgba(28,26,21,.22); }
+    .tile:active { transform:translateY(-1px) scale(.985); }
+    .tile:focus-visible { border-color:var(--ink); box-shadow:0 0 0 3px rgba(28,26,21,.12); }
+    .tile .thumb { flex:1 1 auto; display:flex; align-items:center; justify-content:center; min-height:74px; }
+    .tile img { max-width:100%; max-height:92px; object-fit:contain; pointer-events:none;
+                user-select:none; -webkit-user-drag:none; }
+
+    /* The crop is the evidence — it stays at FULL opacity, never covered. The "extraña" state is
+       signalled around the content only: a vermilion ring + faint tint, plus a small caption in
+       its own reserved row (so it never overlaps the box). Voters can still read it and un-tap. */
+    .tile .cap { height:13px; line-height:13px; font-size:9.5px; font-weight:800; letter-spacing:.14em;
+                 text-transform:uppercase; color:var(--red-deep); opacity:0; transition:opacity .14s; }
+    .tile.marked { border-color:var(--red); background:var(--red-tint);
+                   box-shadow:0 0 0 1px var(--red) inset, 0 2px 2px rgba(168,42,27,.05), 0 12px 26px -12px rgba(168,42,27,.3); }
+    .tile.marked .cap { opacity:1; }
+
+    .tile.skeleton { cursor:default; animation:none; border-style:dashed; border-color:var(--line);
+             background:linear-gradient(100deg,#f4f1ea 30%,#fbfaf6 50%,#f4f1ea 70%); background-size:200% 100%;
+             animation:sh 1.25s infinite linear; }
+    @keyframes sh { to { background-position:-200% 0; } }
+
+    .note { margin:20px 2px 0; text-align:center; color:var(--ink-faint); font-size:12.5px; line-height:1.5; }
+
+    .empty, .err { text-align:center; color:var(--ink-soft); padding:64px 18px; font-size:15px; }
+    .empty .big { font-family:"Fraunces", serif; font-size:21px; color:var(--ink); display:block; margin-bottom:6px; }
+
+    /* Sticky ballot bar */
+    .bar { position:fixed; left:0; right:0; bottom:0; z-index:40;
+           background:rgba(251,250,246,.82); backdrop-filter:saturate(1.5) blur(12px);
+           border-top:1px solid var(--line-strong); box-shadow:0 -8px 24px -16px rgba(28,26,21,.3); }
+    .bar-inner { max-width:780px; margin:0 auto; padding:13px 20px; display:flex; align-items:center; gap:12px;
+                 padding-bottom:calc(13px + env(safe-area-inset-bottom)); }
+    .count { display:flex; flex-direction:column; gap:1px; line-height:1.1; min-width:0; }
+    .count .num { font-family:"Fraunces", serif; font-size:23px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--red-deep); }
+    .count.zero .num { color:var(--green); }
+    .count .lab { font-size:11.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint); }
+    .spacer { flex:1 1 auto; }
+    .btn { font:inherit; cursor:pointer; border-radius:12px; height:50px; font-weight:700; transition:transform .1s, background .15s, border-color .15s; }
+    .btn:active { transform:scale(.97); }
+    .b-skip { padding:0 16px; border:1px solid var(--line-strong); background:var(--card); color:var(--ink-soft); font-size:14px; }
+    .b-skip:hover { border-color:var(--ink-faint); color:var(--ink); }
+    .b-send { padding:0 22px; border:none; color:var(--paper); background:var(--accent); font-size:15px;
+              display:inline-flex; align-items:center; gap:9px; box-shadow:0 6px 18px -6px rgba(22,20,16,.5); }
+    .b-send:hover { background:#000; }
+    .b-send .pill { background:rgba(255,255,255,.18); border-radius:999px; padding:2px 9px; font-size:13px; font-variant-numeric:tabular-nums; }
+    .b-send.allgood { background:var(--green); box-shadow:0 6px 18px -6px rgba(47,125,82,.5); }
+    .b-send.allgood:hover { background:#266c45; }
+
+    .toast { position:fixed; left:50%; top:18px; transform:translate(-50%,-16px); z-index:60;
+             background:var(--ink); color:var(--paper); font-size:14px; font-weight:600;
+             padding:11px 18px; border-radius:13px; box-shadow:0 10px 30px -8px rgba(28,26,21,.5);
+             opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; }
+    .toast.show { opacity:1; transform:translate(-50%,0); }
+    .toast.warn { background:var(--red-deep); }
+
+    @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
   </style>
 </head>
 <body>
   <header>
-    <h1>¿Se ve bien o extraña?</h1>
-    <div class="sub">Casillas de votos al azar y anónimas · <a href="/browse">buscar un acta &rarr;</a></div>
+    <div class="head-inner">
+      <div class="eyebrow"><span class="tick"></span> Veeduría ciudadana · E-14</div>
+      <div class="head-top">
+        <h1>Revisa una <em>mesa</em></h1>
+        <a class="browse" href="/browse">Buscar un acta &rarr;</a>
+      </div>
+      <p class="sub">Estas casillas son de <b>una misma mesa</b> (no sabes cuál). Toca las que se vean <span class="hl">extrañas</span> — la casilla sigue visible para que la revises; toca de nuevo para desmarcar. Al final pulsa <b>Enviar</b>.</p>
+    </div>
   </header>
+
   <div class="toast" id="toast" aria-live="polite"></div>
+
   <main>
     <!-- Honeypot: hidden from people, tripped by form-filling bots. -->
     <input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"
@@ -79,42 +171,68 @@
          the form token. Only present when a sitekey is configured. -->
     {% if turnstile_sitekey %}<div id="ts" style="display:none"></div>{% endif %}
 
-    <div class="deck" id="deck">
-      <div class="empty" id="loading">Cargando casillas…</div>
+    <div class="meta" id="meta" hidden>
+      <span class="tag"><span class="dot"></span><span class="n" id="deck-count">0</span> casillas</span>
+      <span class="reviewed" id="reviewed"></span>
     </div>
-    <div class="progress" id="progress"></div>
+
+    <div id="board">
+      <div class="grid" aria-hidden="true">
+        <div class="tile skeleton"></div><div class="tile skeleton"></div><div class="tile skeleton"></div>
+        <div class="tile skeleton"></div><div class="tile skeleton"></div><div class="tile skeleton"></div>
+      </div>
+    </div>
+    <div class="note" id="note" hidden>¿Ninguna se ve rara? Envía la mesa tal cual — todas se cuentan como “se ven bien”.</div>
   </main>
 
-  <script>
-    // Anonymized swipe feed: cards come from /api/feed as { cid, img_url }; a vote POSTs
-    // { cid, value } to /api/vote. The client tracks swiped cids in localStorage (best-effort
-    // "don't repeat"); the server's vote tables ignore true duplicates regardless.
-    const deck = document.getElementById('deck');
-    const progressEl = document.getElementById('progress');
-    const SEEN_KEY = 'e14_seen_cids';
-    let seen = new Set();
-    try { seen = new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')); } catch (e) {}
-    let queue = [];
-    let voted = 0;
-    let fetching = false;
+  <div class="bar" id="bar" hidden>
+    <div class="bar-inner">
+      <div class="count zero" id="count">
+        <span class="num" id="count-num">0</span>
+        <span class="lab" id="count-lab">marcadas</span>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn b-skip" id="skip" type="button">Saltar mesa</button>
+      <button class="btn b-send allgood" id="send" type="button">Enviar</button>
+    </div>
+  </div>
 
-    // Rotating thank-you shown after each vote. We deliberately do NOT reveal a crop's tally
-    // while voting (avoids anchoring/herding the next voter); the billboard shows aggregates.
+  <script>
+    // Grid voting: GET /api/acta-deck returns every casilla of ONE anonymized mesa as
+    // { cid, img_url } (shuffled, no acta id leaks). The contributor marks the strange ones;
+    // "Enviar" POSTs { strange:[cid...], good:[cid...] } to /api/vote-batch (marked => strange,
+    // the rest => good). Then a fresh mesa loads.
+    const board = document.getElementById('board');
+    const bar = document.getElementById('bar');
+    const sendBtn = document.getElementById('send');
+    const skipBtn = document.getElementById('skip');
+    const countEl = document.getElementById('count');
+    const countNum = document.getElementById('count-num');
+    const countLab = document.getElementById('count-lab');
+    const meta = document.getElementById('meta');
+    const deckCountEl = document.getElementById('deck-count');
+    const reviewedEl = document.getElementById('reviewed');
+    const noteEl = document.getElementById('note');
+
+    let deck = [];
+    const marked = new Set();
+    let reviewed = 0;
+    let loading = false;
+    let sending = false;
+    let lastSig = '';
+
     const THANKS = [
-      '¡Gracias por tu voto!', '¡Voto registrado, gracias!', '¡Listo! Gracias por participar.',
-      '¡Gracias! Sigamos con la siguiente.', '¡Gracias por ayudar en la veeduría!',
+      '¡Gracias! Mesa enviada.', '¡Listo! Gracias por revisar esta mesa.',
+      '¡Gracias por ayudar en la veeduría!', '¡Mesa registrada, gracias!',
+      '¡Gracias! Vamos con la siguiente.',
     ];
     function thanks() { return THANKS[Math.floor(Math.random() * THANKS.length)]; }
 
     // --- Turnstile session gate ---------------------------------------------------------
-    // When a sitekey is configured the page loads without a form token; we solve an invisible
-    // Turnstile challenge once and exchange it at /api/session for the token that votes carry.
     const turnstileOn = !!window.__turnstileSitekey;
     let tsWidget = null;
     let establishing = false;
 
-    // Called by Turnstile's api.js once it loads (?onload=__tsInit). Renders an invisible
-    // widget that auto-executes and hands the token to establishSession via its callback.
     window.__tsInit = function () {
       try {
         tsWidget = window.turnstile.render('#ts', {
@@ -126,84 +244,23 @@
         });
       } catch (e) {}
     };
-
-    // Trigger a fresh challenge solve (re-mint on expiry or a rejected token).
     function ensureSession() {
       if (!turnstileOn || establishing || !window.turnstile || tsWidget === null) return;
       establishing = true;
       try { window.turnstile.reset(tsWidget); window.turnstile.execute(tsWidget); }
       catch (e) { establishing = false; }
     }
-
     async function establishSession(token) {
       try {
         const res = await fetch('/api/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ turnstile_token: token }),
         });
         const data = await res.json().catch(() => ({}));
         if (data && data.ok && data.form_token) window.__formToken = data.form_token;
       } catch (e) {} finally { establishing = false; }
     }
-
-    // True once we hold a usable form token (always true when Turnstile is off).
     function voteReady() { return !turnstileOn || !!window.__formToken; }
-
-    function rememberSeen(cid) {
-      seen.add(cid);
-      try {
-        // Cap stored history so localStorage can't grow without bound.
-        const arr = [...seen].slice(-2000);
-        seen = new Set(arr);
-        localStorage.setItem(SEEN_KEY, JSON.stringify(arr));
-      } catch (e) {}
-    }
-
-    async function refill() {
-      if (fetching) return;
-      fetching = true;
-      try {
-        const excl = [...seen].slice(-50).join(',');
-        const res = await fetch('/api/feed?n=12&exclude=' + encodeURIComponent(excl));
-        const data = await res.json();
-        for (const it of (data.items || [])) {
-          if (!seen.has(it.cid)) queue.push(it);
-        }
-      } catch (e) {} finally { fetching = false; }
-    }
-
-    function renderEmpty(msg) {
-      deck.innerHTML = '<div class="empty">' + msg + '</div>';
-    }
-
-    function renderCard(card) {
-      deck.innerHTML = '';
-      const el = document.createElement('div');
-      el.className = 'card';
-      el.innerHTML =
-        '<div class="prompt">¿El número de esta casilla se ve normal o alterado?</div>' +
-        '<img class="crop" alt="votos escritos a mano" src="' + card.img_url + '">' +
-        '<div class="buttons">' +
-        '  <button class="b-good" id="vote-good">Se ve bien</button>' +
-        '  <button class="b-bad" id="vote-bad">Se ve extraña</button>' +
-        '</div>' +
-        '<button class="b-skip" id="vote-skip">No estoy seguro · saltar</button>' +
-        '<button class="siblings-toggle" id="sib-toggle">Ver las otras casillas de esta acta</button>' +
-        '<div class="siblings" id="siblings" hidden></div>';
-      deck.appendChild(el);
-      document.getElementById('vote-good').addEventListener('click', () => castVote(card, 'good'));
-      document.getElementById('vote-bad').addEventListener('click', () => castVote(card, 'strange'));
-      document.getElementById('vote-skip').addEventListener('click', () => skipCard(card));
-      document.getElementById('sib-toggle').addEventListener('click', () => loadSiblings(card));
-    }
-
-    // "No estoy seguro": advance without recording any vote. We still mark the cid seen so
-    // it doesn't immediately reappear in this session; nothing is sent to the server.
-    function skipCard(card) {
-      rememberSeen(card.cid);
-      next();
-    }
 
     let toastTimer = null;
     function showToast(msg, warn) {
@@ -212,76 +269,122 @@
       t.classList.toggle('warn', !!warn);
       t.classList.add('show');
       clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => t.classList.remove('show'), 1100);
+      toastTimer = setTimeout(() => t.classList.remove('show'), 1300);
     }
 
-    // Optimistic: thank + advance to the next card INSTANTLY, and let the vote fly in the
-    // background (no await). The vote is durable server-side (enqueued to the queue) and
-    // dedup'd, so not waiting for the response never loses or double-counts — it just makes
-    // voting feel immediate, which matters for casting many quickly.
-    function castVote(card, value) {
-      if (!voteReady()) { showToast('Verificando…', true); ensureSession(); return; }
-      rememberSeen(card.cid);
-      voted++;
-      showToast(thanks());
-      sendVote(card.cid, value);
-      next();
+    function updateCount() {
+      const n = marked.size;
+      countEl.classList.toggle('zero', n === 0);
+      countNum.textContent = n;
+      countLab.textContent = n === 1 ? 'marcada' : 'marcadas';
+      if (n === 0) {
+        sendBtn.classList.add('allgood');
+        sendBtn.innerHTML = 'Todas se ven bien';
+      } else {
+        sendBtn.classList.remove('allgood');
+        sendBtn.innerHTML = 'Enviar <span class="pill">' + n + '</span>';
+      }
     }
 
-    function sendVote(cid, value) {
+    function toggle(tile, cid) {
+      if (marked.has(cid)) { marked.delete(cid); tile.classList.remove('marked'); tile.setAttribute('aria-pressed', 'false'); }
+      else { marked.add(cid); tile.classList.add('marked'); tile.setAttribute('aria-pressed', 'true'); }
+      updateCount();
+    }
+
+    function renderDeck() {
+      marked.clear();
+      board.innerHTML = '';
+      const grid = document.createElement('div');
+      grid.className = 'grid';
+      deck.forEach((it, idx) => {
+        const tile = document.createElement('div');
+        tile.className = 'tile';
+        tile.tabIndex = 0;
+        tile.style.setProperty('--i', idx);
+        tile.setAttribute('role', 'button');
+        tile.setAttribute('aria-pressed', 'false');
+        tile.setAttribute('aria-label', 'Marcar esta casilla como extraña');
+        tile.innerHTML = '<div class="thumb"><img loading="lazy" alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
+          '<span class="cap" aria-hidden="true">Extraña</span>';
+        tile.addEventListener('click', () => toggle(tile, it.cid));
+        tile.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(tile, it.cid); }
+        });
+        grid.appendChild(tile);
+      });
+      board.appendChild(grid);
+      deckCountEl.textContent = deck.length;
+      meta.hidden = false;
+      reviewedEl.textContent = reviewed ? ('· ' + reviewed + ' mesa' + (reviewed === 1 ? '' : 's') + ' revisada' + (reviewed === 1 ? '' : 's')) : '';
+      noteEl.hidden = false;
+      bar.hidden = false;
+      updateCount();
+    }
+
+    function skeleton() {
+      return '<div class="grid" aria-hidden="true">' +
+        '<div class="tile skeleton"></div>'.repeat(6) + '</div>';
+    }
+
+    function renderEmpty(msg) {
+      board.innerHTML = '<div class="empty"><span class="big">Gracias por participar</span>' + msg + '</div>';
+      meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
+    }
+
+    async function loadDeck() {
+      if (loading) return;
+      loading = true;
+      try {
+        let items = [];
+        for (let i = 0; i < 2; i++) {
+          const res = await fetch('/api/acta-deck');
+          const data = await res.json();
+          items = data.items || [];
+          const sig = items.map((x) => x.cid).sort().join(',');
+          if (sig !== lastSig || !items.length) { lastSig = sig; break; }
+        }
+        deck = items;
+        if (!deck.length) { renderEmpty('No hay mesas disponibles por ahora.'); return; }
+        renderDeck();
+      } catch (e) {
+        board.innerHTML = '<div class="err">No se pudo cargar la mesa. Recarga la página para intentarlo.</div>';
+        meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
+      } finally { loading = false; }
+    }
+
+    function sendBatch(strange, good) {
       const hp = document.getElementById('hp-website');
-      fetch('/api/vote', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cid: cid, value: value,
+      return fetch('/api/vote-batch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strange: strange, good: good,
                                form_token: window.__formToken, website: hp ? hp.value : '' }),
       }).then(async (res) => {
-        if (res.status === 429) { showToast('Vas muy rápido…', true); return; }
+        if (res.status === 429) { showToast('Vas muy rápido, espera un momento…', true); return; }
         const data = await res.json().catch(() => ({}));
-        // Rejected token (expired after the 1h window, or rare too-fast first vote): silently
-        // refresh the session so the next vote carries a fresh token.
         if (!(data && data.ok) && turnstileOn) { window.__formToken = ''; ensureSession(); }
-      }).catch(() => {});  // a dropped vote on a hard network error is acceptable (rare)
+      }).catch(() => {});
     }
 
-    async function loadSiblings(card) {
-      const box = document.getElementById('siblings');
-      const toggle = document.getElementById('sib-toggle');
-      if (!box.hidden) { box.hidden = true; return; }
-      box.hidden = false;
-      box.innerHTML = '<div class="c">Cargando…</div>';
-      try {
-        const data = await (await fetch('/api/acta-crops?cid=' + encodeURIComponent(card.cid))).json();
-        box.innerHTML = '';
-        for (const s of (data.items || [])) {
-          const d = document.createElement('div');
-          d.className = 'sib';
-          // Context only — no tallies while voting (same reason as the post-vote message).
-          d.innerHTML = '<img loading="lazy" src="' + s.img_url + '" alt="casilla de la misma acta">';
-          box.appendChild(d);
-        }
-        if (!box.children.length) box.innerHTML = '<div class="c">Sin más casillas.</div>';
-      } catch (e) { box.innerHTML = '<div class="c">No se pudieron cargar.</div>'; }
-      toggle.textContent = 'Ocultar las otras casillas';
+    function submitDeck() {
+      if (sending) return;
+      if (!voteReady()) { showToast('Verificando…', true); ensureSession(); return; }
+      sending = true;
+      const strange = deck.map((it) => it.cid).filter((c) => marked.has(c));
+      const good = deck.map((it) => it.cid).filter((c) => !marked.has(c));
+      reviewed++;
+      showToast(thanks());
+      sendBatch(strange, good);          // optimistic: don't block the next mesa on the response
+      board.innerHTML = skeleton();
+      bar.hidden = true;
+      sending = false;
+      loadDeck();
     }
 
-    async function next() {
-      progressEl.textContent = voted ? ('Has votado ' + voted + ' casilla' + (voted === 1 ? '' : 's')) : '';
-      if (queue.length < 4) refill();  // prefetch when running low
-      if (!queue.length) {
-        await refill();
-        if (!queue.length) { renderEmpty('No hay más casillas por ahora. ¡Gracias por participar!'); return; }
-      }
-      renderCard(queue.shift());
-      // Warm the next crop image so the following swap is instant (decode ahead of time).
-      if (queue[0]) { const im = new Image(); im.src = queue[0].img_url; }
-    }
+    sendBtn.addEventListener('click', submitDeck);
+    skipBtn.addEventListener('click', () => { showToast('Mesa saltada', true); board.innerHTML = skeleton(); bar.hidden = true; loadDeck(); });
 
-    (async function start() {
-      await refill();
-      if (!queue.length) { renderEmpty('No hay casillas disponibles todavía.'); return; }
-      next();
-    })();
+    loadDeck();
   </script>
 </body>
 </html>

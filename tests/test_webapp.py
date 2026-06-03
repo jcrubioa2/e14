@@ -303,6 +303,234 @@ def test_feed_random_pk_sampling(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_acta_deck_returns_one_actas_crops_anonymized(tmp_path: Path) -> None:
+    """/api/acta-deck returns every candidate crop of ONE acta, shuffled, with no acta id /
+    location leaking into the payload."""
+    from e14detector.community import crop_id, field_key_of
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    # Two actas so the endpoint must pick exactly one and never mix them.
+    doc_specs = {"doc-a": 5, "doc-b": 4}
+    cid_to_doc: dict[str, str] = {}
+    for doc_id, n in doc_specs.items():
+        store.upsert_document(DocumentMetadata(
+            document_id=doc_id, source_path=f"{doc_id}.pdf",
+            department_name="ANTIOQUIA", municipality_name="MEDELLIN", mesa="01",
+        ))
+        for i in range(n):
+            store.insert_vote_field(VoteField(
+                document_id=doc_id, page_number=1, row_type="candidate", row_number=i + 1,
+                candidate_name=f"C{i}", raw_crop_path=str(crop),
+            ))
+            fkey = field_key_of(doc_id, 1, i + 1, None)
+            cid_to_doc[crop_id(config.FORM_TOKEN_SECRET, fkey)] = doc_id
+    store.commit()
+    store.close()
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/api/acta-deck")
+            items = r.json()["items"]
+            cids = [it["cid"] for it in items]
+            # All crops come from a single acta, and it's the WHOLE acta (all its crops).
+            docs = {cid_to_doc[c] for c in cids}
+            assert len(docs) == 1
+            assert len(cids) == doc_specs[docs.pop()]
+            assert len(set(cids)) == len(cids)               # no dupes
+            assert all(it["img_url"] == f"/c/{it['cid']}" for it in items)
+            # The payload must not leak the acta id or location.
+            body = r.text
+            assert "doc-a" not in body and "doc-b" not in body
+            assert "ANTIOQUIA" not in body and "MEDELLIN" not in body
+
+    asyncio.run(run())
+
+
+def test_vote_batch_records_strange_and_good(tmp_path: Path) -> None:
+    """A batch submit flags the marked cids ('strange') and appeals the rest ('good')."""
+    import dataclasses
+    from e14detector.community import CommunityStore, PollConfig, crop_id, field_key_of
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-x", source_path="doc-x.pdf"))
+    for i in range(3):
+        store.insert_vote_field(VoteField(
+            document_id="doc-x", page_number=1, row_type="candidate", row_number=i + 1,
+            candidate_name=f"C{i}", raw_crop_path=str(crop),
+        ))
+    store.commit()
+    store.close()
+
+    # Empty form-token secret => skip the bot check (no 2s token-age wait in the test).
+    cfg = dataclasses.replace(PollConfig.from_config(), form_token_secret="")
+    fkeys = [field_key_of("doc-x", 1, i + 1, None) for i in range(3)]
+    fkey_by_cid = {crop_id("", fk): fk for fk in fkeys}
+    marked_fkey: dict[str, str] = {}
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db, poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            # Surfacing the deck registers the cids the batch will resolve.
+            deck = (await client.get("/api/acta-deck")).json()["items"]
+            cids = [it["cid"] for it in deck]
+            assert len(cids) == 3
+            marked_fkey["strange"] = fkey_by_cid[cids[0]]
+            marked_fkey["good"] = fkey_by_cid[cids[1]]
+            # Mark the first crop strange; the other two go through as 'good'.
+            r = await client.post("/api/vote-batch", json={"strange": [cids[0]], "good": cids[1:]})
+            assert r.status_code == 200
+            body = r.json()
+            assert body["ok"] is True and body["strange"] == 1 and body["good"] == 2
+
+    asyncio.run(run())
+
+    cs = CommunityStore(community_db)
+    counts = cs.counts_among(fkeys)
+    cs.close()
+    assert counts[marked_fkey["strange"]]["strange"] == 1 and counts[marked_fkey["strange"]]["good"] == 0
+    assert counts[marked_fkey["good"]]["good"] == 1 and counts[marked_fkey["good"]]["strange"] == 0
+    # The third (unmarked) crop is a 'good' vote too; total good == 2.
+    assert sum(c["good"] for c in counts.values()) == 2
+    assert sum(c["strange"] for c in counts.values()) == 1
+
+
+def test_browse_shows_billboard(tmp_path: Path) -> None:
+    """A reported acta shows on /browse's community billboard (one card per mesa), linking to it."""
+    from e14detector.community import CommunityStore, field_key_of
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(
+        document_id="doc-hot", source_path="doc-hot.pdf",
+        department_name="VALLE", municipality_name="CALI", mesa="07",
+    ))
+    store.insert_vote_field(VoteField(
+        document_id="doc-hot", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    # Seed one community flag so the crop ranks on the billboard.
+    cs = CommunityStore(community_db)
+    cs.record_flag(field_key_of("doc-hot", 1, 1, None), "voter-1")
+    cs.close()
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/browse")).text
+            assert "Actas m" in html  # "Actas más reportadas por la comunidad"
+            assert "reportaron" in html  # the per-acta tally line
+            assert "/acta/doc-hot" in html
+            assert "VALLE" in html and "CALI" in html
+
+    asyncio.run(run())
+
+
+def _drop_n_candidates(db: Path) -> None:
+    """Rebuild documents WITHOUT n_candidates, simulating an older/raw serving snapshot.
+    (A plain DROP COLUMN trips on the inline comment in the table DDL, so recreate instead.)"""
+    import sqlite3
+
+    con = sqlite3.connect(db)
+    keep = [r[1] for r in con.execute("PRAGMA table_info(documents)") if r[1] != "n_candidates"]
+    cols = ", ".join(keep)
+    con.executescript(
+        f"CREATE TABLE documents_old AS SELECT {cols} FROM documents;\n"
+        "DROP TABLE documents;\n"
+        "ALTER TABLE documents_old RENAME TO documents;"
+    )
+    con.commit()
+    assert "n_candidates" not in {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+    con.close()
+
+
+def test_ensure_n_candidates_backfills_and_browse_works(tmp_path: Path) -> None:
+    """A served snapshot missing the precomputed n_candidates column is backfilled at load
+    (ensure_n_candidates) so /browse stays on the fast path and never 500s (prod incident)."""
+    import sqlite3
+
+    from e14detector.webapp import ensure_n_candidates
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    # doc-has: two candidate crops (count must be 2); doc-none: none (filtered out of /browse).
+    store.upsert_document(DocumentMetadata(
+        document_id="doc-has", source_path="doc-has.pdf",
+        department_code="05", department_name="ANTIOQUIA", municipality_name="MEDELLIN",
+    ))
+    for i in range(2):
+        store.insert_vote_field(VoteField(
+            document_id="doc-has", page_number=1, row_type="candidate", row_number=i + 1,
+            candidate_name="A", raw_crop_path=str(crop),
+        ))
+    store.upsert_document(DocumentMetadata(document_id="doc-none", source_path="doc-none.pdf"))
+    store.commit()
+    store.close()
+
+    _drop_n_candidates(db)
+
+    # Backfill: idempotent + correct count, and the column is present afterwards.
+    assert ensure_n_candidates(db) is True
+    con = sqlite3.connect(db)
+    counts = dict(con.execute("SELECT document_id, n_candidates FROM documents"))
+    con.close()
+    assert counts == {"doc-has": 2, "doc-none": 0}
+    assert ensure_n_candidates(db) is True  # second call is a no-op, still True
+
+    async def run() -> None:
+        # create_app calls ensure_n_candidates itself; /browse uses the fast n_candidates column.
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/browse")
+            assert r.status_code == 200
+            html = r.text
+            assert "/acta/doc-has" in html and "/acta/doc-none" not in html
+            assert "2 candidatos" in html
+
+    asyncio.run(run())
+
+
+def test_ensure_n_candidates_boot_recovers_missing_column(tmp_path: Path) -> None:
+    """Even without calling ensure_n_candidates by hand, building the app on a column-less DB
+    recovers it (the create_app boot hook) — /browse responds 200, not 500."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-x", source_path="doc-x.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc-x", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+    _drop_n_candidates(db)
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            assert (await client.get("/browse")).status_code == 200
+
+    asyncio.run(run())
+
+
 def test_security_headers_and_docs_hidden(tmp_path: Path) -> None:
     """Hardening: docs/openapi are 404 by default, and baseline headers are on every response."""
     db = tmp_path / "results.sqlite"

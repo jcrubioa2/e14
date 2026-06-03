@@ -310,15 +310,18 @@ def test_billboard_shows_public_counts(tmp_path: Path) -> None:
     client.post("/api/vote", json={"cid": cid, "value": "strange"}, headers={"x-forwarded-for": "1.1.1.1"})
     items = client.get("/api/billboard").json()["items"]
     assert items and items[0]["strange"] == 1
-    assert set(items[0].keys()) == {"cid", "img_url", "good", "strange"}
-    assert "doc1" not in client.get("/api/billboard").text  # anonymized
+    # The billboard is intentionally de-anonymized (public tally + acta link); each card
+    # carries the document id and a location label so it can link through to /acta.
+    assert set(items[0].keys()) == {"cid", "img_url", "document_id", "loc", "good", "strange"}
+    assert items[0]["document_id"] == "doc1"
 
 
 def test_votar_page_renders(tmp_path: Path) -> None:
     client = TestClient(_build_app(tmp_path))
     page = client.get("/votar")
     assert page.status_code == 200
-    assert "/api/feed" in page.text and "/api/vote" in page.text  # the deck wiring
+    # The grid-voting page loads a whole acta and submits it as a batch.
+    assert "/api/acta-deck" in page.text and "/api/vote-batch" in page.text
 
 
 def test_acta_page_is_readonly_with_public_counts(tmp_path: Path) -> None:
