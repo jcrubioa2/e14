@@ -685,6 +685,21 @@ def create_app(
             "clean": sum(r["vlm_state"] == "CLEAN" for r in rows),
             "cleared": sum(r["appeal_cleared"] for r in rows),
         }
+        # Pipeline health: what the served DB holds vs what the publisher last shipped.
+        # A large pointer age, or a served count far below the published frontier, means
+        # the publisher stalled or the reader isn't swapping (the stub-DB incident class).
+        with conn() as db:
+            pipeline = compute_sync_progress(db)
+        from .dbsync import pointer_status
+        ptr = pointer_status(config.CDN_BASE_URL) if config.CDN_BASE_URL else None
+        if ptr:
+            age = ptr.get("age_secs")
+            pipeline["pointer_sha"] = ptr["sha"]
+            pipeline["pointer_raw_mb"] = round(ptr["raw_size"] / 1e6) if ptr.get("raw_size") else None
+            pipeline["pointer_gz_mb"] = round(ptr["gz_size"] / 1e6, 1) if ptr.get("gz_size") else None
+            pipeline["pointer_age_min"] = round(age / 60) if age is not None else None
+            # Stale if the publisher hasn't flipped the pointer in >30 min (cycles run ~10-14).
+            pipeline["pointer_stale"] = age is not None and age > 30 * 60
         # Models the operator can run on a crop. "" = the live poll model. Each can be run
         # as a dry preview, or "aplicar" to overwrite the actual verdict (record=1).
         review_models = [
@@ -695,7 +710,7 @@ def create_app(
         return templates.TemplateResponse(
             request,
             "admin.html",
-            {"rows": rows, "summary": summary, "key": key,
+            {"rows": rows, "summary": summary, "key": key, "pipeline": pipeline,
              "live_model": config.OPENROUTER_MODEL, "review_models": review_models},
         )
 

@@ -119,11 +119,15 @@ def cmd_publish_db(args: argparse.Namespace) -> int:
     from .dbsync import publish_db
 
     info = publish_db(
-        output_dir=Path(args.output_dir), bucket=args.bucket, only_uploaded=args.only_uploaded
+        output_dir=Path(args.output_dir), bucket=args.bucket, only_uploaded=args.only_uploaded,
+        allow_shrink=getattr(args, "allow_shrink", False),
     )
     if info is None:
         print("published db: nothing in the uploaded frontier yet")
         return 0
+    if info.get("guarded"):
+        print(f"published db: GUARDED — refused to shrink the live DB (use --allow-shrink to override)")
+        return 1
     print(f"published db: {info['key']} ({info['size']/1e6:.1f} MB, sha={info['sha256'][:12]})")
     return 0
 
@@ -331,6 +335,10 @@ def build_parser() -> argparse.ArgumentParser:
     publish_db.add_argument(
         "--only-uploaded", action="store_true",
         help="publish only actas whose crops are all uploaded (the safe frontier)",
+    )
+    publish_db.add_argument(
+        "--allow-shrink", action="store_true",
+        help="override the guard that refuses to replace the live DB with one <50% its size",
     )
     publish_db.set_defaults(func=cmd_publish_db)
 

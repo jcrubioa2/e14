@@ -108,6 +108,7 @@ def publish_db(
     client=None,
     only_uploaded: bool = False,
     manifest: Path | None = None,
+    allow_shrink: bool = False,
     verbose: bool = True,
 ) -> dict | None:
     """Snapshot the local results DB and publish it + the pointer to the bucket.
@@ -115,6 +116,10 @@ def publish_db(
     With ``only_uploaded``, the snapshot is pruned to the *frontier*: only actas whose
     candidate crops are all in the upload manifest. Returns None if that frontier is empty
     (nothing safe to publish yet) so the loop can simply wait.
+
+    Guard: refuses to flip the live pointer to a DB drastically smaller (<50% raw size)
+    than the one currently published, unless ``allow_shrink``. This prevents a misconfigured
+    run (e.g. wrong --output-dir pointing at a stub DB) from nuking the live national DB.
     """
     src = Path(output_dir) / "results" / "results.sqlite"
     if not src.exists():
@@ -137,17 +142,28 @@ def publish_db(
             if kept == 0:
                 return None  # nothing safe to publish yet
         digest = _sha256(snap)  # sha of the DECOMPRESSED db (what the reader installs)
+        raw_size = snap.stat().st_size
         key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
-        # Skip re-uploading an identical DB (nothing changed since the last cycle).
+        # Inspect the currently-published pointer for the unchanged-skip and shrink guard.
         try:
             cur = json.loads(client.get_object(Bucket=bucket, Key=POINTER_KEY)["Body"].read())
+        except Exception:
+            cur = None  # no pointer yet, or client without get_object — just publish
+        if cur is not None:
             if cur.get("sha256") == digest:
                 if verbose:
                     print("publish-db: unchanged since last publish; skipping upload", flush=True)
                 return {"key": key, "sha256": digest, "size": cur.get("size", 0),
                         "kept": kept if only_uploaded else None, "skipped": True}
-        except Exception:
-            pass  # no pointer yet, or client without get_object — just publish
+            cur_raw = cur.get("raw_size", 0)
+            if not allow_shrink and cur_raw and raw_size < 0.5 * cur_raw:
+                msg = (f"publish-db: REFUSING to publish — new DB ({raw_size/1e6:.0f} MB) is "
+                       f"<50% of the live DB ({cur_raw/1e6:.0f} MB). Wrong --output-dir? "
+                       f"Pass allow_shrink=True to override.")
+                if verbose:
+                    print(msg, flush=True)
+                return {"key": key, "sha256": digest, "size": 0, "raw_size": raw_size,
+                        "kept": kept if only_uploaded else None, "guarded": True}
         # gzip the snapshot — a paths/metadata DB (mostly NULL columns + repetitive crop
         # paths) compresses ~10x, so the upload is far smaller and cycles stay short.
         gz = Path(str(snap) + ".gz")
@@ -155,7 +171,7 @@ def publish_db(
         # the rollout, so keep per-cycle compression cheap (the reader auto-detects level).
         with open(snap, "rb") as f_in, gzip.open(gz, "wb", compresslevel=1) as f_out:
             shutil.copyfileobj(f_in, f_out, 1 << 20)
-        raw_size, gz_size = snap.stat().st_size, gz.stat().st_size
+        gz_size = gz.stat().st_size
         if verbose:
             print(f"publish-db: {raw_size/1e6:.0f} MB -> {gz_size/1e6:.1f} MB gz "
                   f"sha={digest[:12]} -> {bucket}/{key}", flush=True)
@@ -172,6 +188,33 @@ def publish_db(
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
     return {"key": key, "sha256": digest, "size": gz_size, "kept": kept if only_uploaded else None}
+
+
+# --- pointer status (reader-side, stdlib) ----------------------------------
+
+def pointer_status(cdn_base: str, *, timeout: float = 10.0) -> dict | None:
+    """Fetch the published pointer and return freshness/size info for operator dashboards.
+
+    Stdlib-only (no boto3), safe to call from the serve image. Returns None on any failure
+    so a flaky fetch never breaks the admin page.
+    """
+    try:
+        base = cdn_base.rstrip("/")
+        sep = "&" if "?" in POINTER_KEY else "?"
+        url = f"{base}/{POINTER_KEY}"
+        if base.startswith("http"):
+            url += f"{sep}t={int(time.time())}"
+        p = json.loads(_fetch(url, timeout))
+        ts = int(p.get("ts", 0))
+        return {
+            "sha": (p.get("sha256") or "")[:12],
+            "gz_size": p.get("size", 0),
+            "raw_size": p.get("raw_size", 0),
+            "ts": ts,
+            "age_secs": int(time.time()) - ts if ts else None,
+        }
+    except Exception:
+        return None
 
 
 # --- reader (Fly app) ------------------------------------------------------

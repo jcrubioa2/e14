@@ -25,6 +25,11 @@
     .s-CLEAN { background:#eaf6ec; color:#1a7f37; border-color:#aedcb8; }
     .s-NONE { color:var(--muted); }
     .muted { color: var(--muted); }
+    .pipeline { margin-top:12px; padding:8px 12px; border-radius:8px; font-size:13px; border:1px solid var(--line); }
+    .pipeline.ok { background:#eaf6ec; border-color:#aedcb8; }
+    .pipeline.warn { background:#fff8e6; border-color:#e6c34a; }
+    .pipeline .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:#1a7f37; vertical-align:middle; }
+    .pipeline.warn .dot { background:#b88200; }
   </style>
 </head>
 <body>
@@ -40,6 +45,20 @@
       <div class="card">IA: limpias<b>{{ summary.clean }}</b></div>
       <div class="card">apelaciones aceptadas<b>{{ summary.cleared }}</b></div>
     </div>
+    {% if pipeline %}
+    <div class="pipeline {{ 'warn' if pipeline.pointer_stale else 'ok' }}">
+      <span class="dot"></span>
+      <b>Publicación:</b>
+      {{ pipeline.synced_label }} de {{ pipeline.total_label }} actas servidas ({{ pipeline.pct }}%)
+      {%- if pipeline.last_sync_text %} &middot; última acta {{ pipeline.last_sync_text }}{% endif %}
+      {%- if pipeline.eta_text %} &middot; ETA {{ pipeline.eta_text }}{% endif %}
+      {%- if pipeline.pointer_age_min is not none %} &middot;
+        publicación hace {{ pipeline.pointer_age_min }} min
+        {%- if pipeline.pointer_raw_mb %} ({{ pipeline.pointer_raw_mb }} MB, sha {{ pipeline.pointer_sha }}){% endif %}
+        {%- if pipeline.pointer_stale %} <b>&mdash; ¿publicador detenido?</b>{% endif %}
+      {%- endif %}
+    </div>
+    {% endif %}
   </header>
   <main>
     <table>

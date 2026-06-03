@@ -189,6 +189,43 @@ def test_publish_db_only_uploaded_empty_frontier_returns_none(tmp_path: Path) ->
     assert dbsync.publish_db(out, bucket="b", client=_NoS3(), only_uploaded=True, verbose=False) is None
 
 
+def test_publish_db_refuses_to_shrink_live_db(tmp_path: Path) -> None:
+    """Guard: a much smaller new DB (wrong --output-dir) must NOT flip the live pointer."""
+    out = tmp_path / "out"
+    _make_db(out / "results" / "results.sqlite", 2)  # tiny "stub"
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            # Pretend a big DB is already live (raw_size far above the stub's).
+            self.objects = {dbsync.POINTER_KEY: json.dumps(
+                {"key": "db/results-big.sqlite.gz", "sha256": "a" * 64,
+                 "size": 60_000_000, "raw_size": 800_000_000}).encode()}
+
+        def get_object(self, Bucket, Key):  # noqa: N803
+            return {"Body": type("B", (), {"read": lambda s: self.objects[Key]})()}
+
+        def upload_file(self, *a, **k):
+            raise AssertionError("must not upload a shrinking DB")
+
+        def put_object(self, *a, **k):  # noqa: N803
+            raise AssertionError("must not flip the pointer to a shrinking DB")
+
+    s3 = _FakeS3()
+    info = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    assert info is not None and info.get("guarded") is True
+
+    # With allow_shrink=True the override publishes normally.
+    class _OkS3(_FakeS3):
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    info2 = dbsync.publish_db(out, bucket="b", client=_OkS3(), allow_shrink=True, verbose=False)
+    assert info2 is not None and not info2.get("guarded")
+
+
 def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) -> None:
     src_dir = tmp_path / "out"
     _make_db(src_dir / "results" / "results.sqlite", 2)
