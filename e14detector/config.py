@@ -94,7 +94,12 @@ OPENROUTER_BASE_URL = os.environ.get("E14_OPENROUTER_BASE_URL", "https://openrou
 # Two models by role. The LIVE poll path (upvote/downvote) values accuracy over speed,
 # so it uses a heavier (thinking) model; the proactive 5%% pre-screen values speed + cost,
 # so it uses a fast cheap model. Both ride OpenRouter (OpenAI-compatible).
-OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "qwen/qwen3-vl-8b-thinking")
+# LIVE poll adjudication model. A 2026-06-02 bake-off (scripts/probe_models.py) ruled out
+# reasoning VLMs (kimi-k2.5 never emits a verdict; step-3.7-flash is slow + false-positives)
+# and kept gemma-4-31b: a clean one-word verdict, 20/20 specificity (never rubber-stamps a
+# clean crop — vital since a STRANGE verdict is terminal/published). The poll runs it K times
+# and publishes only on a majority (see POLL_CONSENSUS_K / webapp._review_crop_consensus).
+OPENROUTER_MODEL = os.environ.get("E14_OPENROUTER_MODEL", "google/gemma-4-31b-it")
 # Pre-screen model: Gemma proved more precise than gemini-flash-lite on these bilevel
 # placeholder-dot crops (gemini over-flagged dots/zeros/asterisks), so the seed pass uses it.
 SCREEN_MODEL = os.environ.get("E14_SCREEN_MODEL", "google/gemma-4-31b-it")
@@ -116,14 +121,22 @@ OPENROUTER_SORT = os.environ.get("E14_OPENROUTER_SORT", "latency")
 # OpenRouter is pinned to these hosts (order = the list). Empty = let OpenRouter pick.
 OPENROUTER_PROVIDERS = [p.strip() for p in os.environ.get("E14_OPENROUTER_PROVIDERS", "").split(",") if p.strip()]
 
-# --- Public community-flag poll --------------------------------------------
-# The public report lets anyone flag a candidate crop. Crossing the threshold only
-# *triggers* a VLM second opinion; the VLM (not the crowd) decides what is published.
-# A VLM "clean" verdict un-publishes but stays re-eligible: if distinct votes climb
-# by another RESCALE_STEP it is re-adjudicated, so one flaky "clean" cannot bury a
-# real anomaly forever. STRANGE is terminal/published.
+# --- Public community vote -------------------------------------------------
+# DEPRECATED (poll/VLM adjudication): the swipe feed (see plans/pending/swipe-voting.md)
+# made the *crowd* the verdict and removed the VLM-adjudication path from the web flow, so
+# the POLL_*/APPEAL_*/*_CONSENSUS_*/*_PROMPT knobs below no longer affect the public site.
+# They are kept only because PollConfig still reads them and the offline/admin VLM tools
+# reference the prompts; they can be deleted once those are retired. Live knobs that DO
+# still matter: RATE_*, FORM_*, HIGH_VOTE_THRESHOLD, HOTLIST_SIZE, VOTER_SALT, TURNSTILE_*.
 POLL_THRESHOLD = int(os.environ.get("E14_POLL_THRESHOLD", "5"))
 POLL_RESCALE_STEP = int(os.environ.get("E14_POLL_RESCALE_STEP", "5"))
+# Self-consistency for the poll adjudication: read the crop K times at >0 temperature and
+# require a MAJORITY to act. A stable anomaly (struck/slashed/over-drawn) votes the same way
+# every time; the sub-pixel fused dot-on-digit class (information-undetectable from these
+# bilevel crops, see e14-vlm-validation-2026-06) wobbles -> no majority -> stays re-eligible
+# rather than being terminally published or wrongly cleared. K must be odd to avoid ties.
+POLL_CONSENSUS_K = int(os.environ.get("E14_POLL_CONSENSUS_K", "3"))
+POLL_CONSENSUS_TEMP = float(os.environ.get("E14_POLL_CONSENSUS_TEMP", "0.5"))
 # Appeal path ("Se ve normal"): distinct normal-votes that trigger a NEUTRAL-prompt
 # re-read of a crop currently shown as strange. A clean re-read un-publishes it; a
 # still-strange one keeps it and re-opens only after another APPEAL_RESCALE_STEP.

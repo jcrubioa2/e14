@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import math
 import os
+import random
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -20,6 +20,7 @@ from . import config
 from .community import (
     CommunityStore,
     PollConfig,
+    crop_id,
     field_key_of,
     issue_form_token,
     verify_form_token,
@@ -52,13 +53,8 @@ _ALGO_FLAG_SQL = (
 _ACTA_SUMMARY_SELECT = (
     "SELECT d.document_id, d.department_code, d.department_name, "
     "d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
-    "COUNT(*) AS n_candidates, "
-    f"SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS n_flagged "
+    "COUNT(*) AS n_candidates "
     "FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id"
-)
-_ACTA_FLAGGED_ORDER = (
-    f"ORDER BY (SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) > 0) DESC, "
-    "d.department_code, d.document_id"
 )
 
 VISIBLE_CLASSES = ("SUSPICIOUS_OVERLAP", "DIGIT_SHAPE_ANOMALY", "UNCLEAR")
@@ -531,51 +527,16 @@ def create_app(
             raise FileNotFoundError(crop_rel)
         return Path(tmp), True
 
-    def _review_crop(crop_rel: str, prompt_text: str):
-        """Fetch the crop (local or CDN) and run one VLM read; cleans up any temp file."""
-        local, is_temp = _obtain_crop(crop_rel)
-        try:
-            result = get_reviewer().review_vote_field([str(local)], metadata={}, prompt_text=prompt_text)
-            try:
-                digest = hashlib.sha256(local.read_bytes()).hexdigest()
-            except OSError:
-                digest = None
-            return result, digest
-        finally:
-            if is_temp:
-                local.unlink(missing_ok=True)
+    def cid_for(field_key: str, crop_rel: str, document_id: str) -> str:
+        """Anonymized public id for a crop, registered so /c/{cid} can resolve it later.
 
-    def adjudicate(field_key: str, crop_rel: str, votes_at_call: int) -> None:
-        """Blocking VLM second opinion on an upvoted crop; runs on a worker thread.
-
-        Uses the CONFIRM prompt: the crowd already pushed toward "suspicious", so the
-        model is asked to judge independently (skeptical of the report) before we publish.
+        Every place that surfaces a crop to the public (feed, billboard, acta siblings)
+        funnels through here, so the cid_index always knows how to map the opaque id back
+        to its real crop without the client ever seeing the field key, path, or acta id.
         """
-        try:
-            result, digest = _review_crop(crop_rel, config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT)
-            community.record_verdict(field_key, result.classification in STRANGE_CLASSES, votes_at_call, digest)
-        except Exception:
-            # Transient failure (incl. crop fetch): roll the PENDING claim back so a later flag retries.
-            community.release_pending(field_key)
-
-    def schedule_adjudication(field_key: str, crop_rel: str, votes_at_call: int) -> None:
-        task = asyncio.create_task(asyncio.to_thread(adjudicate, field_key, crop_rel, votes_at_call))
-        app.state._bg_tasks.add(task)
-        task.add_done_callback(app.state._bg_tasks.discard)
-
-    def adjudicate_appeal(field_key: str, crop_rel: str, votes_at_call: int) -> None:
-        """Neutral-prompt re-read of a strange crop; CLEAN un-publishes it."""
-        appeal_prompt = config.APPEAL_PROMPT or VOTE_FIELD_APPEAL_PROMPT
-        try:
-            result, digest = _review_crop(crop_rel, appeal_prompt)
-            community.record_appeal_verdict(field_key, result.classification not in STRANGE_CLASSES, votes_at_call, digest)
-        except Exception:
-            community.release_appeal(field_key)
-
-    def schedule_appeal(field_key: str, crop_rel: str, votes_at_call: int) -> None:
-        task = asyncio.create_task(asyncio.to_thread(adjudicate_appeal, field_key, crop_rel, votes_at_call))
-        app.state._bg_tasks.add(task)
-        task.add_done_callback(app.state._bg_tasks.discard)
+        cid = crop_id(poll_cfg.form_token_secret, field_key)
+        community.register_cid(cid, field_key, crop_rel, document_id)
+        return cid
 
     @app.get("/")
     async def home():
@@ -769,6 +730,7 @@ def create_app(
             "User-agent: *\n"
             "Allow: /browse\n"
             "Allow: /acta/\n"
+            "Allow: /votar\n"
             "Disallow: /panel\n"
             "Disallow: /admin\n"
             "Disallow: /doc/\n"
@@ -785,7 +747,7 @@ def create_app(
         with conn() as db:
             deps = _departments(db)
         from urllib.parse import quote as _quote
-        locs = [f"{config.SITE_URL}/browse", f"{config.SITE_URL}/browse?review=1"]
+        locs = [f"{config.SITE_URL}/votar", f"{config.SITE_URL}/browse", f"{config.SITE_URL}/browse?review=1"]
         for d in deps:
             code = d["department_code"] or d["department_name"]
             if code:
@@ -834,43 +796,6 @@ def create_app(
             docs, total = _qualifying_docs(db, department, anomaly_type, min_confidence, q, limit, offset)
             return {"total": total, "items": [_row_dict(row) for row in docs]}
 
-    def _published_count_by_doc() -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for key in community.published_keys():
-            doc = key.rsplit(":", 3)[0]
-            counts[doc] = counts.get(doc, 0) + 1
-        return counts
-
-    def _build_hotlist(db: sqlite3.Connection, popularity: dict[str, int]) -> list[dict]:
-        items: dict[str, dict] = {}
-        # Gemma's seed findings (the initial "stranges" to review).
-        for r in db.execute(
-            f"""
-            SELECT d.document_id, d.department_name, d.municipality_name, d.place_name,
-                   SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) AS g
-            FROM documents d JOIN vote_fields vf ON vf.document_id=d.document_id
-            WHERE vf.row_type='candidate'
-            GROUP BY d.document_id HAVING g > 0
-            ORDER BY g DESC LIMIT 50
-            """
-        ).fetchall():
-            items[r["document_id"]] = {"doc": r, "pop": popularity.get(r["document_id"], 0), "seed": True}
-        # Popular actas the crowd is flagging (even if Gemma did not seed them).
-        for doc_id, votes in popularity.items():
-            if doc_id in items:
-                items[doc_id]["pop"] = votes
-                continue
-            dr = db.execute(
-                "SELECT document_id, department_name, municipality_name, place_name "
-                "FROM documents WHERE document_id=?",
-                (doc_id,),
-            ).fetchone()
-            if dr:
-                items[doc_id] = {"doc": dr, "pop": votes, "seed": False}
-        # Rank by popularity first (traction), then Gemma seeds; hide exact counts.
-        ranked = sorted(items.values(), key=lambda x: (x["pop"], x["seed"]), reverse=True)
-        return ranked[:HOTLIST_SIZE]
-
     @app.get("/browse")
     async def browse(
         request: Request,
@@ -882,9 +807,10 @@ def create_app(
         review: int = 0,
         page: int = Query(1, ge=1),
     ):
-        # LEVEL 1: a browsable summary, one entry per ACTA (a polling table). Drill down
-        # department -> municipio -> zona -> puesto (like the official site). Actas the
-        # crowd/algorithm flagged float to the top. Acta identity stays visible.
+        # LEVEL 1: a browsable directory, one entry per ACTA (a polling table). Drill down
+        # department -> municipio -> zona -> puesto (like the official site). Acta identity
+        # IS visible here (this is the lookup view; anonymization is only for /votar). Actas
+        # the crowd has voted on float to the top. ``review=1`` narrows to just those.
         # Cascading: ignore a child filter whose parent isn't set.
         if not department:
             municipality = zone = puesto = None
@@ -911,25 +837,22 @@ def create_app(
             needle = f"%{q}%"
             params.extend([needle, needle, needle])
         clause = " AND ".join(where)
-        any_filter = bool(department or municipality or zone or puesto or q)
         offset = (page - 1) * BROWSE_ACTAS_PER_PAGE
+        region_order = "ORDER BY d.department_code, d.document_id"
         with conn() as db:
             popularity = community.acta_popularity()
             if review:
-                # "Ver todas": only the actas worth reviewing — flagged seeds, crowd-
-                # published, or voted. A bounded set, so order + paginate in Python.
-                review_ids = set(popularity) | set(_published_count_by_doc())
-                id_list = list(review_ids)
+                # Only actas the crowd has voted on, most-voted first. A bounded set, so
+                # order + paginate in Python.
+                id_list = list(popularity)
                 ph = ",".join("?" for _ in id_list) or "NULL"
                 rows = db.execute(
-                    f"{_ACTA_SUMMARY_SELECT} WHERE {clause} GROUP BY d.document_id "
-                    f"HAVING SUM(CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END) > 0 "
-                    f"   OR d.document_id IN ({ph})",
+                    f"{_ACTA_SUMMARY_SELECT} WHERE {clause} AND d.document_id IN ({ph}) "
+                    f"GROUP BY d.document_id",
                     [*params, *id_list],
                 ).fetchall()
                 rows.sort(key=lambda r: (
                     -popularity.get(r["document_id"], 0),
-                    -(r["n_flagged"] or 0),
                     r["department_code"] or "", r["document_id"],
                 ))
                 total_actas = len(rows)
@@ -942,9 +865,9 @@ def create_app(
                     f"  WHERE {clause} GROUP BY d.document_id)",
                     params,
                 ).fetchone()["c"]
-                # Ordering: the most-voted actas float to the very top (silently — crowd
-                # attention compounds), then the flagged seeds, then the rest by region.
-                # The voted rows are paginated as a prefix; the "rest" query excludes them.
+                # The most-voted actas float to the very top (crowd attention compounds),
+                # then the rest by region. Voted rows are a paginated prefix; the "rest"
+                # query excludes them.
                 voted_rows, voted_ids = _voted_doc_rows(db, popularity, clause, params, VOTED_FLOAT_CAP)
                 head = voted_rows[offset : offset + BROWSE_ACTAS_PER_PAGE]
                 rest_rows: list = []
@@ -956,7 +879,7 @@ def create_app(
                         rest_params += voted_ids
                     rest_rows = db.execute(
                         f"{_ACTA_SUMMARY_SELECT} WHERE {rest_clause} GROUP BY d.document_id "
-                        f"{_ACTA_FLAGGED_ORDER} LIMIT ? OFFSET ?",
+                        f"{region_order} LIMIT ? OFFSET ?",
                         [*rest_params, rest_count, max(0, offset - len(voted_rows))],
                     ).fetchall()
                 doc_rows = list(head) + list(rest_rows)
@@ -965,24 +888,12 @@ def create_app(
             municipios = _municipios(db, department)
             zonas = _zonas(db, department, municipality)
             puestos = _puestos(db, department, municipality, zone)
-            # The "review now" hotlist is global (most-flagged/voted), shown on every
-            # browse view (not the dedicated review page, which already *is* that list).
-            hotlist = [] if review else _build_hotlist(db, popularity)
             progress = compute_sync_progress(db)
-        pub_counts = _published_count_by_doc()
-        # Appeals that reversed a Gemma seed: subtract them so a cleared false positive
-        # stops inflating the acta's flagged count.
-        cleared_by_doc: dict[str, int] = {}
-        for key in community.cleared_keys():
-            d = key.rsplit(":", 3)[0]
-            cleared_by_doc[d] = cleared_by_doc.get(d, 0) + 1
         high_voted_docs = {k.rsplit(":", 3)[0] for k in community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)}
         actas = [
             {
                 "doc": r,
                 "n_candidates": r["n_candidates"],
-                "n_flagged": max(0, (r["n_flagged"] or 0) - cleared_by_doc.get(r["document_id"], 0)),
-                "n_published": pub_counts.get(r["document_id"], 0),
                 "high_voted": r["document_id"] in high_voted_docs,
             }
             for r in doc_rows
@@ -992,7 +903,6 @@ def create_app(
             "browse.html",
             {
                 "actas": actas,
-                "hotlist": hotlist,
                 "progress": progress,
                 "departments": departments,
                 "municipios": municipios,
@@ -1012,21 +922,23 @@ def create_app(
                 "site_url": config.SITE_URL,
                 "canonical": config.SITE_URL + ("/browse?review=1" if review else "/browse"),
                 "page_title": (
-                    "Todas las actas para revisar — Veeduría ciudadana elecciones 2026"
+                    "Actas más votadas por la comunidad — Veeduría ciudadana 2026"
                     if review else
                     "Veeduría ciudadana de las actas E-14 — elecciones Colombia 2026"
                 ),
                 "meta_description": (
                     "Revisa las actas E-14 de las elecciones presidenciales de Colombia 2026. "
-                    "Mira los votos escritos a mano en cada mesa y reporta lo que se vea alterado. "
-                    "Veeduría ciudadana, abierta a todos."
+                    "Mira los votos escritos a mano en cada mesa y vota en el feed lo que se vea "
+                    "alterado. Veeduría ciudadana, abierta a todos."
                 ),
             },
         )
 
     @app.get("/acta/{document_id}")
     async def acta_detail(request: Request, document_id: str):
-        # LEVEL 2: one acta, all candidate crops in ballot order, each flaggable.
+        # LEVEL 2 (read-only): one acta, all candidate crops in ballot order, each showing
+        # its PUBLIC community tallies. Voting happens only in the swipe feed (/votar) — this
+        # page no longer casts votes, it just displays what the crowd has said.
         with conn() as db:
             doc = db.execute(
                 "SELECT * FROM documents WHERE document_id=?", (document_id,)
@@ -1034,10 +946,9 @@ def create_app(
             if not doc:
                 raise HTTPException(status_code=404, detail="acta no encontrada")
             frows = db.execute(
-                f"""
+                """
                 SELECT vf.page_number, vf.row_number, vf.section, vf.candidate_number,
-                       vf.candidate_name, vf.raw_crop_path,
-                       CASE WHEN {_ALGO_FLAG_SQL} THEN 1 ELSE 0 END AS algo_flagged
+                       vf.candidate_name, vf.raw_crop_path
                 FROM vote_fields vf
                 WHERE vf.document_id=? AND vf.row_type='candidate'
                   AND vf.raw_crop_path IS NOT NULL
@@ -1051,51 +962,55 @@ def create_app(
             crops.append({
                 "row": fr,
                 "field_key": fkey,
-                "algo_flagged": bool(fr["algo_flagged"]),
                 "crop_url": crop_cdn_url(fr["raw_crop_path"], config.CDN_BASE_URL),
             })
-        keys = [c["field_key"] for c in crops]
-        published = community.published_among(keys)
-        cleared = community.cleared_among(keys)
-        pending = community.pending_among(keys)
-        high_voted = community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)
+        counts = community.counts_among([c["field_key"] for c in crops])
         for c in crops:
-            c["cleared"] = c["field_key"] in cleared
-            # Shown as strange = a Gemma seed or a live-published crop, UNLESS an appeal
-            # already cleared it. Only such crops expose the "Se ve normal" button.
-            c["published"] = c["field_key"] in published and not c["cleared"]
-            c["strange"] = (c["algo_flagged"] or c["published"]) and not c["cleared"]
-            # The crowd crossed the threshold and a review is running (state feedback).
-            c["pending"] = c["field_key"] in pending and not c["strange"]
-            # Independent crowd signal: flagged by many people, shown even if the model
-            # called it clean (and even if no appeal cleared it).
-            c["high_voted"] = c["field_key"] in high_voted
-        flagged = any(c["strange"] for c in crops)
-        # Issue a stable session id so a subsequent flag POST has an identity, and a
-        # signed form token bound to it (the in-app bot check; no CAPTCHA needed).
-        sid = request.cookies.get("sid") or uuid.uuid4().hex
-        form_token = (
-            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
-        )
+            tally = counts.get(c["field_key"], {"good": 0, "strange": 0})
+            c["good"] = tally["good"]
+            c["strange"] = tally["strange"]
+            # Strong crowd signal stands on its own (no model verdict involved anymore).
+            c["high_voted"] = tally["strange"] >= config.HIGH_VOTE_THRESHOLD
         loc = " · ".join(
             x for x in (doc["department_name"] or doc["department_code"],
                         doc["municipality_name"], f"mesa {doc['mesa']}" if doc["mesa"] else None) if x
         ) or doc["document_id"]
-        response = templates.TemplateResponse(
+        return templates.TemplateResponse(
             request,
             "acta.html",
             {
                 "doc": doc,
                 "crops": crops,
-                "flagged": flagged,
-                "form_token": form_token,
-                "turnstile_sitekey": poll_cfg.turnstile_sitekey if poll_cfg.turnstile_enabled else "",
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/acta/{doc['document_id']}",
                 "page_title": f"Acta E-14 — {loc} | Veeduría ciudadana 2026",
                 "meta_description": (
-                    f"Acta E-14 de {loc}. Revisa los votos escritos a mano de cada candidato "
-                    f"y reporta lo que se vea alterado. Veeduría ciudadana, elecciones Colombia 2026."
+                    f"Acta E-14 de {loc}. Mira los votos escritos a mano de cada candidato y "
+                    f"lo que la comunidad ha votado sobre cada casilla. Veeduría ciudadana 2026."
+                ),
+            },
+        )
+
+    @app.get("/votar")
+    async def votar(request: Request):
+        # The headline product: an anonymized, mobile-first swipe feed. The page ships a
+        # signed form token (in-app bot check); the deck itself is loaded from /api/feed
+        # and votes go to /api/vote.
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        form_token = (
+            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
+        )
+        response = templates.TemplateResponse(
+            request,
+            "swipe.html",
+            {
+                "form_token": form_token,
+                "site_url": config.SITE_URL,
+                "canonical": f"{config.SITE_URL}/votar",
+                "page_title": "Vota las casillas — Veeduría ciudadana E-14 2026",
+                "meta_description": (
+                    "Mira casillas de votos escritas a mano, al azar y sin saber de qué mesa "
+                    "son, y vota si se ven bien o extrañas. Veeduría ciudadana elecciones 2026."
                 ),
             },
         )
@@ -1103,20 +1018,144 @@ def create_app(
             response.set_cookie("sid", sid, max_age=60 * 60 * 24 * 365, httponly=True, samesite="lax")
         return response
 
-    @app.post("/api/flag")
-    async def api_flag(request: Request, payload: dict = Body(...)):
-        field_key = str(payload.get("field_key", ""))
-        if not field_key:
-            raise HTTPException(status_code=400, detail="field_key required")
+    @app.get("/c/{cid}")
+    async def crop_anon(cid: str):
+        # Serve a crop by its opaque id WITHOUT ever revealing the path/acta. Only cids the
+        # server has surfaced (and thus registered) resolve; anything else is a 404.
+        row = community.resolve_cid(cid)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        url = crop_cdn_url(row["crop_rel"], config.CDN_BASE_URL)
+        if url:
+            return RedirectResponse(url, status_code=307)
+        try:
+            resolved = resolve_crop_path(row["crop_rel"], output_dir)
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(status_code=404, detail="not found")
+        return FileResponse(resolved)
+
+    def _feed_payload(n: int, exclude: set[str] | None = None) -> list[dict]:
+        """A random batch of anonymized crop cards: ``[{cid, img_url}]``.
+
+        Random order over candidate crops so a voter can't tell which acta a crop is from.
+        Registers every cid it hands out so /c/{cid} and /api/vote can resolve them.
+        """
+        exclude = exclude or set()
+        # Over-fetch a little so client-side exclusions still leave a full batch.
+        want = min(200, max(n, n + len(exclude)))
+        with conn() as db:
+            rows = db.execute(
+                """
+                SELECT document_id, page_number, row_number, section, raw_crop_path
+                FROM vote_fields
+                WHERE row_type='candidate' AND raw_crop_path IS NOT NULL
+                ORDER BY RANDOM() LIMIT ?
+                """,
+                (want,),
+            ).fetchall()
+        out: list[dict] = []
+        reg: list[tuple[str, str, str, str]] = []
+        for r in rows:
+            fkey = field_key_of(r["document_id"], r["page_number"], r["row_number"], r["section"])
+            cid = crop_id(poll_cfg.form_token_secret, fkey)
+            if cid in exclude:
+                continue
+            reg.append((cid, fkey, r["raw_crop_path"], r["document_id"]))
+            out.append({"cid": cid, "img_url": f"/c/{cid}"})
+            if len(out) >= n:
+                break
+        community.register_cids(reg)
+        return out
+
+    @app.get("/api/feed")
+    async def api_feed(n: int = Query(12, ge=1, le=50), exclude: str = ""):
+        # Anonymized random deck. ``exclude`` is a comma-separated list of cids the client
+        # has already swiped this session (best-effort de-dup; the vote tables ignore true
+        # repeats anyway). No acta id / location / path ever appears in the response.
+        skip = {c for c in exclude.split(",") if c}
+        return {"items": _feed_payload(n, skip)}
+
+    def _hot_crops_payload() -> list[dict]:
+        """Resolve the hot-crop ranking into anonymized billboard cards with public tallies."""
+        hot = community.hot_crops(HOTLIST_SIZE)
+        if not hot:
+            return []
+        keys = [h["field_key"] for h in hot]
+        with conn() as db:
+            crop_by_key: dict[str, tuple[str, str]] = {}
+            for fkey in keys:
+                looked = lookup_candidate_appeal(db, fkey)
+                if looked:
+                    doc_id = fkey.rsplit(":", 3)[0]
+                    crop_by_key[fkey] = (looked[0], doc_id)
+        out = []
+        for h in hot:
+            cr = crop_by_key.get(h["field_key"])
+            if not cr:
+                continue
+            cid = cid_for(h["field_key"], cr[0], cr[1])
+            out.append({"cid": cid, "img_url": f"/c/{cid}",
+                        "good": h["good"], "strange": h["strange"]})
+        return out
+
+    @app.get("/api/billboard")
+    async def api_billboard():
+        # Public, anonymized leaderboard of the most-voted crops (counts shown).
+        return {"items": _hot_crops_payload()}
+
+    @app.get("/api/acta-crops")
+    async def api_acta_crops(cid: str):
+        # Scroll-down context: the OTHER candidate crops from the same acta as ``cid``,
+        # shuffled and still anonymized (no acta id / location / candidate names leak).
+        row = community.resolve_cid(cid)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        document_id = row["document_id"]
+        with conn() as db:
+            frows = db.execute(
+                """
+                SELECT page_number, row_number, section, raw_crop_path
+                FROM vote_fields
+                WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL
+                """,
+                (document_id,),
+            ).fetchall()
+        siblings = []
+        reg: list[tuple[str, str, str, str]] = []
+        for fr in frows:
+            fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
+            scid = crop_id(poll_cfg.form_token_secret, fkey)
+            reg.append((scid, fkey, fr["raw_crop_path"], document_id))
+            siblings.append({"field_key": fkey, "cid": scid})
+        community.register_cids(reg)
+        counts = community.counts_among([s["field_key"] for s in siblings])
+        items = [
+            {"cid": s["cid"], "img_url": f"/c/{s['cid']}",
+             "good": counts[s["field_key"]]["good"], "strange": counts[s["field_key"]]["strange"]}
+            for s in siblings
+        ]
+        random.shuffle(items)
+        return {"items": items}
+
+    @app.post("/api/vote")
+    async def api_vote(request: Request, payload: dict = Body(...)):
+        """Cast one anonymized vote on a crop: ``{cid, value: good|strange, form_token, website}``.
+
+        Best-effort dedup (one identity per crop per direction, daily IP hash); a duplicate
+        is a silent no-op that still returns 200 with the current public tallies. Never an
+        error on a repeat — the feed just advances.
+        """
+        cid = str(payload.get("cid", ""))
+        value = str(payload.get("value", ""))
+        if not cid or value not in ("good", "strange"):
+            raise HTTPException(status_code=400, detail="cid and value (good|strange) required")
 
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         new_sid = "sid" not in request.cookies
         token = voter_token(poll_cfg.voter_salt, _client_ip(request))
 
-        # Rate limit before any paid work or Turnstile round-trip.
         if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-
         bot = bot_check(payload, sid, poll_cfg)
         if bot == "honeypot":
             return _flag_response({"ok": True}, 200, sid, new_sid)  # shadow-drop the bot
@@ -1127,77 +1166,18 @@ def create_app(
         ):
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
 
-        # Validate the field exists (read-only results DB).
-        with conn() as db:
-            looked = lookup_candidate_appeal(db, field_key)
-        if not looked:
-            raise HTTPException(status_code=404, detail="unknown field")
-        crop_rel, is_seed = looked
-        # A crop already shown as strange (Gemma seed or live-published) can't be
-        # re-flagged — it's already strange. The appeal path ("Se ve normal") is what
-        # applies there. Mirrors the eligibility check in /api/appeal.
-        strange_now = is_seed or (field_key in community.published_among([field_key]))
-        if strange_now and field_key not in community.cleared_among([field_key]):
-            raise HTTPException(status_code=409, detail="field is already marked strange")
-
-        # Record the vote regardless of where the crop lives; the crop is only fetched
-        # (locally or from the CDN) if/when this crosses the adjudication threshold.
-        community.record_flag(field_key, token)
-        votes_at_call = community.try_claim_adjudication(
-            field_key, poll_cfg.threshold, poll_cfg.rescale_step
+        row = community.resolve_cid(cid)
+        if not row:
+            raise HTTPException(status_code=404, detail="unknown crop")
+        field_key = row["field_key"]
+        if value == "strange":
+            community.record_flag(field_key, token)
+        else:
+            community.record_appeal(field_key, token)
+        tally = community.counts_among([field_key])[field_key]
+        return _flag_response(
+            {"ok": True, "good": tally["good"], "strange": tally["strange"]}, 200, sid, new_sid
         )
-        if votes_at_call is not None:
-            schedule_adjudication(field_key, crop_rel, votes_at_call)
-
-        # Never leak the count or whether a review fired — the counter is private.
-        return _flag_response({"ok": True}, 200, sid, new_sid)
-
-    @app.post("/api/appeal")
-    async def api_appeal(request: Request, payload: dict = Body(...)):
-        """"Se ve normal": challenge a crop currently shown as strange.
-
-        Symmetric to /api/flag. Eligibility (the crop must currently be shown strange)
-        is checked here so the crowd cannot open an appeal on an ordinary crop. Crossing
-        the appeal threshold only *triggers* a neutral re-read; the model decides.
-        """
-        field_key = str(payload.get("field_key", ""))
-        if not field_key:
-            raise HTTPException(status_code=400, detail="field_key required")
-
-        sid = request.cookies.get("sid") or uuid.uuid4().hex
-        new_sid = "sid" not in request.cookies
-        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
-
-        if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
-            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        bot = bot_check(payload, sid, poll_cfg)
-        if bot == "honeypot":
-            return _flag_response({"ok": True}, 200, sid, new_sid)
-        if bot:
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        if poll_cfg.turnstile_enabled and not verify_turnstile(
-            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
-        ):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-
-        with conn() as db:
-            looked = lookup_candidate_appeal(db, field_key)
-        if not looked:
-            raise HTTPException(status_code=404, detail="unknown field")
-        crop_rel, is_seed = looked
-        # Only crops currently shown as strange (Gemma seed or live-published) are
-        # appealable. Already-cleared crops are no longer strange, so they are not.
-        strange_now = is_seed or (field_key in community.published_among([field_key]))
-        if not strange_now or field_key in community.cleared_among([field_key]):
-            raise HTTPException(status_code=409, detail="field is not marked strange")
-
-        community.record_appeal(field_key, token)
-        votes_at_call = community.try_claim_appeal(
-            field_key, poll_cfg.appeal_threshold, poll_cfg.appeal_rescale_step
-        )
-        if votes_at_call is not None:
-            schedule_appeal(field_key, crop_rel, votes_at_call)
-        return _flag_response({"ok": True}, 200, sid, new_sid)
 
     return app
 

@@ -10,7 +10,13 @@ primary_region = 'dfw'
 
 [env]
   E14_COMMUNITY_DB = '/data/community.sqlite'
-  E14_OPENROUTER_MODEL = 'anthropic/claude-haiku-4.5'
+  # Poll adjudication: K=3 self-consistency on gemma-4-31b (replaces Haiku — worst on the
+  # hard cases AND priciest). Publish-as-strange needs a majority of the 3 reads; the
+  # undetectable fused-dot class wobbles -> no majority -> stays re-eligible, never a
+  # terminal false accusation. See plans/pending/voted-crop-adjudication.md.
+  E14_OPENROUTER_MODEL = 'google/gemma-4-31b-it'
+  E14_POLL_CONSENSUS_K = '3'
+  E14_POLL_CONSENSUS_TEMP = '0.5'
   E14_SCREEN_MODEL = 'google/gemma-4-31b-it'
   E14_POLL_RESCALE_STEP = '5'
   E14_POLL_THRESHOLD = '5'
@@ -44,4 +50,4 @@ primary_region = 'dfw'
 
 [[vm]]
   size = 'shared-cpu-2x'
-  memory = '1024mb'
+  memory = '2048mb'
