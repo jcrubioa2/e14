@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import math
 import os
 import random
@@ -332,6 +333,15 @@ def create_app(
     # Durable vote path: when SQS is configured, votes are enqueued (worker drains to
     # Postgres) instead of written synchronously. None => synchronous write (local/tests).
     vote_publisher = make_publisher()
+
+    # cid -> {field_key, crop_rel, document_id} is an immutable, append-only mapping (a cid is
+    # registered when the feed surfaces it, well before it can be voted on), so resolving it
+    # through a process-local LRU drops a per-vote Aurora Data API round-trip on the hot path.
+    # Bounded so memory stays flat across the full national crop set; a miss falls back to the
+    # store. (Caching an unknown cid's None is fine — bogus cids stay 404.)
+    @functools.lru_cache(maxsize=200_000)
+    def resolve_cid_cached(cid: str):
+        return community.resolve_cid(cid)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -843,7 +853,7 @@ def create_app(
     async def crop_anon(cid: str):
         # Serve a crop by its opaque id WITHOUT ever revealing the path/acta. Only cids the
         # server has surfaced (and thus registered) resolve; anything else is a 404.
-        row = community.resolve_cid(cid)
+        row = resolve_cid_cached(cid)
         if not row:
             raise HTTPException(status_code=404, detail="not found")
         url = crop_cdn_url(row["crop_rel"], config.CDN_BASE_URL)
@@ -941,7 +951,7 @@ def create_app(
     async def api_acta_crops(cid: str):
         # Scroll-down context: the OTHER candidate crops from the same acta as ``cid``,
         # shuffled and still anonymized (no acta id / location / candidate names leak).
-        row = community.resolve_cid(cid)
+        row = resolve_cid_cached(cid)
         if not row:
             raise HTTPException(status_code=404, detail="not found")
         document_id = row["document_id"]
@@ -988,7 +998,14 @@ def create_app(
         new_sid = "sid" not in request.cookies
         token = voter_token(poll_cfg.voter_salt, _client_ip(request))
 
-        if not community.allow(token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket):
+        # The store calls below are blocking boto3 (Aurora Data API) / SQS round-trips. In an
+        # async handler they must run in a thread or they stall the event loop, serializing the
+        # whole machine to ~1 vote in flight. asyncio.to_thread lets one worker carry many
+        # concurrent votes (both backends are thread-safe: boto3 clients are; the SQLite store
+        # uses check_same_thread=False + a lock).
+        if not await asyncio.to_thread(
+            community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
+        ):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
         bot = bot_check(payload, sid, poll_cfg)
         if bot == "honeypot":
@@ -1000,7 +1017,7 @@ def create_app(
         ):
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
 
-        row = community.resolve_cid(cid)
+        row = await asyncio.to_thread(resolve_cid_cached, cid)  # cache hit => no Data API call
         if not row:
             raise HTTPException(status_code=404, detail="unknown crop")
         field_key = row["field_key"]
@@ -1009,16 +1026,16 @@ def create_app(
             # (current + 1 for the voted direction), reconciled once the worker
             # commits. A duplicate vote is dedup'd downstream; the count just shows
             # +1 too high until the next read. Acceptable for crowd voting.
-            tally = community.counts_among([field_key])[field_key]
-            vote_publisher.publish(field_key, token, value)
+            tally = (await asyncio.to_thread(community.counts_among, [field_key]))[field_key]
+            await asyncio.to_thread(vote_publisher.publish, field_key, token, value)
             tally[value] += 1
         else:
             # Synchronous path (SQLite local/tests / single-machine fallback).
             if value == "strange":
-                community.record_flag(field_key, token)
+                await asyncio.to_thread(community.record_flag, field_key, token)
             else:
-                community.record_appeal(field_key, token)
-            tally = community.counts_among([field_key])[field_key]
+                await asyncio.to_thread(community.record_appeal, field_key, token)
+            tally = (await asyncio.to_thread(community.counts_among, [field_key]))[field_key]
         return _flag_response(
             {"ok": True, "good": tally["good"], "strange": tally["strange"]}, 200, sid, new_sid
         )
