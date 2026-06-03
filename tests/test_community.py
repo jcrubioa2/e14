@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import httpx
@@ -147,9 +148,29 @@ class _FakeReviewer:
     def __init__(self, classification: FieldClassification) -> None:
         self.classification = classification
 
-    def review_vote_field(self, image_paths, metadata, thinking_budget=None, prompt_text=None) -> VLMReviewResult:
+    def review_vote_field(self, image_paths, metadata, thinking_budget=None, prompt_text=None,
+                          temperature=None) -> VLMReviewResult:
         self.last_prompt_text = prompt_text  # so a test can assert the neutral prompt was used
         return VLMReviewResult(self.classification, 0.9, None, {}, "stub")
+
+
+class _SplitReviewer:
+    """Returns STRANGE for exactly ``strange_count`` of the K reads, CLEAN after — models
+    the self-consistency wobble of the undetectable fused-dot class across repeated calls."""
+
+    def __init__(self, strange_count: int) -> None:
+        self.strange_count = strange_count
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def review_vote_field(self, image_paths, metadata, thinking_budget=None, prompt_text=None,
+                          temperature=None) -> VLMReviewResult:
+        with self._lock:
+            i = self._n
+            self._n += 1
+        cls = (FieldClassification.SUSPICIOUS_OVERLAP if i < self.strange_count
+               else FieldClassification.CLEAN)
+        return VLMReviewResult(cls, 0.9, None, {}, "stub")
 
 
 def _build_app(tmp_path: Path, reviewer: _FakeReviewer, seed_strange: bool = False, form_secret: str = ""):
@@ -236,6 +257,30 @@ def test_flag_flow_clean_then_strange_via_re_eligibility(tmp_path: Path) -> None
             assert "marcada como sospechosa" in detail
             summary = (await client.get("/browse")).text
             assert "marcada por la gente" in summary
+
+    asyncio.run(run())
+
+
+def test_flag_flow_no_consensus_stays_re_eligible(tmp_path: Path, monkeypatch) -> None:
+    """A crop the model can't read stably (1 of 3 reads STRANGE) gets NO majority, so it is
+    NOT terminally published — it stays re-eligible. This is how the information-undetectable
+    fused-dot class is handled honestly: never a false public accusation on a split verdict."""
+    from e14detector import config as _config
+    monkeypatch.setattr(_config, "POLL_CONSENSUS_K", 3)
+    reviewer = _SplitReviewer(strange_count=1)  # 1/3 STRANGE -> 2*1 > 3 is False -> CLEAN
+    app = _build_app(tmp_path, reviewer)
+    fkey = field_key_of("doc1", 1, 1, None)
+    community = app.state.community
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            for i in range(3):
+                assert (await _flag(client, fkey, f"10.0.0.{i}")).json() == {"ok": True}
+            await _drain(app)
+            state = community.state_of(fkey)
+            assert state["vlm_state"] == "CLEAN"      # no majority -> not strange
+            assert state["published"] == 0            # never falsely published
 
     asyncio.run(run())
 

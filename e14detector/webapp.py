@@ -7,6 +7,7 @@ import math
 import os
 import sqlite3
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -531,16 +532,36 @@ def create_app(
             raise FileNotFoundError(crop_rel)
         return Path(tmp), True
 
-    def _review_crop(crop_rel: str, prompt_text: str):
-        """Fetch the crop (local or CDN) and run one VLM read; cleans up any temp file."""
+    def _review_crop_consensus(crop_rel: str, prompt_text: str) -> tuple[int, int, str | None]:
+        """Read one crop K times (temperature>0) and return ``(n_strange, k, digest)``.
+
+        Self-consistency: a genuine, visible anomaly (struck/slashed/over-drawn digit) reads
+        DIRTY on every repeat, while the sub-pixel fused dot-on-digit class — which is
+        information-undetectable from these bilevel crops — wobbles run to run. The caller
+        publishes only on a MAJORITY, so the wobbly class never reaches a terminal STRANGE
+        verdict; it stays re-eligible for the crowd/human tier. The crop is fetched ONCE and
+        the K reads share it (no K downloads). See plans/pending/voted-crop-adjudication.md.
+        """
         local, is_temp = _obtain_crop(crop_rel)
         try:
-            result = get_reviewer().review_vote_field([str(local)], metadata={}, prompt_text=prompt_text)
+            reviewer = get_reviewer()
+            k = max(1, config.POLL_CONSENSUS_K)
+
+            def _one(_i: int) -> bool:
+                res = reviewer.review_vote_field(
+                    [str(local)], metadata={}, prompt_text=prompt_text,
+                    temperature=config.POLL_CONSENSUS_TEMP,
+                )
+                return res.classification in STRANGE_CLASSES
+
+            with ThreadPoolExecutor(max_workers=k) as ex:
+                votes = list(ex.map(_one, range(k)))
+            n_strange = sum(votes)
             try:
                 digest = hashlib.sha256(local.read_bytes()).hexdigest()
             except OSError:
                 digest = None
-            return result, digest
+            return n_strange, len(votes), digest
         finally:
             if is_temp:
                 local.unlink(missing_ok=True)
@@ -550,10 +571,15 @@ def create_app(
 
         Uses the CONFIRM prompt: the crowd already pushed toward "suspicious", so the
         model is asked to judge independently (skeptical of the report) before we publish.
+        Runs K reads and PUBLISHES only on a majority "strange" (self-consistency): a stable
+        anomaly clears the bar, the undetectable fused-dot class does not and stays re-eligible.
         """
         try:
-            result, digest = _review_crop(crop_rel, config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT)
-            community.record_verdict(field_key, result.classification in STRANGE_CLASSES, votes_at_call, digest)
+            n_strange, k, digest = _review_crop_consensus(
+                crop_rel, config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT
+            )
+            strange = 2 * n_strange > k  # strict majority of the K reads
+            community.record_verdict(field_key, strange, votes_at_call, digest)
         except Exception:
             # Transient failure (incl. crop fetch): roll the PENDING claim back so a later flag retries.
             community.release_pending(field_key)
@@ -564,11 +590,18 @@ def create_app(
         task.add_done_callback(app.state._bg_tasks.discard)
 
     def adjudicate_appeal(field_key: str, crop_rel: str, votes_at_call: int) -> None:
-        """Neutral-prompt re-read of a strange crop; CLEAN un-publishes it."""
+        """Neutral-prompt re-read of a strange crop; a majority-CLEAN consensus un-publishes it.
+
+        Symmetric to ``adjudicate``: clearing a crop currently shown as strange requires a
+        MAJORITY of the K reads to say CLEAN, so a single flaky "clean" can't launder a real
+        overlap. A split (no majority either way) leaves it strange, re-openable after another
+        APPEAL_RESCALE_STEP.
+        """
         appeal_prompt = config.APPEAL_PROMPT or VOTE_FIELD_APPEAL_PROMPT
         try:
-            result, digest = _review_crop(crop_rel, appeal_prompt)
-            community.record_appeal_verdict(field_key, result.classification not in STRANGE_CLASSES, votes_at_call, digest)
+            n_strange, k, digest = _review_crop_consensus(crop_rel, appeal_prompt)
+            normal = 2 * (k - n_strange) > k  # strict majority of the K reads read CLEAN
+            community.record_appeal_verdict(field_key, normal, votes_at_call, digest)
         except Exception:
             community.release_appeal(field_key)
 

@@ -61,6 +61,7 @@ class AlibabaQwenVisionReviewer:
         send_response_format: bool = True,
         max_tokens: int | None = None,
         provider_routing: dict | None = None,
+        temperature: float = 0.0,
     ):
         if not api_key:
             raise ValueError("API key is required for the live VLM provider.")
@@ -71,6 +72,10 @@ class AlibabaQwenVisionReviewer:
         self.thinking_budget = thinking_budget
         self.max_image_px = max_image_px
         self.max_retries = max_retries
+        # Default sampling temperature. 0.0 keeps every existing path (screen, seed
+        # confirm) deterministic; the poll consensus path passes a >0 per call so its
+        # K repeats actually vary (self-consistency needs sampling to diverge).
+        self.temperature = temperature
         # DashScope accepts ``enable_thinking``/``thinking_budget`` and
         # ``response_format``; other OpenAI-compatible backends (OpenRouter) reject
         # them with a 400, so they can be suppressed per provider.
@@ -87,6 +92,7 @@ class AlibabaQwenVisionReviewer:
         metadata: dict,
         thinking_budget: int | None = None,
         prompt_text: str | None = None,
+        temperature: float | None = None,
     ) -> VLMReviewResult:
         budget = self.thinking_budget if thinking_budget is None else thinking_budget
         content: list[dict] = [{"type": "text", "text": prompt_text or VOTE_FIELD_REVIEW_PROMPT}]
@@ -102,7 +108,7 @@ class AlibabaQwenVisionReviewer:
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
-            "temperature": 0.0,
+            "temperature": self.temperature if temperature is None else temperature,
         }
         if self.send_response_format:
             payload["response_format"] = {"type": "json_object"}

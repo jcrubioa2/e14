@@ -27,6 +27,7 @@ class VisionReviewer(Protocol):
         metadata: dict,
         thinking_budget: int | None = None,
         prompt_text: str | None = None,
+        temperature: float | None = None,
     ) -> VLMReviewResult:
         ...
 
