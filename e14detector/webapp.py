@@ -58,7 +58,7 @@ _ALGO_FLAG_SQL = (
 # ensure_n_candidates() backfills it at load for any snapshot that somehow lacks it.
 _ACTA_SUMMARY_SELECT = (
     "SELECT d.document_id, d.department_code, d.department_name, "
-    "d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
+    "d.municipality_code, d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
     "d.n_candidates AS n_candidates FROM documents d"
 )
 
@@ -108,6 +108,76 @@ def ensure_n_candidates(db_path: Path) -> bool:
     finally:
         con.close()
 
+
+# The canonical DIVIPOLA dictionary (code -> name for department / municipality / voting place),
+# bundled into the package so it ships in the serving image (Dockerfile COPYs e14detector/).
+DIVIPOL_DICT_PATH = Path(__file__).resolve().parent / "divipol_dictionary.csv"
+
+
+class GeoNames:
+    """In-memory code -> human-name lookup for the geographic hierarchy.
+
+    A published snapshot can carry only the numeric codes (department_code='01',
+    municipality_code='001', zone, puesto) with the names left NULL — which would render bare
+    codes in /browse. Rather than denormalize a name string onto all ~122k document rows, we
+    keep the small canonical mapping (34 departments, ~1.2k municipios) in memory and resolve at
+    render time. Lookups return ``None`` on a miss so callers fall back to the code.
+    """
+
+    def __init__(self, dept: dict[str, str], muni: dict[tuple[str, str], str],
+                 place: dict[tuple[str, str, str, str], str]):
+        self._dept, self._muni, self._place = dept, muni, place
+
+    def dept(self, code) -> str | None:
+        return self._dept.get(code) if code else None
+
+    def muni(self, dep, code) -> str | None:
+        return self._muni.get((dep, code)) if dep and code else None
+
+    def place(self, dep, muni, zona, puesto) -> str | None:
+        if not (dep and muni and zona and puesto):
+            return None
+        return self._place.get((dep, muni, zona, puesto))
+
+
+@functools.lru_cache(maxsize=4)
+def load_geo_names(dict_path: Path = DIVIPOL_DICT_PATH) -> GeoNames:
+    """Load the DIVIPOLA dictionary into a GeoNames lookup once (cached). Best-effort: a missing
+    or malformed file yields an empty lookup (callers just fall back to showing codes)."""
+    import csv
+    dept: dict[str, str] = {}
+    muni: dict[tuple[str, str], str] = {}
+    place: dict[tuple[str, str, str, str], str] = {}
+    try:
+        with open(dict_path, newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                dc, mc = r.get("cod_departamento"), r.get("cod_municipio")
+                if dc and r.get("departamento"):
+                    dept.setdefault(dc, r["departamento"])
+                if dc and mc and r.get("municipio"):
+                    muni.setdefault((dc, mc), r["municipio"])
+                zc, pc, lugar = r.get("cod_zona"), r.get("cod_puesto"), r.get("lugar_votacion")
+                if dc and mc and zc and pc and lugar:
+                    place.setdefault((dc, mc, zc, pc), lugar)
+    except (OSError, csv.Error) as exc:  # noqa: BLE001 — names are a nicety, never crash serving
+        print(f"load_geo_names: {exc}", flush=True)
+    return GeoNames(dept, muni, place)
+
+
+def enrich_doc_names(row, geo: GeoNames) -> dict:
+    """A dict copy of a documents row with any missing geo NAME filled from the lookup (codes
+    untouched). Used wherever a document is rendered, so the served DB stays codes-only."""
+    d = dict(row)
+    if not d.get("department_name"):
+        d["department_name"] = geo.dept(d.get("department_code"))
+    if not d.get("municipality_name"):
+        d["municipality_name"] = geo.muni(d.get("department_code"), d.get("municipality_code"))
+    if "place_name" in d and not d.get("place_name"):
+        d["place_name"] = geo.place(
+            d.get("department_code"), d.get("municipality_code"), d.get("zone"), d.get("puesto")
+        )
+    return d
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.resolve()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=30.0)
@@ -134,10 +204,10 @@ def _warm_db(db_path: Path) -> None:
         pass
 
 
-def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _departments(conn: sqlite3.Connection, geo: "GeoNames | None" = None) -> list:
     # Group by code only and take the non-null name (MAX skips NULLs): some docs carry the
     # code without a name, which would otherwise show a duplicate "code-only" option.
-    return conn.execute(
+    rows = conn.execute(
         """
         SELECT department_code, MAX(department_name) AS department_name
         FROM documents
@@ -146,18 +216,31 @@ def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY department_code
         """
     ).fetchall()
+    if geo is None:
+        return rows
+    # Fill names the snapshot left NULL from the in-memory lookup (no per-row DB copies).
+    return [{"department_code": r["department_code"],
+             "department_name": r["department_name"] or geo.dept(r["department_code"])}
+            for r in rows]
 
 
-def _municipios(conn: sqlite3.Connection, department: str | None) -> list[sqlite3.Row]:
+def _municipios(conn: sqlite3.Connection, department: str | None, geo: "GeoNames | None" = None) -> list:
     if not department:
         return []
-    return conn.execute(
-        "SELECT municipality_code, MAX(municipality_name) AS municipality_name FROM documents "
+    rows = conn.execute(
+        "SELECT municipality_code, MAX(municipality_name) AS municipality_name, "
+        "MAX(department_code) AS department_code FROM documents "
         "WHERE (department_code=? OR department_name=?) "
         "AND municipality_code IS NOT NULL AND municipality_code <> '' "
         "GROUP BY municipality_code ORDER BY municipality_code",
         (department, department),
     ).fetchall()
+    if geo is None:
+        return rows
+    return [{"municipality_code": r["municipality_code"],
+             "municipality_name": r["municipality_name"]
+                or geo.muni(r["department_code"], r["municipality_code"])}
+            for r in rows]
 
 
 def _zonas(conn: sqlite3.Connection, department: str | None, municipality: str | None) -> list[sqlite3.Row]:
@@ -378,6 +461,9 @@ def create_app(
     # Backfill the precomputed n_candidates column if this snapshot lacks it, so /browse never
     # 500s on `no such column`. No-op for an up-to-date DB; runs again after each db-sync swap.
     ensure_n_candidates(results_db)
+    # Code -> human-name lookup, loaded once into memory. A snapshot that ships codes-only gets
+    # names resolved at render time (see enrich_doc_names) instead of duplicating them per row.
+    geo = load_geo_names()
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
     poll_cfg = poll or PollConfig.from_config()
     community = make_store(community_db or (output_dir / "community.sqlite"))
@@ -413,7 +499,8 @@ def create_app(
                 sha = await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
                 if sha:
                     # A freshly pulled snapshot might predate the n_candidates column — backfill
-                    # it before serving so /browse stays on the fast precomputed path.
+                    # it before serving so /browse stays on the fast precomputed path. (Geo names
+                    # need no per-swap work: they resolve from the in-memory lookup at render.)
                     await asyncio.to_thread(ensure_n_candidates, results_db)
                 return sha
 
@@ -698,7 +785,7 @@ def create_app(
                 opts = [
                     {"value": r["municipality_code"] or r["municipality_name"],
                      "label": f"{r['municipality_code'] or ''} {r['municipality_name'] or ''}".strip()}
-                    for r in _municipios(db, department)
+                    for r in _municipios(db, department, geo)
                 ]
             else:
                 opts = []
@@ -788,16 +875,17 @@ def create_app(
                         [*rest_params, rest_count, max(0, offset - len(voted_rows))],
                     ).fetchall()
                 doc_rows = list(head) + list(rest_rows)
-            departments = _departments(db)
+            departments = _departments(db, geo)
             # Dependent drop-downs: each level is populated only once its parent is chosen.
-            municipios = _municipios(db, department)
+            municipios = _municipios(db, department, geo)
             zonas = _zonas(db, department, municipality)
             puestos = _puestos(db, department, municipality, zone)
             progress = compute_sync_progress(db)
         high_voted_docs = {k.rsplit(":", 3)[0] for k in community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)}
         actas = [
             {
-                "doc": r,
+                # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
+                "doc": enrich_doc_names(r, geo),
                 "n_candidates": r["n_candidates"],
                 "high_voted": r["document_id"] in high_voted_docs,
             }
@@ -850,11 +938,13 @@ def create_app(
         # its PUBLIC community tallies. Voting happens only in the swipe feed (/votar) — this
         # page no longer casts votes, it just displays what the crowd has said.
         with conn() as db:
-            doc = db.execute(
+            doc_row = db.execute(
                 "SELECT * FROM documents WHERE document_id=?", (document_id,)
             ).fetchone()
-            if not doc:
+            if not doc_row:
                 raise HTTPException(status_code=404, detail="acta no encontrada")
+            # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
+            doc = enrich_doc_names(doc_row, geo)
             frows = db.execute(
                 """
                 SELECT vf.page_number, vf.row_number, vf.section, vf.candidate_number,
@@ -1126,13 +1216,14 @@ def create_app(
         out: list[dict] = []
         with conn() as db:
             for doc_id, reporters in top:
-                doc = db.execute(
-                    "SELECT department_name, department_code, municipality_name, mesa, place_name "
-                    "FROM documents WHERE document_id=?",
+                doc_row = db.execute(
+                    "SELECT department_name, department_code, municipality_name, municipality_code, "
+                    "zone, puesto, mesa, place_name FROM documents WHERE document_id=?",
                     (doc_id,),
                 ).fetchone()
-                if not doc:
+                if not doc_row:
                     continue
+                doc = enrich_doc_names(doc_row, geo)  # fill missing names from the lookup
                 frows = db.execute(
                     "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
                     "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "

@@ -531,6 +531,59 @@ def test_ensure_n_candidates_boot_recovers_missing_column(tmp_path: Path) -> Non
     asyncio.run(run())
 
 
+def test_geo_names_resolved_at_render_without_touching_db(tmp_path: Path) -> None:
+    """A snapshot carrying only DIVIPOLA codes (names NULL) renders human names on /browse,
+    resolved from the in-memory dictionary at render time — the DB is NOT mutated (stays
+    codes-only, no per-row name duplication)."""
+    import sqlite3
+
+    from e14detector.webapp import load_geo_names
+
+    # The lookup itself resolves the hierarchy from a small CSV.
+    dict_path = tmp_path / "divipol.csv"
+    dict_path.write_text(
+        "cod_departamento,departamento,cod_municipio,municipio,cod_zona,zona,cod_puesto,lugar_votacion,num_mesas\n"
+        "01,ANTIOQUIA,001,MEDELLIN,001,Zona 01,01,COLEGIO LA ESPERANZA,10\n",
+        encoding="utf-8",
+    )
+    geo = load_geo_names(dict_path)
+    assert geo.dept("01") == "ANTIOQUIA"
+    assert geo.muni("01", "001") == "MEDELLIN"
+    assert geo.place("01", "001", "001", "01") == "COLEGIO LA ESPERANZA"
+    assert geo.dept("99") is None  # miss -> caller falls back to the code
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    # Codes present, names absent — exactly the degraded national snapshot shape.
+    store.upsert_document(DocumentMetadata(
+        document_id="d1", source_path="d1.pdf", department_code="01", municipality_code="001",
+    ))
+    store.insert_vote_field(VoteField(
+        document_id="d1", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    async def run() -> None:
+        # create_app uses the bundled real dictionary, which maps 01->ANTIOQUIA, 001->MEDELLIN.
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/browse")).text
+            assert "ANTIOQUIA" in html and "MEDELLIN" in html
+
+    asyncio.run(run())
+
+    # The served DB was never written to — names stay NULL (no denormalized per-row copies).
+    con = sqlite3.connect(db)
+    assert con.execute(
+        "SELECT COUNT(*) FROM documents WHERE department_name IS NOT NULL"
+    ).fetchone()[0] == 0
+    con.close()
+
+
 def test_security_headers_and_docs_hidden(tmp_path: Path) -> None:
     """Hardening: docs/openapi are 404 by default, and baseline headers are on every response."""
     db = tmp_path / "results.sqlite"
