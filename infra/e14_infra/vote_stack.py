@@ -14,6 +14,8 @@ Resources (prefix ``e14-vote-``):
 Outputs feed the Fly secrets: SQS_QUEUE_URL, AURORA_CLUSTER_ARN, AURORA_SECRET_ARN,
 AWS_REGION.
 """
+import os
+
 from aws_cdk import (
     CfnOutput,
     Duration,
@@ -22,12 +24,17 @@ from aws_cdk import (
     aws_cloudwatch as cw,
     aws_ec2 as ec2,
     aws_iam as iam,
+    aws_lambda as _lambda,
+    aws_lambda_event_sources as les,
     aws_rds as rds,
     aws_sqs as sqs,
 )
 from constructs import Construct
 
 PREFIX = "e14-vote-"
+
+# Self-contained SQS->Aurora drain handler (boto3-only; see infra/lambda/handler.py).
+_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
 
 # Aurora Serverless v2 capacity, in ACUs.
 #   min 0.5 -> warm floor: the app is live and public, so scale-to-zero's ~15-50s cold
@@ -53,6 +60,7 @@ class VoteStack(Stack):
         cluster, secret = self._aurora(vpc)
         queue, dlq = self._queues()
         self._fly_user(queue, cluster, secret)
+        self._drain_lambda(queue, cluster, secret)
         self._alarms(queue, dlq, cluster)
 
         CfnOutput(self, "SqsQueueUrl", value=queue.queue_url, export_name="E14SqsQueueUrl")
@@ -160,6 +168,51 @@ class VoteStack(Stack):
         )
 
         CfnOutput(self, "FlyUserName", value=user.user_name)
+
+    # --- Lambda vote drain (replaces the Fly worker) -------------------------
+    def _drain_lambda(self, queue: sqs.Queue, cluster: rds.DatabaseCluster, secret) -> None:
+        """SQS -> Aurora drain as a Lambda, fed by an event source mapping.
+
+        Replaces the always-on Fly ``worker`` process: the mapping only invokes the
+        function when the queue has messages, so idle cost is ~$0 (vs. a 24/7 machine).
+        Aurora is reached over the Data API, so the function needs no VPC config.
+        """
+        fn = _lambda.Function(
+            self,
+            "VoteDrain",
+            function_name=f"{PREFIX}drain",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="handler.handler",
+            code=_lambda.Code.from_asset(_LAMBDA_DIR),
+            timeout=Duration.seconds(30),  # must stay < the queue's 60s visibility timeout
+            memory_size=256,
+            environment={
+                "AURORA_CLUSTER_ARN": cluster.cluster_arn,
+                "AURORA_SECRET_ARN": secret.secret_arn,
+                "AURORA_DATABASE": "e14",
+            },
+        )
+        # Same two grants the Fly user has — the execution role carries them natively.
+        fn.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="AuroraDataApi",
+                actions=["rds-data:ExecuteStatement", "rds-data:BatchExecuteStatement"],
+                resources=[cluster.cluster_arn],
+            )
+        )
+        secret.grant_read(fn)
+        # The event source mapping also grants the role sqs:ReceiveMessage/DeleteMessage/
+        # GetQueueAttributes on the queue. report_batch_item_failures wires the
+        # partial-batch contract the handler returns (commit-then-delete semantics).
+        fn.add_event_source(
+            les.SqsEventSource(
+                queue,
+                batch_size=10,
+                max_batching_window=Duration.seconds(5),
+                report_batch_item_failures=True,
+            )
+        )
+        CfnOutput(self, "VoteDrainFn", value=fn.function_name)
 
     # --- CloudWatch alarms (nice-to-have) ------------------------------------
     def _alarms(self, queue: sqs.Queue, dlq: sqs.Queue, cluster: rds.DatabaseCluster) -> None:
