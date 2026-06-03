@@ -121,12 +121,13 @@ OPENROUTER_SORT = os.environ.get("E14_OPENROUTER_SORT", "latency")
 # OpenRouter is pinned to these hosts (order = the list). Empty = let OpenRouter pick.
 OPENROUTER_PROVIDERS = [p.strip() for p in os.environ.get("E14_OPENROUTER_PROVIDERS", "").split(",") if p.strip()]
 
-# --- Public community-flag poll --------------------------------------------
-# The public report lets anyone flag a candidate crop. Crossing the threshold only
-# *triggers* a VLM second opinion; the VLM (not the crowd) decides what is published.
-# A VLM "clean" verdict un-publishes but stays re-eligible: if distinct votes climb
-# by another RESCALE_STEP it is re-adjudicated, so one flaky "clean" cannot bury a
-# real anomaly forever. STRANGE is terminal/published.
+# --- Public community vote -------------------------------------------------
+# DEPRECATED (poll/VLM adjudication): the swipe feed (see plans/pending/swipe-voting.md)
+# made the *crowd* the verdict and removed the VLM-adjudication path from the web flow, so
+# the POLL_*/APPEAL_*/*_CONSENSUS_*/*_PROMPT knobs below no longer affect the public site.
+# They are kept only because PollConfig still reads them and the offline/admin VLM tools
+# reference the prompts; they can be deleted once those are retired. Live knobs that DO
+# still matter: RATE_*, FORM_*, HIGH_VOTE_THRESHOLD, HOTLIST_SIZE, VOTER_SALT, TURNSTILE_*.
 POLL_THRESHOLD = int(os.environ.get("E14_POLL_THRESHOLD", "5"))
 POLL_RESCALE_STEP = int(os.environ.get("E14_POLL_RESCALE_STEP", "5"))
 # Self-consistency for the poll adjudication: read the crop K times at >0 temperature and

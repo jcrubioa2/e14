@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <meta name="description" content="{{ meta_description }}">
+  <link rel="canonical" href="{{ canonical }}">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="es_CO">
+  <meta property="og:site_name" content="Veeduría ciudadana E-14 2026">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ meta_description }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta name="twitter:card" content="summary">
+  <script>
+    // In-app bot check (no CAPTCHA): a signed token issued with this page load is sent
+    // back with each vote; the server rejects forged or impossibly-fast submits.
+    window.__formToken = "{{ form_token }}";
+  </script>
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --good:#1a7f37; --ink:#202124; --accent:#0969da; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: #fff; }
+    header { background: var(--bg); border-bottom: 1px solid var(--line); padding: 12px 16px; text-align: center; }
+    header h1 { margin: 0; font-size: 17px; }
+    header .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    header a { color: var(--accent); text-decoration: none; }
+    main { max-width: 560px; margin: 0 auto; padding: 14px 16px 28px; }
+    .deck { position: relative; min-height: 320px; display: flex; align-items: center; justify-content: center; }
+    .card { width: 100%; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); padding: 18px; background: #fff; text-align: center; touch-action: pan-y; }
+    .card .prompt { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    .card img.crop { max-width: 100%; max-height: 200px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .tally { margin-top: 12px; font-size: 13px; color: var(--muted); min-height: 18px; }
+    .tally b.s { color: var(--bad); } .tally b.g { color: var(--good); }
+    .buttons { display: flex; gap: 12px; margin-top: 16px; }
+    .buttons button { flex: 1; height: 56px; border-radius: 12px; border: 2px solid; font-size: 16px; font-weight: 700; cursor: pointer; background: #fff; }
+    .b-good { color: var(--good); border-color: var(--good); }
+    .b-good:hover { background: #eaf6ec; }
+    .b-bad { color: var(--bad); border-color: var(--bad); }
+    .b-bad:hover { background: #fff1f0; }
+    .b-skip { display: block; width: 100%; height: 44px; margin-top: 10px; border-radius: 12px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 14px; font-weight: 600; cursor: pointer; }
+    .b-skip:hover { background: var(--bg); }
+    .siblings-toggle { display: block; width: 100%; margin-top: 14px; background: none; border: none; color: var(--accent); font-size: 13px; cursor: pointer; }
+    .siblings { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+    .sib { border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+    .sib img { max-width: 100%; max-height: 70px; object-fit: contain; }
+    .sib .c { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .empty, .err { text-align: center; color: var(--muted); padding: 40px 0; }
+    .progress { text-align: center; color: var(--muted); font-size: 12px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>¿Se ve bien o extraña?</h1>
+    <div class="sub">Casillas de votos al azar y anónimas · <a href="/browse">buscar un acta &rarr;</a></div>
+  </header>
+  <main>
+    <!-- Honeypot: hidden from people, tripped by form-filling bots. -->
+    <input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"
+           aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
+
+    <div class="deck" id="deck">
+      <div class="empty" id="loading">Cargando casillas…</div>
+    </div>
+    <div class="progress" id="progress"></div>
+  </main>
+
+  <script>
+    // Anonymized swipe feed: cards come from /api/feed as { cid, img_url }; a vote POSTs
+    // { cid, value } to /api/vote. The client tracks swiped cids in localStorage (best-effort
+    // "don't repeat"); the server's vote tables ignore true duplicates regardless.
+    const deck = document.getElementById('deck');
+    const progressEl = document.getElementById('progress');
+    const SEEN_KEY = 'e14_seen_cids';
+    let seen = new Set();
+    try { seen = new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')); } catch (e) {}
+    let queue = [];
+    let voted = 0;
+    let fetching = false;
+
+    function rememberSeen(cid) {
+      seen.add(cid);
+      try {
+        // Cap stored history so localStorage can't grow without bound.
+        const arr = [...seen].slice(-2000);
+        seen = new Set(arr);
+        localStorage.setItem(SEEN_KEY, JSON.stringify(arr));
+      } catch (e) {}
+    }
+
+    async function refill() {
+      if (fetching) return;
+      fetching = true;
+      try {
+        const excl = [...seen].slice(-50).join(',');
+        const res = await fetch('/api/feed?n=12&exclude=' + encodeURIComponent(excl));
+        const data = await res.json();
+        for (const it of (data.items || [])) {
+          if (!seen.has(it.cid)) queue.push(it);
+        }
+      } catch (e) {} finally { fetching = false; }
+    }
+
+    function renderEmpty(msg) {
+      deck.innerHTML = '<div class="empty">' + msg + '</div>';
+    }
+
+    function renderCard(card) {
+      deck.innerHTML = '';
+      const el = document.createElement('div');
+      el.className = 'card';
+      el.innerHTML =
+        '<div class="prompt">¿El número de esta casilla se ve normal o alterado?</div>' +
+        '<img class="crop" alt="votos escritos a mano" src="' + card.img_url + '">' +
+        '<div class="tally" id="tally"></div>' +
+        '<div class="buttons">' +
+        '  <button class="b-good" id="vote-good">Se ve bien</button>' +
+        '  <button class="b-bad" id="vote-bad">Se ve extraña</button>' +
+        '</div>' +
+        '<button class="b-skip" id="vote-skip">No estoy seguro · saltar</button>' +
+        '<button class="siblings-toggle" id="sib-toggle">Ver las otras casillas de esta acta</button>' +
+        '<div class="siblings" id="siblings" hidden></div>';
+      deck.appendChild(el);
+      document.getElementById('vote-good').addEventListener('click', () => castVote(card, 'good'));
+      document.getElementById('vote-bad').addEventListener('click', () => castVote(card, 'strange'));
+      document.getElementById('vote-skip').addEventListener('click', () => skipCard(card));
+      document.getElementById('sib-toggle').addEventListener('click', () => loadSiblings(card));
+    }
+
+    // "No estoy seguro": advance without recording any vote. We still mark the cid seen so
+    // it doesn't immediately reappear in this session; nothing is sent to the server.
+    function skipCard(card) {
+      rememberSeen(card.cid);
+      next();
+    }
+
+    async function castVote(card, value) {
+      const goodBtn = document.getElementById('vote-good');
+      const badBtn = document.getElementById('vote-bad');
+      goodBtn.disabled = badBtn.disabled = true;
+      rememberSeen(card.cid);
+      const hp = document.getElementById('hp-website');
+      const tally = document.getElementById('tally');
+      try {
+        const res = await fetch('/api/vote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cid: card.cid, value: value,
+                                 form_token: window.__formToken, website: hp ? hp.value : '' }),
+        });
+        if (res.status === 429) {
+          tally.textContent = 'Vas muy rápido, espera un momento…';
+          goodBtn.disabled = badBtn.disabled = false;
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok) {
+          tally.innerHTML = '¡Gracias! · <b class="s">' + (data.strange || 0) + ' extrañas</b> · <b class="g">' + (data.good || 0) + ' bien</b>';
+          voted++;
+          setTimeout(next, 550);
+        } else {
+          tally.textContent = 'No se pudo enviar';
+          goodBtn.disabled = badBtn.disabled = false;
+        }
+      } catch (e) {
+        tally.textContent = 'Error de red';
+        goodBtn.disabled = badBtn.disabled = false;
+      }
+    }
+
+    async function loadSiblings(card) {
+      const box = document.getElementById('siblings');
+      const toggle = document.getElementById('sib-toggle');
+      if (!box.hidden) { box.hidden = true; return; }
+      box.hidden = false;
+      box.innerHTML = '<div class="c">Cargando…</div>';
+      try {
+        const data = await (await fetch('/api/acta-crops?cid=' + encodeURIComponent(card.cid))).json();
+        box.innerHTML = '';
+        for (const s of (data.items || [])) {
+          const d = document.createElement('div');
+          d.className = 'sib';
+          d.innerHTML = '<img loading="lazy" src="' + s.img_url + '" alt="casilla de la misma acta">' +
+                        '<div class="c">' + s.strange + ' extrañas · ' + s.good + ' bien</div>';
+          box.appendChild(d);
+        }
+        if (!box.children.length) box.innerHTML = '<div class="c">Sin más casillas.</div>';
+      } catch (e) { box.innerHTML = '<div class="c">No se pudieron cargar.</div>'; }
+      toggle.textContent = 'Ocultar las otras casillas';
+    }
+
+    async function next() {
+      progressEl.textContent = voted ? ('Has votado ' + voted + ' casilla' + (voted === 1 ? '' : 's')) : '';
+      if (queue.length < 4) refill();  // prefetch when running low
+      if (!queue.length) {
+        await refill();
+        if (!queue.length) { renderEmpty('No hay más casillas por ahora. ¡Gracias por participar!'); return; }
+      }
+      renderCard(queue.shift());
+    }
+
+    (async function start() {
+      await refill();
+      if (!queue.length) { renderEmpty('No hay casillas disponibles todavía.'); return; }
+      next();
+    })();
+  </script>
+</body>
+</html>

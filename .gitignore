@@ -8,3 +8,6 @@ __pycache__/
 logs/
 files/
 .claude/
+
+# transient: core-affinity choice written by scripts/cpu_throttle.sh
+.cpu_set

@@ -50,4 +50,4 @@ primary_region = 'dfw'
 
 [[vm]]
   size = 'shared-cpu-2x'
-  memory = '1024mb'
+  memory = '2048mb'
