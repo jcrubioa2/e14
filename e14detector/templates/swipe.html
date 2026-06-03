@@ -40,6 +40,8 @@
     .b-good:hover { background: #eaf6ec; }
     .b-bad { color: var(--bad); border-color: var(--bad); }
     .b-bad:hover { background: #fff1f0; }
+    .b-skip { display: block; width: 100%; height: 44px; margin-top: 10px; border-radius: 12px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 14px; font-weight: 600; cursor: pointer; }
+    .b-skip:hover { background: var(--bg); }
     .siblings-toggle { display: block; width: 100%; margin-top: 14px; background: none; border: none; color: var(--accent); font-size: 13px; cursor: pointer; }
     .siblings { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
     .sib { border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
@@ -117,12 +119,21 @@
         '  <button class="b-good" id="vote-good">Se ve bien</button>' +
         '  <button class="b-bad" id="vote-bad">Se ve extraña</button>' +
         '</div>' +
+        '<button class="b-skip" id="vote-skip">No estoy seguro · saltar</button>' +
         '<button class="siblings-toggle" id="sib-toggle">Ver las otras casillas de esta acta</button>' +
         '<div class="siblings" id="siblings" hidden></div>';
       deck.appendChild(el);
       document.getElementById('vote-good').addEventListener('click', () => castVote(card, 'good'));
       document.getElementById('vote-bad').addEventListener('click', () => castVote(card, 'strange'));
+      document.getElementById('vote-skip').addEventListener('click', () => skipCard(card));
       document.getElementById('sib-toggle').addEventListener('click', () => loadSiblings(card));
+    }
+
+    // "No estoy seguro": advance without recording any vote. We still mark the cid seen so
+    // it doesn't immediately reappear in this session; nothing is sent to the server.
+    function skipCard(card) {
+      rememberSeen(card.cid);
+      next();
     }
 
     async function castVote(card, value) {
