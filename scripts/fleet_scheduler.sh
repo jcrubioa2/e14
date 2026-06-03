@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 
 PY="${E14_CROP_PY:-.venv/bin/e14detector}"
 OUTPUT="${E14_CROP_OUTPUT_DIR:-data/detector_national}"
-INTERVAL="${E14_FLEET_SCHEDULE_INTERVAL:-120}"
+INTERVAL="${E14_FLEET_SCHEDULE_INTERVAL:-30}"
 WORKERS="${E14_FLEET_WORKERS:-}"
 COORD="${E14_FLEET_COORDINATOR:-}"
 

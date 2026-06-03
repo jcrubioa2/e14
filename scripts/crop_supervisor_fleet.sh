@@ -24,8 +24,8 @@ while true; do
 
   DEPT=$("$PY" fleet-current --output-dir "$OUTPUT" --worker "$WORKER" 2>/dev/null || true)
   if [[ -z "$DEPT" ]]; then
-    echo "[crop-fleet] $(date -Is) no assignment for $WORKER — sleep 60s (is fleet_scheduler running?)"
-    sleep 60
+    echo "[crop-fleet] $(date -Is) no assignment for $WORKER — sleep 15s (is fleet_scheduler running?)"
+    sleep 15
     continue
   fi
 
