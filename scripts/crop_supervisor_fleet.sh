@@ -9,7 +9,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-WORKERS="${E14_CROP_WORKERS:-32}"
+WORKERS="${E14_CROP_WORKERS:-24}"
 INPUT="${E14_CROP_INPUT_DIR:-data/actas}"
 OUTPUT="${E14_CROP_OUTPUT_DIR:-data/detector_national}"
 PY="${E14_CROP_PY:-.venv/bin/e14detector}"

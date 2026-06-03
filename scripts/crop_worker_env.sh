@@ -3,7 +3,8 @@
 #   source scripts/crop_worker_env.sh
 #   nohup bash scripts/start_crop_fleet_worker.sh >> logs/crop_supervisor.log 2>&1 & disown
 # Static slice (legacy): set E14_DEPT_FROM / E14_DEPT_TO and use start_crop_worker.sh
-export E14_CROP_WORKERS="${E14_CROP_WORKERS:-12}"   # ~ nproc - 4
+export E14_CROP_WORKERS="${E14_CROP_WORKERS:-24}"  # ~ nproc-2 on 26-core box; needs E14_MAX_RENDER_MP clamp
+export E14_MAX_RENDER_MP="${E14_MAX_RENDER_MP:-50}"  # caps giant PDF renders (dept 88); required at high workers
 export E14_DEPT_FROM="${E14_DEPT_FROM:-21}"
 export E14_DEPT_TO="${E14_DEPT_TO:-33}"
 export E14_WORKER_ID="${E14_WORKER_ID:-$(hostname -s)}"

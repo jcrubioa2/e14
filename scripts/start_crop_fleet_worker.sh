@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Set E14_WORKER_ID to your WSL Tailscale name (e.g. ryzen9-1 / legion-1) before starting.
 # shellcheck disable=SC1091
 source scripts/crop_worker_env.sh
 

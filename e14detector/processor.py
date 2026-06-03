@@ -279,7 +279,12 @@ def _max_inflight(workers: int) -> int:
     tasks). That ballooned parent RAM and made the pool fragile under memory pressure
     (workers dying → CPU \"winding down\"). Keep a small sliding window instead.
     """
-    return min(512, max(64, workers * 4))
+    import os
+
+    if env := os.environ.get("E14_MAX_INFLIGHT"):
+        return max(workers, int(env))
+    # Keep the submit window near pool size — large PDFs can use multi-GB per worker.
+    return min(128, max(workers, workers * 2))
 
 
 def _run_pool_bounded(

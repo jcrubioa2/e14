@@ -232,7 +232,11 @@ def cmd_fleet_schedule(args: argparse.Namespace) -> int:
     assigned = schedule_assignments(queue, workers, coordinator_id=coord)
     save_queue(path, queue)
     if args.publish:
-        publish_fleet(output_dir, bucket=args.bucket, verbose=not args.quiet)
+        try:
+            publish_fleet(output_dir, bucket=args.bucket, verbose=not args.quiet)
+        except ValueError as exc:
+            if not args.quiet:
+                print(f"fleet-schedule: publish-fleet skipped ({exc})", flush=True)
     if not args.quiet:
         for wid, dep in assigned:
             print(f"fleet-schedule: {wid} -> dept {dep}")

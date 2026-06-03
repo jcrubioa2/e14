@@ -66,11 +66,19 @@ Manual ops: `e14detector fleet-status`, `fleet-schedule`, `fleet-current --worke
 
 Fixed ranges still work (`E14_DEPT_FROM` / `E14_DEPT_TO` + `scripts/start_crop_worker.sh`). Prefer fleet mode when two PCs should stay busy without overlapping.
 
+### Memory (required before high worker counts)
+
+Some actas render to 80–144 MP at 300 DPI and can OOM-kill workers. **`E14_MAX_RENDER_MP=50`** (default in `crop_worker_env.sh`) clamps render size; keep it on when using many workers.
+
+```bash
+export E14_MAX_RENDER_MP=50   # do not disable on 24GB WSL
+```
+
 ## Setup per machine
 
 ```bash
-# Same repo + PDFs (copy or rsync data/actas/)
-make setup
+git checkout feature/multi-machine-crop-sync && git pull
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[publish]"   # boto3 for pull-db / publish
 
 # .env from fly storage create (AWS_* + BUCKET_NAME + E14_CDN_BASE_URL)
@@ -130,6 +138,8 @@ Fleet workers run **`pull-db`** and **`pull-fleet`** before each department; the
 | `E14_FLEET_COORDINATOR` | Lead worker id (runs `fleet-schedule`) |
 | `E14_FLEET_SCHEDULE_INTERVAL` | Coordinator loop seconds (default `120`) |
 | `E14_FLEET_STALE_SEC` | Reclaim stale claims (default `7200`) |
+| `E14_MAX_RENDER_MP` | Max megapixels per rendered page (default `50`; prevents OOM) |
+| `E14_CROP_WORKERS` | Process pool size (default `24` with clamp on ryzen9-class boxes) |
 
 ## One designated publisher (optional)
 
