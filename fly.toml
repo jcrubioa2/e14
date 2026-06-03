@@ -20,6 +20,11 @@ primary_region = 'dfw'
   E14_SCREEN_MODEL = 'google/gemma-4-31b-it'
   E14_POLL_RESCALE_STEP = '5'
   E14_POLL_THRESHOLD = '5'
+  # Vote rate limit (per IP-hash token bucket). Generous so genuine fast voting isn't throttled
+  # — Turnstile now gates session entry, and this still caps a single IP at ~1 vote/s sustained
+  # (60 burst). Raise if shared-NAT venues need more; lower if abuse appears.
+  E14_RATE_REFILL_PER_MIN = '60'
+  E14_RATE_BUCKET = '60'
   E14_TURNSTILE_SITEKEY = '0x4AAAAAADdWyvx9OVxuUDFw'
   # Turnstile on/off is controlled by the E14_TURNSTILE_ENABLED *secret* (currently 0)
   # so it can be flipped without a redeploy once the widget/secret are verified working.
