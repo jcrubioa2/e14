@@ -36,12 +36,14 @@ primary_region = 'dfw'
 # Votes are enqueued by web and durably committed by worker, so neither one being
 # down loses a vote (SQS absorbs). Secrets (E14_VOTE_AWS_*, AURORA_*, SQS_QUEUE_URL)
 # are set via `fly secrets set` and apply to both groups — see infra/README.md.
+# The SQS->Aurora vote drain moved to the `e14-vote-drain` Lambda (infra/lambda/handler.py,
+# fed by an SQS event source mapping). It only runs when the queue has messages, so we no
+# longer pay for an always-on worker machine. The web process still *publishes* to SQS.
 [processes]
   web = "uvicorn e14detector.asgi:app --host 0.0.0.0 --port 8000 --workers 1"
-  worker = "python -m e14detector.vote_worker"
 
 # Volume holds results.sqlite + DB-sync state — web only. (community.sqlite is gone;
-# votes live in Aurora.) The worker is stateless and needs no volume.
+# votes live in Aurora.)
 [[mounts]]
   source = 'data'
   destination = '/data'
@@ -64,8 +66,3 @@ primary_region = 'dfw'
   size = 'shared-cpu-2x'
   memory = '2048mb'
   processes = ['web']
-
-[[vm]]
-  size = 'shared-cpu-1x'
-  memory = '512mb'
-  processes = ['worker']
