@@ -7,6 +7,7 @@ import math
 import os
 import random
 import sqlite3
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -104,6 +105,54 @@ def ensure_n_candidates(db_path: Path) -> bool:
         return True
     except sqlite3.Error as exc:  # noqa: BLE001 — never let a migration failure crash boot
         print(f"ensure_n_candidates: backfill failed (serving read-only?): {exc}", flush=True)
+        return False
+    finally:
+        con.close()
+
+
+def ensure_browse_indexes(db_path: Path) -> bool:
+    """Guarantee the served ``documents`` table carries the indexes /browse's hot path needs.
+
+    /browse orders and paginates with ``WHERE n_candidates>0 ... ORDER BY department_code,
+    document_id`` and counts/filters by region. ``dbsync.build_serving_db`` creates the matching
+    indexes, but a RAW results.sqlite (the kind that also lacked n_candidates / geo names) ships
+    without them — so every page does a full scan + sort over ~122k rows (multi-second TTFB).
+
+    Create them ONCE at load, idempotently. ``idx_doc_browse`` is partial (``WHERE n_candidates>0``)
+    so it doubles as both the filter and the sort order for the common case, and lets ``COUNT(*)``
+    range-probe instead of scan. Must run AFTER ensure_n_candidates (the partial predicate needs the
+    column). Best-effort: a read-only file just logs and returns False rather than crashing boot.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(db_path, timeout=60.0)
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_browse_indexes: open failed: {exc}", flush=True)
+        return False
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+        if "n_candidates" not in cols:
+            return False  # partial index needs the column; ensure_n_candidates runs first
+        existing = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='documents'"
+        )}
+        if {"idx_doc_browse", "idx_doc_geo"} <= existing:
+            return True
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_doc_browse "
+            "ON documents(department_code, document_id) WHERE n_candidates>0"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_doc_geo "
+            "ON documents(department_code, municipality_code, zone, puesto)"
+        )
+        con.execute("ANALYZE documents")  # let the planner actually pick the new indexes
+        con.commit()
+        print(f"ensure_browse_indexes: built /browse indexes on {db_path}", flush=True)
+        return True
+    except sqlite3.Error as exc:  # noqa: BLE001 — an index build must never crash boot
+        print(f"ensure_browse_indexes: build failed (serving read-only?): {exc}", flush=True)
         return False
     finally:
         con.close()
@@ -510,6 +559,8 @@ def create_app(
     # Backfill the precomputed n_candidates column if this snapshot lacks it, so /browse never
     # 500s on `no such column`. No-op for an up-to-date DB; runs again after each db-sync swap.
     ensure_n_candidates(results_db)
+    # ...then the /browse indexes (raw snapshots ship without them -> full scans/sorts per page).
+    ensure_browse_indexes(results_db)
     # Code -> human-name lookup, loaded once into memory. A snapshot that ships codes-only gets
     # names resolved at render time (see enrich_doc_names) instead of duplicating them per row.
     geo = load_geo_names()
@@ -519,6 +570,22 @@ def create_app(
     # Durable vote path: when SQS is configured, votes are enqueued (worker drains to
     # Postgres) instead of written synchronously. None => synchronous write (local/tests).
     vote_publisher = make_publisher()
+
+    # /browse reads the same global crowd aggregates on every hit — acta_popularity (twice:
+    # directly and inside the hot billboard), high_voted_fields, and the hot-actas payload. On the
+    # Aurora (RDS Data API) backend each is a network round-trip, so one page made ~5 of them and a
+    # cold/paused cluster cold-started on the first. Cache them in-process for a few seconds: the
+    # directory tolerates slight staleness, collapsing per-request Aurora traffic to ~1 call / TTL.
+    _agg_cache: dict[str, tuple[float, Any]] = {}
+
+    def _agg_cached(key: str, fn, ttl: float = 45.0):
+        now = time.monotonic()
+        hit = _agg_cache.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+        val = fn()
+        _agg_cache[key] = (now, val)
+        return val
 
     # cid -> {field_key, crop_rel, document_id} is an immutable, append-only mapping (a cid is
     # registered when the feed surfaces it, well before it can be voted on), so resolving it
@@ -551,6 +618,7 @@ def create_app(
                     # it before serving so /browse stays on the fast precomputed path. (Geo names
                     # need no per-swap work: they resolve from the in-memory lookup at render.)
                     await asyncio.to_thread(ensure_n_candidates, results_db)
+                    await asyncio.to_thread(ensure_browse_indexes, results_db)
                 return sha
 
             async def _sync_loop() -> None:
@@ -885,7 +953,7 @@ def create_app(
         offset = (page - 1) * BROWSE_ACTAS_PER_PAGE
         region_order = "ORDER BY d.department_code, d.document_id"
         with conn() as db:
-            popularity = community.acta_popularity()
+            popularity = _agg_cached("popularity", community.acta_popularity)
             if review:
                 # Only actas the crowd has voted on, most-voted first. A bounded set, so
                 # order + paginate in Python.
@@ -930,7 +998,8 @@ def create_app(
             zonas = _zonas(db, department, municipality)
             puestos = _puestos(db, department, municipality, zone)
             progress = compute_sync_progress(db)
-        high_voted_docs = {k.rsplit(":", 3)[0] for k in community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)}
+        high_voted_docs = {k.rsplit(":", 3)[0] for k in _agg_cached(
+            "high_voted", lambda: community.high_voted_fields(config.HIGH_VOTE_THRESHOLD))}
         actas = [
             {
                 # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
@@ -943,7 +1012,7 @@ def create_app(
         # The community billboard (most-reported ACTAS) heads the directory on the first,
         # unfiltered page — it's the social proof / "look what people found" hook. Skip it on
         # deeper pages and the review view (which is itself a most-voted list).
-        hot_actas = _hot_actas_payload() if (page == 1 and not review) else []
+        hot_actas = _agg_cached("hot_actas", _hot_actas_payload) if (page == 1 and not review) else []
         return templates.TemplateResponse(
             request,
             "browse.html",
@@ -1262,7 +1331,7 @@ def create_app(
         were flagged). De-anonymized on purpose: the billboard links straight to the acta so
         people can investigate. Bounded to HOTLIST_SIZE, so this is ≤8 small per-acta lookups.
         """
-        pop = community.acta_popularity()
+        pop = _agg_cached("popularity", community.acta_popularity)
         if not pop:
             return []
         top = sorted(pop.items(), key=lambda kv: kv[1], reverse=True)[:HOTLIST_SIZE]
