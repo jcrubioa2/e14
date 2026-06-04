@@ -37,6 +37,12 @@ DEFAULT_RESULTS_JSONL = DEFAULT_OUTPUT_DIR / "results" / "results.jsonl"
 # rollout progress ("X de Y actas sincronizadas"); override per-deployment.
 NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
 
+# A stale snapshot pointer only means a *stalled* publisher while the rollout is still in
+# progress; once the served set reaches ~this percent of the national total, the publisher
+# has legitimately finished and stops flipping the pointer, so the stalled-publisher alert
+# auto-suppresses (no hard switch needed). The 2% slack absorbs national-total estimate error.
+ROLLOUT_COMPLETE_PCT = float(os.environ.get("E14_ROLLOUT_COMPLETE_PCT", "98"))
+
 # A crop flagged by at least this many distinct voters gets a strong "muy reportada"
 # badge regardless of the model verdict (the crowd signal stands on its own).
 HIGH_VOTE_THRESHOLD = int(os.environ.get("E14_HIGH_VOTE_THRESHOLD", "100"))

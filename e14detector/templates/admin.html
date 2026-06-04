@@ -46,7 +46,7 @@
       <div class="card">apelaciones aceptadas<b>{{ summary.cleared }}</b></div>
     </div>
     {% if pipeline %}
-    <div class="pipeline {{ 'warn' if pipeline.pointer_stale else 'ok' }}">
+    <div class="pipeline {{ 'warn' if pipeline.pointer_stale and not pipeline.complete else 'ok' }}">
       <span class="dot"></span>
       <b>Publicación:</b>
       {{ pipeline.synced_label }} de {{ pipeline.total_label }} actas servidas ({{ pipeline.pct }}%)
@@ -55,7 +55,7 @@
       {%- if pipeline.pointer_age_min is not none %} &middot;
         publicación hace {{ pipeline.pointer_age_min }} min
         {%- if pipeline.pointer_raw_mb %} ({{ pipeline.pointer_raw_mb }} MB, sha {{ pipeline.pointer_sha }}){% endif %}
-        {%- if pipeline.pointer_stale %} <b>&mdash; ¿publicador detenido?</b>{% endif %}
+        {%- if pipeline.pointer_stale and not pipeline.complete %} <b>&mdash; ¿publicador detenido?</b>{% endif %}
       {%- endif %}
     </div>
     {% endif %}

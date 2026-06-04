@@ -514,6 +514,29 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
     }
 
 
+def stalled_publisher_msg(
+    age_secs: int | None, stale_after: int, served_pct: float | None, complete_pct: float
+) -> str | None:
+    """Alert text if a stale snapshot pointer looks like a *stalled* rollout, else None.
+
+    A stale pointer (publisher not flipping ``db/latest.json``) is only a problem while the
+    rollout is incomplete — once the served set reaches ``complete_pct`` of the national total
+    the publisher legitimately stops and the pointer age grows forever, which must NOT page.
+    Decided from rollout progress, not a hard switch. ``served_pct=None`` means we couldn't
+    measure it -> page anyway (a DB read error must not mask a real stall). ``stale_after<=0``
+    disables the check outright (manual escape hatch).
+    """
+    if stale_after <= 0 or age_secs is None or age_secs <= stale_after:
+        return None
+    if served_pct is not None and served_pct >= complete_pct:
+        return None  # rollout complete — a stale pointer is the expected steady state
+    served = "an unknown share" if served_pct is None else f"only {served_pct:.0f}%"
+    return (
+        f"snapshot pointer idle {age_secs // 60} min and {served} of the national set is "
+        f"served — publisher stalled or reader stuck?"
+    )
+
+
 def _voted_doc_rows(
     conn: sqlite3.Connection, popularity: dict[str, int], clause: str, params: list, cap: int
 ) -> tuple[list[sqlite3.Row], list[str]]:
@@ -658,7 +681,10 @@ def create_app(
             interval = int(os.environ.get("E14_DB_SYNC_INTERVAL", "60"))
             # The published pointer is "stale" if the publisher hasn't flipped it in this long —
             # a silent failure (the app keeps serving the old DB, so neither /health nor the AWS
-            # vote alarms would notice). Page about it from here. Matches the admin board's 30min.
+            # vote alarms would notice). But a stale pointer is ALSO the normal steady state once
+            # the rollout finishes (the publisher stops). So we page only when stale AND the
+            # rollout is still incomplete (see stalled_publisher_msg / ROLLOUT_COMPLETE_PCT) — no
+            # hard switch. E14_POINTER_STALE_SECS=0 disables the check entirely if ever needed.
             stale_after = int(os.environ.get("E14_POINTER_STALE_SECS", str(30 * 60)))
 
             async def _warm() -> None:
@@ -676,15 +702,28 @@ def create_app(
                 return sha
 
             async def _check_stale() -> None:
-                # Page if the publisher appears stalled (pointer not flipped in a long while).
+                # Page only if the pointer is stale AND the rollout is still incomplete — a stale
+                # pointer is expected once publishing finishes (decided from served progress, not
+                # a hard switch). stale_after<=0 disables; skip the network fetch when so.
+                if stale_after <= 0:
+                    return
                 ptr = await asyncio.to_thread(pointer_status, config.CDN_BASE_URL)
                 age = ptr.get("age_secs") if ptr else None
-                if age is not None and age > stale_after:
-                    alerts.notify(
-                        "db-stale",
-                        f"publisher stalled? snapshot pointer last updated {age // 60} min ago",
-                        severity="warn",
-                    )
+                if age is None or age <= stale_after:
+                    return  # pointer fresh -> publisher active, nothing to do
+
+                def _served_pct() -> float | None:
+                    # Progress of the snapshot we actually serve (== what the publisher shipped).
+                    try:
+                        with _connect(results_db) as db:
+                            return compute_sync_progress(db).get("pct")
+                    except Exception:  # noqa: BLE001 — can't measure -> let the helper page
+                        return None
+
+                pct = await asyncio.to_thread(_served_pct)
+                msg = stalled_publisher_msg(age, stale_after, pct, config.ROLLOUT_COMPLETE_PCT)
+                if msg:
+                    alerts.notify("db-stale", msg, severity="warn")
 
             async def _sync_loop() -> None:
                 while True:

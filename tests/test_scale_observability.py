@@ -14,7 +14,7 @@ from PIL import Image
 from e14detector import alerts
 from e14detector.schemas import DocumentMetadata, VoteField
 from e14detector.storage import DetectorStore
-from e14detector.webapp import create_app
+from e14detector.webapp import create_app, stalled_publisher_msg
 
 
 def _crop(path: Path) -> Path:
@@ -134,6 +134,24 @@ def test_alert_dedup_and_unconfigured_noop(monkeypatch) -> None:
     # No channel configured -> safe no-op (must not raise even though it spawns a thread).
     alerts._last_sent.clear()
     alerts.notify("db-sync", "loop error: boom")
+
+
+def test_stalled_publisher_msg_is_rollout_aware() -> None:
+    """The stalled-publisher page fires only when the pointer is stale AND the rollout is
+    incomplete — once ~complete it self-suppresses (the false-alarm we hit at 100%)."""
+    STALE, COMPLETE = 1800, 98.0
+    # Fresh pointer -> never page, regardless of progress.
+    assert stalled_publisher_msg(60, STALE, 10.0, COMPLETE) is None
+    # Stale pointer but rollout complete -> the steady-state false alarm we must NOT send.
+    assert stalled_publisher_msg(3600, STALE, 100.0, COMPLETE) is None
+    assert stalled_publisher_msg(3600, STALE, 98.0, COMPLETE) is None
+    # Stale pointer AND still mid-rollout -> page, with the observed numbers.
+    msg = stalled_publisher_msg(3600, STALE, 60.0, COMPLETE)
+    assert msg and "60%" in msg and "60 min" in msg
+    # Couldn't measure progress -> page anyway (a DB error must not mask a real stall).
+    assert stalled_publisher_msg(3600, STALE, None, COMPLETE) is not None
+    # Manual kill switch.
+    assert stalled_publisher_msg(3600, 0, 10.0, COMPLETE) is None
 
 
 def test_admin_health_board_renders(tmp_path: Path, monkeypatch) -> None:
