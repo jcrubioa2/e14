@@ -584,6 +584,59 @@ def test_geo_names_resolved_at_render_without_touching_db(tmp_path: Path) -> Non
     con.close()
 
 
+def test_official_pdf_link_rebuilt_from_hash(tmp_path: Path) -> None:
+    """A codes-only snapshot ships official_lookup_url NULL; /acta still links to the
+    Registraduría PDF by rebuilding the URL from the bundled per-acta hash map + the codes
+    encoded in the document_id. Uses a real id present in e14detector/acta_hashes.sqlite."""
+    import sqlite3 as _sql
+    from e14detector.webapp import ACTA_HASHES_PATH
+
+    hc = _sql.connect(ACTA_HASHES_PATH)
+    did, hash_hex = hc.execute(
+        "SELECT document_id, hex(hash) FROM acta_hash WHERE document_id LIKE 'E14_PRE_01_001%' LIMIT 1"
+    ).fetchone()
+    hc.close()
+    # document_id -> codes for the URL path (E14_PRE_{dep}_{muni}_{zona}_{puesto}_{mesa}_...).
+    _, _, dep, muni, zona, puesto, mesa = did.split("_")[:7]
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    # No official_lookup_url, no names — the degraded snapshot shape.
+    store.upsert_document(DocumentMetadata(
+        document_id=did, source_path=f"{did}.pdf", department_code=dep,
+        municipality_code=muni, zone=zona, puesto=puesto, mesa=mesa,
+    ))
+    store.insert_vote_field(VoteField(
+        document_id=did, page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    expected = (
+        f"https://divulgacione14presidente.registraduria.gov.co/assets/temis/pdf/"
+        f"{dep}/{muni}/{zona}/{puesto}/{mesa}/PRE/{hash_hex.lower()}.pdf"
+    )
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get(f"/acta/{did}")).text
+            assert "Ver el acta oficial" in html
+            assert expected in html
+
+    asyncio.run(run())
+
+    # The link was rebuilt at render — the served DB still carries no official_lookup_url.
+    con = _sql.connect(db)
+    assert con.execute(
+        "SELECT COUNT(*) FROM documents WHERE official_lookup_url IS NOT NULL"
+    ).fetchone()[0] == 0
+    con.close()
+
+
 def test_security_headers_and_docs_hidden(tmp_path: Path) -> None:
     """Hardening: docs/openapi are 404 by default, and baseline headers are on every response."""
     db = tmp_path / "results.sqlite"

@@ -112,6 +112,11 @@ def ensure_n_candidates(db_path: Path) -> bool:
 # The canonical DIVIPOLA dictionary (code -> name for department / municipality / voting place),
 # bundled into the package so it ships in the serving image (Dockerfile COPYs e14detector/).
 DIVIPOL_DICT_PATH = Path(__file__).resolve().parent / "divipol_dictionary.csv"
+ACTA_HASHES_PATH = Path(__file__).resolve().parent / "acta_hashes.sqlite"
+# Registraduría E-14 (presidente) PDF base. The official acta URL is fully templated as
+# {OFFICIAL_PDF_BASE}/{dep}/{muni}/{zona}/{puesto}/{mesa}/PRE/{hash}.pdf — every part but the
+# opaque per-acta hash is encoded in the document_id, so we only store/look up the hash.
+OFFICIAL_PDF_BASE = "https://divulgacione14presidente.registraduria.gov.co/assets/temis/pdf"
 
 
 class GeoNames:
@@ -177,6 +182,50 @@ def enrich_doc_names(row, geo: GeoNames) -> dict:
             d.get("department_code"), d.get("municipality_code"), d.get("zone"), d.get("puesto")
         )
     return d
+
+
+@functools.lru_cache(maxsize=1)
+def _acta_hash_conn(path: Path = ACTA_HASHES_PATH) -> "sqlite3.Connection | None":
+    """Read-only connection to the bundled document_id -> hash map (~9MB, codes-only snapshots
+    ship official_lookup_url NULL). Cached for the process; None if the asset is absent."""
+    try:
+        if not path.exists():
+            return None
+        return _connect(path)
+    except sqlite3.Error as exc:  # noqa: BLE001 — the link is a nicety, never crash serving
+        print(f"_acta_hash_conn: {exc}", flush=True)
+        return None
+
+
+def official_acta_url(document_id: str | None, hash_hex: str) -> str | None:
+    """Build the Registraduría PDF URL from the codes encoded in the document_id plus the hash.
+
+    document_id looks like ``E14_PRE_{dep}_{muni}_{zona}_{puesto}_{mesa}_delegados`` — the five
+    codes after the ``E14_PRE_`` prefix map straight onto the URL path (already zero-padded)."""
+    if not document_id or not hash_hex:
+        return None
+    parts = document_id.split("_")
+    if len(parts) < 7 or parts[0] != "E14":
+        return None
+    dep, muni, zona, puesto, mesa = parts[2:7]
+    return f"{OFFICIAL_PDF_BASE}/{dep}/{muni}/{zona}/{puesto}/{mesa}/PRE/{hash_hex}.pdf"
+
+
+def official_url_for(document_id: str | None) -> str | None:
+    """Resolve a document's official acta URL from the bundled hash map (render-time fallback for
+    snapshots that didn't carry official_lookup_url). One indexed lookup; None on any miss."""
+    conn = _acta_hash_conn()
+    if conn is None or not document_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT hash FROM acta_hash WHERE document_id=?", (document_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    return official_acta_url(document_id, bytes(row[0]).hex())
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.resolve()}?mode=ro"
@@ -945,6 +994,10 @@ def create_app(
                 raise HTTPException(status_code=404, detail="acta no encontrada")
             # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
             doc = enrich_doc_names(doc_row, geo)
+            # Likewise, a codes-only snapshot ships official_lookup_url NULL — rebuild the link
+            # to the Registraduría's PDF from the bundled per-acta hash map (template unchanged).
+            if not doc.get("official_lookup_url"):
+                doc["official_lookup_url"] = official_url_for(doc.get("document_id"))
             frows = db.execute(
                 """
                 SELECT vf.page_number, vf.row_number, vf.section, vf.candidate_number,

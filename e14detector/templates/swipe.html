@@ -93,9 +93,23 @@
     .tile:hover { transform:translateY(-3px); border-color:var(--line-strong); box-shadow:0 2px 2px rgba(28,26,21,.04), 0 14px 28px -12px rgba(28,26,21,.22); }
     .tile:active { transform:translateY(-1px) scale(.985); }
     .tile:focus-visible { border-color:var(--ink); box-shadow:0 0 0 3px rgba(28,26,21,.12); }
-    .tile .thumb { flex:1 1 auto; display:flex; align-items:center; justify-content:center; min-height:74px; }
+    /* The thumb is a framed "window" so a loaded-but-blank (white) crop still reads as present:
+       its hairline border + faint paper tint stay visible even when the image is all white. */
+    .tile .thumb { position:relative; flex:1 1 auto; display:flex; align-items:center; justify-content:center;
+                   min-height:74px; border-radius:9px; overflow:hidden;
+                   background:#FCFBF7; box-shadow:inset 0 0 0 1px var(--line); }
     .tile img { max-width:100%; max-height:92px; object-fit:contain; pointer-events:none;
-                user-select:none; -webkit-user-drag:none; }
+                user-select:none; -webkit-user-drag:none; opacity:0; transition:opacity .25s ease; }
+    .tile .thumb.ready img { opacity:1; }
+
+    /* Per-image loading state: an animated shimmer fills the window until THIS crop's image loads.
+       That makes "still loading" (moving shimmer) unmistakably different from "loaded & white"
+       (static framed paper). Cleared on img.onload in JS. */
+    .tile .thumb.loading { background:linear-gradient(100deg,#e7e1d3 28%,#f7f4ec 50%,#e7e1d3 72%);
+                           background-size:200% 100%; animation:sh 1.2s infinite linear; }
+    .tile .thumb.failed::after { content:"sin imagen"; position:absolute; inset:0; display:flex;
+                                 align-items:center; justify-content:center; font-size:9.5px; font-weight:700;
+                                 letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); }
 
     /* The crop is the evidence — it stays at FULL opacity, never covered. The "extraña" state is
        signalled around the content only: a vermilion ring + faint tint, plus a small caption in
@@ -305,8 +319,16 @@
         tile.setAttribute('role', 'button');
         tile.setAttribute('aria-pressed', 'false');
         tile.setAttribute('aria-label', 'Marcar esta casilla como extraña');
-        tile.innerHTML = '<div class="thumb"><img loading="lazy" alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
+        tile.innerHTML = '<div class="thumb loading"><img alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
           '<span class="cap" aria-hidden="true">Extraña</span>';
+        const thumb = tile.querySelector('.thumb');
+        const img = thumb.querySelector('img');
+        const ready = () => { thumb.classList.remove('loading'); thumb.classList.add('ready'); };
+        if (img.complete && img.naturalWidth) ready();
+        else {
+          img.addEventListener('load', ready);
+          img.addEventListener('error', () => { thumb.classList.remove('loading'); thumb.classList.add('failed'); });
+        }
         tile.addEventListener('click', () => toggle(tile, it.cid));
         tile.addEventListener('keydown', (e) => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(tile, it.cid); }
