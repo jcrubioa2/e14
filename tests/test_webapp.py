@@ -438,6 +438,13 @@ def test_browse_shows_billboard(tmp_path: Path) -> None:
             assert "/acta/doc-hot" in html
             assert "VALLE" in html and "CALI" in html
 
+            # "Ver todas" (review=1) renders the SAME billboard tile: thumb + loc + tally.
+            review_html = (await client.get("/browse?review=1")).text
+            assert '"board-list"' in review_html and "board-thumb" in review_html
+            assert "reportaron" in review_html
+            assert "/acta/doc-hot" in review_html
+            assert '<div class="list">' not in review_html  # not the old text-only card grid
+
     asyncio.run(run())
 
 

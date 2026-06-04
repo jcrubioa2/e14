@@ -994,6 +994,17 @@ def create_app(
                         [*rest_params, rest_count, max(0, offset - len(voted_rows))],
                     ).fetchall()
                 doc_rows = list(head) + list(rest_rows)
+            # "Ver todas" (review) renders the same billboard tile (thumb + loc + tally) as the
+            # "Actas más reportadas" strip — build a card per acta on this page (bounded to
+            # BROWSE_ACTAS_PER_PAGE).
+            voted_cards = []
+            if review:
+                voted_cards = [
+                    c for c in (
+                        _acta_card(db, r["document_id"], popularity.get(r["document_id"], 0), r)
+                        for r in doc_rows
+                    ) if c
+                ]
             departments = _departments(db, geo)
             # Dependent drop-downs: each level is populated only once its parent is chosen.
             municipios = _municipios(db, department, geo)
@@ -1020,6 +1031,7 @@ def create_app(
             "browse.html",
             {
                 "actas": actas,
+                "voted_cards": voted_cards,
                 "hot_actas": hot_actas,
                 "progress": progress,
                 "departments": departments,
@@ -1323,15 +1335,59 @@ def create_app(
             })
         return out
 
+    def _acta_card(db, doc_id: str, reporters: int, doc_row=None) -> dict | None:
+        """One billboard-style card for an acta: a representative thumbnail (its most-flagged
+        casilla), a location label, and a crowd tally (distinct reporters + how many casillas were
+        flagged). Shared by the public billboard (``_hot_actas_payload``) and the
+        ``/browse?review=1`` ("Ver todas") list so both render the identical tile. Pass ``doc_row``
+        to reuse a row already fetched (the review list already has it) and skip the geo lookup.
+        """
+        if doc_row is None:
+            doc_row = db.execute(
+                "SELECT department_name, department_code, municipality_name, municipality_code, "
+                "zone, puesto, mesa, place_name FROM documents WHERE document_id=?",
+                (doc_id,),
+            ).fetchone()
+        if not doc_row:
+            return None
+        doc = enrich_doc_names(doc_row, geo)  # fill missing names from the lookup
+        frows = db.execute(
+            "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
+            "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "
+            "ORDER BY page_number, row_number",
+            (doc_id,),
+        ).fetchall()
+        if not frows:
+            return None
+        fkeys = [field_key_of(doc_id, r["page_number"], r["row_number"], r["section"]) for r in frows]
+        counts = community.counts_among(fkeys)
+        # Thumbnail = the acta's most-flagged casilla; tally = how many casillas got flagged.
+        best = max(range(len(frows)), key=lambda i: counts[fkeys[i]]["strange"])
+        flagged = sum(1 for k in fkeys if counts[k]["strange"] > 0)
+        loc = " · ".join(x for x in (
+            doc["department_name"] or doc["department_code"],
+            doc["municipality_name"],
+            f"mesa {doc['mesa']}" if doc["mesa"] else None,
+        ) if x) or doc_id
+        crop_rel = frows[best]["raw_crop_path"]
+        img = crop_cdn_url(crop_rel, config.CDN_BASE_URL) or ("/crop?path=" + quote(crop_rel))
+        return {
+            "document_id": doc_id,
+            "img_url": img,
+            "loc": loc,
+            "place_name": doc["place_name"],
+            "reporters": reporters,
+            "flagged": flagged,
+            "n_candidates": len(frows),
+        }
+
     def _hot_actas_payload() -> list[dict]:
         """Most-reported ACTAS for the public billboard — one card per mesa, not per crop.
 
         Ranks actas by how many distinct people flagged anything in them (``acta_popularity`` —
         the same crowd signal the ``/browse?review=1`` list uses, available on both the SQLite and
-        Aurora stores), then resolves each top acta to a location label, a representative
-        thumbnail (its most-flagged casilla), and a tally (distinct reporters + how many casillas
-        were flagged). De-anonymized on purpose: the billboard links straight to the acta so
-        people can investigate. Bounded to HOTLIST_SIZE, so this is ≤8 small per-acta lookups.
+        Aurora stores), then builds one ``_acta_card`` per top acta. De-anonymized on purpose: the
+        billboard links straight to the acta so people can investigate. Bounded to HOTLIST_SIZE.
         """
         pop = _agg_cached("popularity", community.acta_popularity)
         if not pop:
@@ -1340,43 +1396,9 @@ def create_app(
         out: list[dict] = []
         with conn() as db:
             for doc_id, reporters in top:
-                doc_row = db.execute(
-                    "SELECT department_name, department_code, municipality_name, municipality_code, "
-                    "zone, puesto, mesa, place_name FROM documents WHERE document_id=?",
-                    (doc_id,),
-                ).fetchone()
-                if not doc_row:
-                    continue
-                doc = enrich_doc_names(doc_row, geo)  # fill missing names from the lookup
-                frows = db.execute(
-                    "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
-                    "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "
-                    "ORDER BY page_number, row_number",
-                    (doc_id,),
-                ).fetchall()
-                if not frows:
-                    continue
-                fkeys = [field_key_of(doc_id, r["page_number"], r["row_number"], r["section"]) for r in frows]
-                counts = community.counts_among(fkeys)
-                # Thumbnail = the acta's most-flagged casilla; tally = how many casillas got flagged.
-                best = max(range(len(frows)), key=lambda i: counts[fkeys[i]]["strange"])
-                flagged = sum(1 for k in fkeys if counts[k]["strange"] > 0)
-                loc = " · ".join(x for x in (
-                    doc["department_name"] or doc["department_code"],
-                    doc["municipality_name"],
-                    f"mesa {doc['mesa']}" if doc["mesa"] else None,
-                ) if x) or doc_id
-                crop_rel = frows[best]["raw_crop_path"]
-                img = crop_cdn_url(crop_rel, config.CDN_BASE_URL) or ("/crop?path=" + quote(crop_rel))
-                out.append({
-                    "document_id": doc_id,
-                    "img_url": img,
-                    "loc": loc,
-                    "place_name": doc["place_name"],
-                    "reporters": reporters,
-                    "flagged": flagged,
-                    "n_candidates": len(frows),
-                })
+                card = _acta_card(db, doc_id, reporters)
+                if card:
+                    out.append(card)
         return out
 
     @app.get("/api/billboard")
