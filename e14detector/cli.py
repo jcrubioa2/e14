@@ -352,7 +352,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish_db.add_argument(
         "--allow-shrink", action="store_true",
-        help="override the guard that refuses to replace the live DB with one <50% its size",
+        help="override the guard that refuses to replace the live DB with one holding <50% its "
+             "actas (or, for legacy pointers, <50% its bytes)",
     )
     publish_db.set_defaults(func=cmd_publish_db)
 
