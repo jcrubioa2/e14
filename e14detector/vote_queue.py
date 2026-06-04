@@ -36,6 +36,21 @@ class VotePublisher:
             ),
         )
 
+    def queue_depth(self) -> dict[str, int] | None:
+        """Approximate queue backlog for the admin health board: messages waiting and
+        in-flight. Returns None on any failure (the dashboard then shows the probe as down)."""
+        try:
+            attrs = self._sqs.get_queue_attributes(
+                QueueUrl=self._url,
+                AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"],
+            ).get("Attributes", {})
+            return {
+                "waiting": int(attrs.get("ApproximateNumberOfMessages", 0)),
+                "in_flight": int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0)),
+            }
+        except Exception:  # noqa: BLE001 — health probe must never raise
+            return None
+
 
 def make_publisher() -> VotePublisher | None:
     """A publisher when ``SQS_QUEUE_URL`` is configured, else ``None`` (the app then

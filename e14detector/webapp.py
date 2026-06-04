@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import functools
 import math
 import os
@@ -19,7 +20,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import config
+from . import alerts, config
 from .community import (
     PollConfig,
     make_store,
@@ -513,6 +514,29 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
     }
 
 
+def stalled_publisher_msg(
+    age_secs: int | None, stale_after: int, served_pct: float | None, complete_pct: float
+) -> str | None:
+    """Alert text if a stale snapshot pointer looks like a *stalled* rollout, else None.
+
+    A stale pointer (publisher not flipping ``db/latest.json``) is only a problem while the
+    rollout is incomplete — once the served set reaches ``complete_pct`` of the national total
+    the publisher legitimately stops and the pointer age grows forever, which must NOT page.
+    Decided from rollout progress, not a hard switch. ``served_pct=None`` means we couldn't
+    measure it -> page anyway (a DB read error must not mask a real stall). ``stale_after<=0``
+    disables the check outright (manual escape hatch).
+    """
+    if stale_after <= 0 or age_secs is None or age_secs <= stale_after:
+        return None
+    if served_pct is not None and served_pct >= complete_pct:
+        return None  # rollout complete — a stale pointer is the expected steady state
+    served = "an unknown share" if served_pct is None else f"only {served_pct:.0f}%"
+    return (
+        f"snapshot pointer idle {age_secs // 60} min and {served} of the national set is "
+        f"served — publisher stalled or reader stuck?"
+    )
+
+
 def _voted_doc_rows(
     conn: sqlite3.Connection, popularity: dict[str, int], clause: str, params: list, cap: int
 ) -> tuple[list[sqlite3.Row], list[str]]:
@@ -609,6 +633,42 @@ def create_app(
     def resolve_cid_cached(cid: str):
         return community.resolve_cid(cid)
 
+    # Per-crop public tallies on the render paths (feed deck, acta page, billboard cards) hit
+    # community.counts_among, which on the Aurora backend is a Data API round-trip. A popular
+    # acta/feed made one per view, so read QPS to Aurora scaled with page views. Cache each
+    # field_key's tally for a few seconds (config.COUNTS_TTL): only keys whose entry is missing
+    # or expired are queried, collapsing the hot-path read traffic while staying near-fresh (the
+    # vote response is already optimistic). Bounded so memory stays flat across the crop universe.
+    _counts_cache: dict[str, tuple[float, dict[str, int]]] = {}
+    _COUNTS_CACHE_CAP = 50_000
+
+    def counts_among_cached(field_keys: list[str]) -> dict[str, dict[str, int]]:
+        ttl = config.COUNTS_TTL
+        if ttl <= 0:
+            return community.counts_among(field_keys)
+        now = time.monotonic()
+        out: dict[str, dict[str, int]] = {}
+        stale: list[str] = []
+        seen_stale: set[str] = set()
+        for k in field_keys:
+            hit = _counts_cache.get(k)
+            if hit is not None and now - hit[0] < ttl:
+                out[k] = dict(hit[1])  # copy so a caller can't mutate the cached tally
+            elif k not in seen_stale:
+                seen_stale.add(k)
+                stale.append(k)
+        if stale:
+            fresh = community.counts_among(stale)
+            for k, tally in fresh.items():
+                _counts_cache[k] = (now, tally)
+                out[k] = dict(tally)
+            # Bound memory: when the cache grows large, drop expired entries (cheap, correct —
+            # it's only a cache). Runs only on the (rare) growth past the cap.
+            if len(_counts_cache) > _COUNTS_CACHE_CAP:
+                for ck in [c for c, (ts, _) in _counts_cache.items() if now - ts >= ttl]:
+                    del _counts_cache[ck]
+        return out
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         # Optional: keep the served results DB in sync with the local writer via the
@@ -616,9 +676,16 @@ def create_app(
         # and tests are unaffected. Failures only log — they never crash the app.
         sync_task = None
         if os.environ.get("E14_DB_SYNC", "").lower() in ("1", "true", "yes") and config.CDN_BASE_URL:
-            from .dbsync import refresh_db_once
+            from .dbsync import pointer_status, refresh_db_once
 
             interval = int(os.environ.get("E14_DB_SYNC_INTERVAL", "60"))
+            # The published pointer is "stale" if the publisher hasn't flipped it in this long —
+            # a silent failure (the app keeps serving the old DB, so neither /health nor the AWS
+            # vote alarms would notice). But a stale pointer is ALSO the normal steady state once
+            # the rollout finishes (the publisher stops). So we page only when stale AND the
+            # rollout is still incomplete (see stalled_publisher_msg / ROLLOUT_COMPLETE_PCT) — no
+            # hard switch. E14_POINTER_STALE_SECS=0 disables the check entirely if ever needed.
+            stale_after = int(os.environ.get("E14_POINTER_STALE_SECS", str(30 * 60)))
 
             async def _warm() -> None:
                 await asyncio.to_thread(_warm_db, results_db)
@@ -634,6 +701,30 @@ def create_app(
                     await asyncio.to_thread(ensure_browse_indexes, results_db)
                 return sha
 
+            async def _check_stale() -> None:
+                # Page only if the pointer is stale AND the rollout is still incomplete — a stale
+                # pointer is expected once publishing finishes (decided from served progress, not
+                # a hard switch). stale_after<=0 disables; skip the network fetch when so.
+                if stale_after <= 0:
+                    return
+                ptr = await asyncio.to_thread(pointer_status, config.CDN_BASE_URL)
+                age = ptr.get("age_secs") if ptr else None
+                if age is None or age <= stale_after:
+                    return  # pointer fresh -> publisher active, nothing to do
+
+                def _served_pct() -> float | None:
+                    # Progress of the snapshot we actually serve (== what the publisher shipped).
+                    try:
+                        with _connect(results_db) as db:
+                            return compute_sync_progress(db).get("pct")
+                    except Exception:  # noqa: BLE001 — can't measure -> let the helper page
+                        return None
+
+                pct = await asyncio.to_thread(_served_pct)
+                msg = stalled_publisher_msg(age, stale_after, pct, config.ROLLOUT_COMPLETE_PCT)
+                if msg:
+                    alerts.notify("db-stale", msg, severity="warn")
+
             async def _sync_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
@@ -642,8 +733,10 @@ def create_app(
                             # A new (cold) file was just swapped in — warm it so the next
                             # feed request is a memory hit, not a disk fault.
                             await _warm()
+                        await _check_stale()
                     except Exception as exc:  # noqa: BLE001 — never let sync crash serving
                         print(f"db-sync: {exc}", flush=True)
+                        alerts.notify("db-sync", f"db-sync loop error: {exc}")
 
             # Block on an initial pull ONLY if there's no DB to serve yet. If the volume
             # already has one, serve it immediately and refresh in the background — no
@@ -653,6 +746,7 @@ def create_app(
                     await asyncio.wait_for(_pull(), timeout=180)
                 except Exception as exc:  # noqa: BLE001
                     print(f"db-sync (initial): {exc}", flush=True)
+                    alerts.notify("db-sync-initial", f"initial DB pull failed: {exc}")
             # Warm the page cache in the background so the first feed after a boot/deploy
             # doesn't fault to cold disk. Non-blocking: serving starts immediately.
             warm_task = asyncio.create_task(_warm())
@@ -674,7 +768,15 @@ def create_app(
         """Baseline hardening headers on every response. Deliberately NO restrictive
         ``default-src`` CSP (would break the inline JS/Turnstile widget); only frame-ancestors
         (anti-clickjacking) plus the cheap, universally-safe headers."""
-        resp = await call_next(request)
+        try:
+            resp = await call_next(request)
+        except Exception as exc:  # noqa: BLE001 — record + page, then let the 500 propagate
+            _record_error(f"unhandled {request.method} {request.url.path}: {exc}")
+            alerts.notify("http-exc", f"unhandled error on {request.method} {request.url.path}: {exc}")
+            raise
+        if resp.status_code >= 500:
+            _record_error(f"{resp.status_code} on {request.method} {request.url.path}")
+            alerts.notify("http-5xx", f"{resp.status_code} on {request.method} {request.url.path}")
         h = resp.headers
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("X-Frame-Options", "DENY")
@@ -683,11 +785,19 @@ def create_app(
         h.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return resp
 
+    def _record_error(detail: str) -> None:
+        app.state.err_5xx += 1
+        app.state.recent_errors.append({"ts": time.time(), "detail": detail})
+
     app.state.results_db = results_db
     app.state.output_dir = output_dir
     app.state.community = community
     app.state.poll = poll_cfg
     app.state._bg_tasks: set[asyncio.Task] = set()
+    # Server-error tracking for the admin health board (and the source of the 5xx alerts).
+    app.state.started_at = time.time()
+    app.state.err_5xx = 0
+    app.state.recent_errors: collections.deque = collections.deque(maxlen=20)
 
     def conn() -> sqlite3.Connection:
         if not results_db.exists():
@@ -724,6 +834,56 @@ def create_app(
             raise HTTPException(status_code=403, detail="crop path outside output_dir") from exc
         return FileResponse(resolved)
 
+    @app.get("/health")
+    async def health():
+        """Liveness + readiness for an external uptime monitor (UptimeRobot/Better Stack).
+
+        Returns 200 only when the app is up AND has a results DB with actual documents to serve —
+        a row-existence probe catches the 'up but stub/empty DB' incident class that a plain ping
+        would miss (and, unlike a file-size floor, is correct for any DB size). Cheap and
+        unauthenticated (no secrets in the body). An external watcher is what actually catches a
+        total outage; a dead process can't page anyone.
+        """
+        def _ready() -> bool:
+            if not results_db.exists():
+                return False
+            try:
+                with _connect(results_db) as db:
+                    return db.execute("SELECT 1 FROM documents LIMIT 1").fetchone() is not None
+            except Exception:  # noqa: BLE001 — any DB error => not ready
+                return False
+
+        ok = await asyncio.to_thread(_ready)
+        return JSONResponse(
+            {"status": "ok" if ok else "unavailable", "db": ok},
+            status_code=200 if ok else 503,
+        )
+
+    def _admin_health(votes_ok: bool, pipeline: dict) -> dict:
+        """At-a-glance status for the operator board: serving DB, votes backend, queue backlog,
+        recent server errors, runtime. Read-only; every probe is best-effort."""
+        try:
+            size_mb = round(results_db.stat().st_size / 1e6)
+        except OSError:
+            size_mb = 0
+        recent = list(app.state.recent_errors)[-5:][::-1]
+        return {
+            "db_present": size_mb > 1,
+            "db_size_mb": size_mb,
+            "pointer_age_min": pipeline.get("pointer_age_min"),
+            "pointer_stale": pipeline.get("pointer_stale", False),
+            "votes_ok": votes_ok,
+            "publisher": vote_publisher is not None,
+            "sqs": (vote_publisher.queue_depth() if vote_publisher is not None else None),
+            "err_5xx": app.state.err_5xx,
+            "recent_errors": recent,
+            "uptime_min": round((time.time() - app.state.started_at) / 60),
+            "region": os.environ.get("FLY_REGION", ""),
+            "machine": os.environ.get("FLY_MACHINE_ID", "")[:8],
+            "counts_cache": len(_counts_cache),
+            "alerts_on": alerts.configured(),
+        }
+
     @app.get("/admin/poll")
     async def admin_poll(request: Request, key: str = ""):
         # Operator-only: private vote counts + publishing health. Off unless a token is configured.
@@ -731,7 +891,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="not found")
         if key != config.ADMIN_TOKEN:
             raise HTTPException(status_code=403, detail="forbidden")
-        rows = community.admin_overview()
+        # Tolerate a votes-backend outage: render the board (with a FAIL tile) instead of 500ing,
+        # so the operator can still see *that* Aurora is down rather than a blank error page.
+        try:
+            rows = community.admin_overview()
+            votes_ok = True
+        except Exception as exc:  # noqa: BLE001
+            rows = []
+            votes_ok = False
+            alerts.notify("votes-backend", f"admin_overview failed (votes backend down?): {exc}")
         with conn() as db:
             for r in rows:
                 parsed = parse_field_key(r["field_key"])
@@ -771,10 +939,12 @@ def create_app(
             pipeline["pointer_age_min"] = round(age / 60) if age is not None else None
             # Stale if the publisher hasn't flipped the pointer in >30 min (cycles run ~10-14).
             pipeline["pointer_stale"] = age is not None and age > 30 * 60
+        # Off the event loop: _admin_health does a blocking SQS GetQueueAttributes probe.
+        health = await asyncio.to_thread(_admin_health, votes_ok, pipeline)
         return templates.TemplateResponse(
             request,
             "admin.html",
-            {"rows": rows, "summary": summary, "key": key, "pipeline": pipeline},
+            {"rows": rows, "summary": summary, "key": key, "pipeline": pipeline, "health": health},
         )
 
     @app.get("/robots.txt")
@@ -1097,7 +1267,7 @@ def create_app(
                 "field_key": fkey,
                 "crop_url": crop_cdn_url(fr["raw_crop_path"], config.CDN_BASE_URL),
             })
-        counts = community.counts_among([c["field_key"] for c in crops])
+        counts = counts_among_cached([c["field_key"] for c in crops])
         for c in crops:
             tally = counts.get(c["field_key"], {"good": 0, "strange": 0})
             c["good"] = tally["good"]
@@ -1366,7 +1536,7 @@ def create_app(
         if not frows:
             return None
         fkeys = [field_key_of(doc_id, r["page_number"], r["row_number"], r["section"]) for r in frows]
-        counts = community.counts_among(fkeys)
+        counts = counts_among_cached(fkeys)
         # Thumbnail = the acta's most-flagged casilla; tally = how many casillas got flagged.
         best = max(range(len(frows)), key=lambda i: counts[fkeys[i]]["strange"])
         flagged = sum(1 for k in fkeys if counts[k]["strange"] > 0)
@@ -1415,7 +1585,7 @@ def create_app(
             fk = field_key_of(r["document_id"], r["page_number"], r["row_number"], r["section"])
             fk_by_doc.setdefault(r["document_id"], []).append(fk)
             all_fkeys.append(fk)
-        counts = community.counts_among(all_fkeys)
+        counts = counts_among_cached(all_fkeys)
         out: dict[str, float] = {}
         for doc_id, fks in fk_by_doc.items():
             s = sum(counts[k]["strange"] for k in fks)
@@ -1480,7 +1650,7 @@ def create_app(
             reg.append((scid, fkey, fr["raw_crop_path"], document_id))
             siblings.append({"field_key": fkey, "cid": scid})
         community.register_cids(reg)
-        counts = community.counts_among([s["field_key"] for s in siblings])
+        counts = counts_among_cached([s["field_key"] for s in siblings])
         items = [
             {"cid": s["cid"], "img_url": f"/c/{s['cid']}",
              "good": counts[s["field_key"]]["good"], "strange": counts[s["field_key"]]["strange"]}
@@ -1563,7 +1733,11 @@ def create_app(
             # commits. A duplicate vote is dedup'd downstream; the count just shows
             # +1 too high until the next read. Acceptable for crowd voting.
             tally = (await asyncio.to_thread(community.counts_among, [field_key]))[field_key]
-            await asyncio.to_thread(vote_publisher.publish, field_key, token, value)
+            try:
+                await asyncio.to_thread(vote_publisher.publish, field_key, token, value)
+            except Exception as exc:  # noqa: BLE001 — page, then surface the failure to the client
+                alerts.notify("vote-publish", f"SQS vote enqueue failed: {exc}")
+                raise
             tally[value] += 1
         else:
             # Synchronous path (SQLite local/tests / single-machine fallback).
@@ -1622,7 +1796,11 @@ def create_app(
                 return False
             field_key = row["field_key"]
             if vote_publisher is not None:
-                await asyncio.to_thread(vote_publisher.publish, field_key, token, value)
+                try:
+                    await asyncio.to_thread(vote_publisher.publish, field_key, token, value)
+                except Exception as exc:  # noqa: BLE001 — page, then surface to the client
+                    alerts.notify("vote-publish", f"SQS vote enqueue failed: {exc}")
+                    raise
             elif value == "strange":
                 await asyncio.to_thread(community.record_flag, field_key, token)
             else:

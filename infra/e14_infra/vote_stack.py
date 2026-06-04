@@ -22,11 +22,14 @@ from aws_cdk import (
     RemovalPolicy,
     Stack,
     aws_cloudwatch as cw,
+    aws_cloudwatch_actions as cw_actions,
     aws_ec2 as ec2,
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_lambda_event_sources as les,
     aws_rds as rds,
+    aws_sns as sns,
+    aws_sns_subscriptions as subs,
     aws_sqs as sqs,
 )
 from constructs import Construct
@@ -225,10 +228,26 @@ class VoteStack(Stack):
         )
         CfnOutput(self, "VoteDrainFn", value=fn.function_name)
 
-    # --- CloudWatch alarms (nice-to-have) ------------------------------------
+    # --- CloudWatch alarms + notification ------------------------------------
     def _alarms(self, queue: sqs.Queue, dlq: sqs.Queue, cluster: rds.DatabaseCluster) -> None:
-        cw.Alarm(
-            self,
+        # An SNS topic so the alarms below actually notify someone (they were previously silent
+        # — they'd flip to ALARM in the console but page nobody). Set E14_ALERT_EMAIL at deploy
+        # time to get email; a Telegram forwarder Lambda can subscribe to this same topic later.
+        topic = sns.Topic(self, "AlertTopic", topic_name=f"{PREFIX}alerts")
+        email = os.environ.get("E14_ALERT_EMAIL", "").strip()
+        if email:
+            topic.add_subscription(subs.EmailSubscription(email))
+        CfnOutput(self, "AlertTopicArn", value=topic.topic_arn)
+
+        action = cw_actions.SnsAction(topic)
+
+        def _alarm(cid: str, **kwargs) -> cw.Alarm:
+            a = cw.Alarm(self, cid, **kwargs)
+            a.add_alarm_action(action)       # notify on ALARM
+            a.add_ok_action(action)          # and on recovery (so you know it cleared)
+            return a
+
+        _alarm(
             "DlqNotEmpty",
             alarm_name=f"{PREFIX}dlq-not-empty",
             metric=dlq.metric_approximate_number_of_messages_visible(
@@ -239,8 +258,7 @@ class VoteStack(Stack):
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
         )
-        cw.Alarm(
-            self,
+        _alarm(
             "QueueBacklogAge",
             alarm_name=f"{PREFIX}queue-age-high",
             metric=queue.metric_approximate_age_of_oldest_message(
@@ -251,8 +269,7 @@ class VoteStack(Stack):
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
         )
-        cw.Alarm(
-            self,
+        _alarm(
             "AuroraCapacityHigh",
             alarm_name=f"{PREFIX}aurora-acu-high",
             metric=cw.Metric(

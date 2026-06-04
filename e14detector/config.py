@@ -37,6 +37,12 @@ DEFAULT_RESULTS_JSONL = DEFAULT_OUTPUT_DIR / "results" / "results.jsonl"
 # rollout progress ("X de Y actas sincronizadas"); override per-deployment.
 NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
 
+# A stale snapshot pointer only means a *stalled* publisher while the rollout is still in
+# progress; once the served set reaches ~this percent of the national total, the publisher
+# has legitimately finished and stops flipping the pointer, so the stalled-publisher alert
+# auto-suppresses (no hard switch needed). The 2% slack absorbs national-total estimate error.
+ROLLOUT_COMPLETE_PCT = float(os.environ.get("E14_ROLLOUT_COMPLETE_PCT", "98"))
+
 # A crop flagged by at least this many distinct voters gets a strong "muy reportada"
 # badge regardless of the model verdict (the crowd signal stands on its own).
 HIGH_VOTE_THRESHOLD = int(os.environ.get("E14_HIGH_VOTE_THRESHOLD", "100"))
@@ -155,6 +161,12 @@ COMMUNITY_DB = os.environ.get("E14_COMMUNITY_DB", str(DEFAULT_OUTPUT_DIR / "comm
 # Per-voter token-bucket rate limit (defeats casual scripted flooding).
 RATE_REFILL_PER_MIN = float(os.environ.get("E14_RATE_REFILL_PER_MIN", "10"))
 RATE_BUCKET = float(os.environ.get("E14_RATE_BUCKET", "20"))
+# Short-TTL cache for public per-crop tallies (counts_among) on the render paths (feed deck,
+# acta page, billboard cards). Keeps a popular acta/feed from making an Aurora (RDS Data API)
+# round-trip per view. Separate from the 45s aggregate cache: tallies tolerate a few seconds of
+# staleness (the vote response is already optimistic), so a small TTL collapses the read QPS to
+# Aurora while staying fresh. 0 disables the cache (always query the store).
+COUNTS_TTL = float(os.environ.get("E14_COUNTS_TTL", "8"))
 # Cloudflare Turnstile (anti-bot). Secret verifies server-side; sitekey is public
 # and rendered into the page. When the secret is empty, verification is skipped
 # (local/dev), so the feature degrades gracefully offline.
