@@ -7,11 +7,13 @@ import math
 import os
 import random
 import sqlite3
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -53,12 +55,226 @@ _ALGO_FLAG_SQL = (
 # One acta-summary row for the /browse list (one entry per document). Reads the precomputed
 # per-acta candidate count straight off the small documents table — no join/GROUP BY over the
 # 1.5M-row vote_fields table. Every served DB carries n_candidates: DetectorStore maintains it
-# incrementally, and dbsync.build_serving_db recomputes it into the slim serving snapshot.
+# incrementally, dbsync.build_serving_db recomputes it into the slim serving snapshot, and
+# ensure_n_candidates() backfills it at load for any snapshot that somehow lacks it.
 _ACTA_SUMMARY_SELECT = (
     "SELECT d.document_id, d.department_code, d.department_name, "
-    "d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
+    "d.municipality_code, d.municipality_name, d.zone, d.puesto, d.mesa, d.place_name, "
     "d.n_candidates AS n_candidates FROM documents d"
 )
+
+
+def ensure_n_candidates(db_path: Path) -> bool:
+    """Guarantee the served ``documents`` table carries the precomputed ``n_candidates`` column.
+
+    /browse reads ``d.n_candidates`` to list + filter actas without joining the 1.5M-row
+    vote_fields table. A snapshot that ships WITHOUT the column (a raw results.sqlite, or one
+    built before the column existed) makes every /browse request a hard 500 (``no such column``).
+
+    Rather than pay a per-request vote_fields scan forever, fix the data ONCE at load: add the
+    column if missing and backfill it from vote_fields — the same work build_serving_db does, and
+    with the (document_id,row_type) index it's a seconds-long pass, not minutes. Idempotent (a
+    no-op when the column is already there) and best-effort: if the file is read-only we log and
+    return False rather than crash boot. Returns True iff the column is present afterwards.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(db_path, timeout=60.0)
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_n_candidates: open failed: {exc}", flush=True)
+        return False
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+        if not cols:
+            return False  # no documents table at all — nothing to migrate
+        if "n_candidates" in cols:
+            return True
+        con.execute("ALTER TABLE documents ADD COLUMN n_candidates INTEGER NOT NULL DEFAULT 0")
+        # Keep the correlated COUNT an index range-probe per acta, not a full vote_fields scan.
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vf_doc_type ON vote_fields(document_id, row_type)"
+        )
+        con.execute(
+            "UPDATE documents SET n_candidates = COALESCE("
+            "(SELECT COUNT(*) FROM vote_fields vf WHERE vf.document_id = documents.document_id "
+            "AND vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL), 0)"
+        )
+        con.commit()
+        print(f"ensure_n_candidates: backfilled n_candidates on {db_path}", flush=True)
+        return True
+    except sqlite3.Error as exc:  # noqa: BLE001 — never let a migration failure crash boot
+        print(f"ensure_n_candidates: backfill failed (serving read-only?): {exc}", flush=True)
+        return False
+    finally:
+        con.close()
+
+
+def ensure_browse_indexes(db_path: Path) -> bool:
+    """Guarantee the served ``documents`` table carries the indexes /browse's hot path needs.
+
+    /browse orders and paginates with ``WHERE n_candidates>0 ... ORDER BY department_code,
+    document_id`` and counts/filters by region. ``dbsync.build_serving_db`` creates the matching
+    indexes, but a RAW results.sqlite (the kind that also lacked n_candidates / geo names) ships
+    without them — so every page does a full scan + sort over ~122k rows (multi-second TTFB).
+
+    Create them ONCE at load, idempotently. ``idx_doc_browse`` is partial (``WHERE n_candidates>0``)
+    so it doubles as both the filter and the sort order for the common case, and lets ``COUNT(*)``
+    range-probe instead of scan. Must run AFTER ensure_n_candidates (the partial predicate needs the
+    column). Best-effort: a read-only file just logs and returns False rather than crashing boot.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(db_path, timeout=60.0)
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_browse_indexes: open failed: {exc}", flush=True)
+        return False
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+        if "n_candidates" not in cols:
+            return False  # partial index needs the column; ensure_n_candidates runs first
+        existing = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='documents'"
+        )}
+        if {"idx_doc_browse", "idx_doc_geo"} <= existing:
+            return True
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_doc_browse "
+            "ON documents(department_code, document_id) WHERE n_candidates>0"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_doc_geo "
+            "ON documents(department_code, municipality_code, zone, puesto)"
+        )
+        con.execute("ANALYZE documents")  # let the planner actually pick the new indexes
+        con.commit()
+        print(f"ensure_browse_indexes: built /browse indexes on {db_path}", flush=True)
+        return True
+    except sqlite3.Error as exc:  # noqa: BLE001 — an index build must never crash boot
+        print(f"ensure_browse_indexes: build failed (serving read-only?): {exc}", flush=True)
+        return False
+    finally:
+        con.close()
+
+
+# The canonical DIVIPOLA dictionary (code -> name for department / municipality / voting place),
+# bundled into the package so it ships in the serving image (Dockerfile COPYs e14detector/).
+DIVIPOL_DICT_PATH = Path(__file__).resolve().parent / "divipol_dictionary.csv"
+ACTA_HASHES_PATH = Path(__file__).resolve().parent / "acta_hashes.sqlite"
+# Registraduría E-14 (presidente) PDF base. The official acta URL is fully templated as
+# {OFFICIAL_PDF_BASE}/{dep}/{muni}/{zona}/{puesto}/{mesa}/PRE/{hash}.pdf — every part but the
+# opaque per-acta hash is encoded in the document_id, so we only store/look up the hash.
+OFFICIAL_PDF_BASE = "https://divulgacione14presidente.registraduria.gov.co/assets/temis/pdf"
+
+
+class GeoNames:
+    """In-memory code -> human-name lookup for the geographic hierarchy.
+
+    A published snapshot can carry only the numeric codes (department_code='01',
+    municipality_code='001', zone, puesto) with the names left NULL — which would render bare
+    codes in /browse. Rather than denormalize a name string onto all ~122k document rows, we
+    keep the small canonical mapping (34 departments, ~1.2k municipios) in memory and resolve at
+    render time. Lookups return ``None`` on a miss so callers fall back to the code.
+    """
+
+    def __init__(self, dept: dict[str, str], muni: dict[tuple[str, str], str],
+                 place: dict[tuple[str, str, str, str], str]):
+        self._dept, self._muni, self._place = dept, muni, place
+
+    def dept(self, code) -> str | None:
+        return self._dept.get(code) if code else None
+
+    def muni(self, dep, code) -> str | None:
+        return self._muni.get((dep, code)) if dep and code else None
+
+    def place(self, dep, muni, zona, puesto) -> str | None:
+        if not (dep and muni and zona and puesto):
+            return None
+        return self._place.get((dep, muni, zona, puesto))
+
+
+@functools.lru_cache(maxsize=4)
+def load_geo_names(dict_path: Path = DIVIPOL_DICT_PATH) -> GeoNames:
+    """Load the DIVIPOLA dictionary into a GeoNames lookup once (cached). Best-effort: a missing
+    or malformed file yields an empty lookup (callers just fall back to showing codes)."""
+    import csv
+    dept: dict[str, str] = {}
+    muni: dict[tuple[str, str], str] = {}
+    place: dict[tuple[str, str, str, str], str] = {}
+    try:
+        with open(dict_path, newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                dc, mc = r.get("cod_departamento"), r.get("cod_municipio")
+                if dc and r.get("departamento"):
+                    dept.setdefault(dc, r["departamento"])
+                if dc and mc and r.get("municipio"):
+                    muni.setdefault((dc, mc), r["municipio"])
+                zc, pc, lugar = r.get("cod_zona"), r.get("cod_puesto"), r.get("lugar_votacion")
+                if dc and mc and zc and pc and lugar:
+                    place.setdefault((dc, mc, zc, pc), lugar)
+    except (OSError, csv.Error) as exc:  # noqa: BLE001 — names are a nicety, never crash serving
+        print(f"load_geo_names: {exc}", flush=True)
+    return GeoNames(dept, muni, place)
+
+
+def enrich_doc_names(row, geo: GeoNames) -> dict:
+    """A dict copy of a documents row with any missing geo NAME filled from the lookup (codes
+    untouched). Used wherever a document is rendered, so the served DB stays codes-only."""
+    d = dict(row)
+    if not d.get("department_name"):
+        d["department_name"] = geo.dept(d.get("department_code"))
+    if not d.get("municipality_name"):
+        d["municipality_name"] = geo.muni(d.get("department_code"), d.get("municipality_code"))
+    if "place_name" in d and not d.get("place_name"):
+        d["place_name"] = geo.place(
+            d.get("department_code"), d.get("municipality_code"), d.get("zone"), d.get("puesto")
+        )
+    return d
+
+
+@functools.lru_cache(maxsize=1)
+def _acta_hash_conn(path: Path = ACTA_HASHES_PATH) -> "sqlite3.Connection | None":
+    """Read-only connection to the bundled document_id -> hash map (~9MB, codes-only snapshots
+    ship official_lookup_url NULL). Cached for the process; None if the asset is absent."""
+    try:
+        if not path.exists():
+            return None
+        return _connect(path)
+    except sqlite3.Error as exc:  # noqa: BLE001 — the link is a nicety, never crash serving
+        print(f"_acta_hash_conn: {exc}", flush=True)
+        return None
+
+
+def official_acta_url(document_id: str | None, hash_hex: str) -> str | None:
+    """Build the Registraduría PDF URL from the codes encoded in the document_id plus the hash.
+
+    document_id looks like ``E14_PRE_{dep}_{muni}_{zona}_{puesto}_{mesa}_delegados`` — the five
+    codes after the ``E14_PRE_`` prefix map straight onto the URL path (already zero-padded)."""
+    if not document_id or not hash_hex:
+        return None
+    parts = document_id.split("_")
+    if len(parts) < 7 or parts[0] != "E14":
+        return None
+    dep, muni, zona, puesto, mesa = parts[2:7]
+    return f"{OFFICIAL_PDF_BASE}/{dep}/{muni}/{zona}/{puesto}/{mesa}/PRE/{hash_hex}.pdf"
+
+
+def official_url_for(document_id: str | None) -> str | None:
+    """Resolve a document's official acta URL from the bundled hash map (render-time fallback for
+    snapshots that didn't carry official_lookup_url). One indexed lookup; None on any miss."""
+    conn = _acta_hash_conn()
+    if conn is None or not document_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT hash FROM acta_hash WHERE document_id=?", (document_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[0]:
+        return None
+    return official_acta_url(document_id, bytes(row[0]).hex())
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     uri = f"file:{db_path.resolve()}?mode=ro"
@@ -86,10 +302,10 @@ def _warm_db(db_path: Path) -> None:
         pass
 
 
-def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _departments(conn: sqlite3.Connection, geo: "GeoNames | None" = None) -> list:
     # Group by code only and take the non-null name (MAX skips NULLs): some docs carry the
     # code without a name, which would otherwise show a duplicate "code-only" option.
-    return conn.execute(
+    rows = conn.execute(
         """
         SELECT department_code, MAX(department_name) AS department_name
         FROM documents
@@ -98,18 +314,31 @@ def _departments(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         ORDER BY department_code
         """
     ).fetchall()
+    if geo is None:
+        return rows
+    # Fill names the snapshot left NULL from the in-memory lookup (no per-row DB copies).
+    return [{"department_code": r["department_code"],
+             "department_name": r["department_name"] or geo.dept(r["department_code"])}
+            for r in rows]
 
 
-def _municipios(conn: sqlite3.Connection, department: str | None) -> list[sqlite3.Row]:
+def _municipios(conn: sqlite3.Connection, department: str | None, geo: "GeoNames | None" = None) -> list:
     if not department:
         return []
-    return conn.execute(
-        "SELECT municipality_code, MAX(municipality_name) AS municipality_name FROM documents "
+    rows = conn.execute(
+        "SELECT municipality_code, MAX(municipality_name) AS municipality_name, "
+        "MAX(department_code) AS department_code FROM documents "
         "WHERE (department_code=? OR department_name=?) "
         "AND municipality_code IS NOT NULL AND municipality_code <> '' "
         "GROUP BY municipality_code ORDER BY municipality_code",
         (department, department),
     ).fetchall()
+    if geo is None:
+        return rows
+    return [{"municipality_code": r["municipality_code"],
+             "municipality_name": r["municipality_name"]
+                or geo.muni(r["department_code"], r["municipality_code"])}
+            for r in rows]
 
 
 def _zonas(conn: sqlite3.Connection, department: str | None, municipality: str | None) -> list[sqlite3.Row]:
@@ -227,12 +456,14 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
     """
     now = now or datetime.now(timezone.utc)
     total = max(1, config.NATIONAL_TOTAL_ACTAS)
+    # A browsable acta is one with >=1 candidate crop — exactly documents.n_candidates>0 (the
+    # precomputed column). Count it off the 122k-row documents table via idx_doc_browse instead of
+    # a COUNT(DISTINCT) + JOIN scan over the 1.5M-row vote_fields table (which dominated /browse).
     row = conn.execute(
-        "SELECT COUNT(DISTINCT vf.document_id) AS synced, "
-        "       MIN(d.processing_timestamp) AS first_ts, "
-        "       MAX(d.processing_timestamp) AS last_ts "
-        "FROM vote_fields vf JOIN documents d ON d.document_id = vf.document_id "
-        "WHERE vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL"
+        "SELECT COUNT(*) AS synced, "
+        "       MIN(processing_timestamp) AS first_ts, "
+        "       MAX(processing_timestamp) AS last_ts "
+        "FROM documents WHERE n_candidates>0"
     ).fetchone()
     synced = min(row["synced"] or 0, total)
     pct = round(synced * 100 / total, 1)
@@ -327,12 +558,36 @@ def create_app(
 ) -> FastAPI:
     results_db = Path(results_db)
     output_dir = Path(output_dir).resolve()
+    # Backfill the precomputed n_candidates column if this snapshot lacks it, so /browse never
+    # 500s on `no such column`. No-op for an up-to-date DB; runs again after each db-sync swap.
+    ensure_n_candidates(results_db)
+    # ...then the /browse indexes (raw snapshots ship without them -> full scans/sorts per page).
+    ensure_browse_indexes(results_db)
+    # Code -> human-name lookup, loaded once into memory. A snapshot that ships codes-only gets
+    # names resolved at render time (see enrich_doc_names) instead of duplicating them per row.
+    geo = load_geo_names()
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
     poll_cfg = poll or PollConfig.from_config()
     community = make_store(community_db or (output_dir / "community.sqlite"))
     # Durable vote path: when SQS is configured, votes are enqueued (worker drains to
     # Postgres) instead of written synchronously. None => synchronous write (local/tests).
     vote_publisher = make_publisher()
+
+    # /browse reads the same global crowd aggregates on every hit — acta_popularity (twice:
+    # directly and inside the hot billboard), high_voted_fields, and the hot-actas payload. On the
+    # Aurora (RDS Data API) backend each is a network round-trip, so one page made ~5 of them and a
+    # cold/paused cluster cold-started on the first. Cache them in-process for a few seconds: the
+    # directory tolerates slight staleness, collapsing per-request Aurora traffic to ~1 call / TTL.
+    _agg_cache: dict[str, tuple[float, Any]] = {}
+
+    def _agg_cached(key: str, fn, ttl: float = 45.0):
+        now = time.monotonic()
+        hit = _agg_cache.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+        val = fn()
+        _agg_cache[key] = (now, val)
+        return val
 
     # cid -> {field_key, crop_rel, document_id} is an immutable, append-only mapping (a cid is
     # registered when the feed surfaces it, well before it can be voted on), so resolving it
@@ -359,7 +614,14 @@ def create_app(
 
             async def _pull() -> str | None:
                 # Returns the new sha when a fresh snapshot was swapped in, else None.
-                return await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
+                sha = await asyncio.to_thread(refresh_db_once, config.CDN_BASE_URL, results_db)
+                if sha:
+                    # A freshly pulled snapshot might predate the n_candidates column — backfill
+                    # it before serving so /browse stays on the fast precomputed path. (Geo names
+                    # need no per-swap work: they resolve from the in-memory lookup at render.)
+                    await asyncio.to_thread(ensure_n_candidates, results_db)
+                    await asyncio.to_thread(ensure_browse_indexes, results_db)
+                return sha
 
             async def _sync_loop() -> None:
                 while True:
@@ -642,7 +904,7 @@ def create_app(
                 opts = [
                     {"value": r["municipality_code"] or r["municipality_name"],
                      "label": f"{r['municipality_code'] or ''} {r['municipality_name'] or ''}".strip()}
-                    for r in _municipios(db, department)
+                    for r in _municipios(db, department, geo)
                 ]
             else:
                 opts = []
@@ -693,7 +955,7 @@ def create_app(
         offset = (page - 1) * BROWSE_ACTAS_PER_PAGE
         region_order = "ORDER BY d.department_code, d.document_id"
         with conn() as db:
-            popularity = community.acta_popularity()
+            popularity = _agg_cached("popularity", community.acta_popularity)
             if review:
                 # Only actas the crowd has voted on, most-voted first. A bounded set, so
                 # order + paginate in Python.
@@ -732,26 +994,45 @@ def create_app(
                         [*rest_params, rest_count, max(0, offset - len(voted_rows))],
                     ).fetchall()
                 doc_rows = list(head) + list(rest_rows)
-            departments = _departments(db)
+            # "Ver todas" (review) renders the same billboard tile (thumb + loc + tally) as the
+            # "Actas más reportadas" strip — build a card per acta on this page (bounded to
+            # BROWSE_ACTAS_PER_PAGE).
+            voted_cards = []
+            if review:
+                voted_cards = [
+                    c for c in (
+                        _acta_card(db, r["document_id"], popularity.get(r["document_id"], 0), r)
+                        for r in doc_rows
+                    ) if c
+                ]
+            departments = _departments(db, geo)
             # Dependent drop-downs: each level is populated only once its parent is chosen.
-            municipios = _municipios(db, department)
+            municipios = _municipios(db, department, geo)
             zonas = _zonas(db, department, municipality)
             puestos = _puestos(db, department, municipality, zone)
-            progress = compute_sync_progress(db)
-        high_voted_docs = {k.rsplit(":", 3)[0] for k in community.high_voted_fields(config.HIGH_VOTE_THRESHOLD)}
+            progress = _agg_cached("sync_progress", lambda: compute_sync_progress(db))
+        high_voted_docs = {k.rsplit(":", 3)[0] for k in _agg_cached(
+            "high_voted", lambda: community.high_voted_fields(config.HIGH_VOTE_THRESHOLD))}
         actas = [
             {
-                "doc": r,
+                # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
+                "doc": enrich_doc_names(r, geo),
                 "n_candidates": r["n_candidates"],
                 "high_voted": r["document_id"] in high_voted_docs,
             }
             for r in doc_rows
         ]
+        # The community billboard (most-reported ACTAS) heads the directory on the first,
+        # unfiltered page — it's the social proof / "look what people found" hook. Skip it on
+        # deeper pages and the review view (which is itself a most-voted list).
+        hot_actas = _agg_cached("hot_actas", _hot_actas_payload) if (page == 1 and not review) else []
         return templates.TemplateResponse(
             request,
             "browse.html",
             {
                 "actas": actas,
+                "voted_cards": voted_cards,
+                "hot_actas": hot_actas,
                 "progress": progress,
                 "departments": departments,
                 "municipios": municipios,
@@ -789,11 +1070,17 @@ def create_app(
         # its PUBLIC community tallies. Voting happens only in the swipe feed (/votar) — this
         # page no longer casts votes, it just displays what the crowd has said.
         with conn() as db:
-            doc = db.execute(
+            doc_row = db.execute(
                 "SELECT * FROM documents WHERE document_id=?", (document_id,)
             ).fetchone()
-            if not doc:
+            if not doc_row:
                 raise HTTPException(status_code=404, detail="acta no encontrada")
+            # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
+            doc = enrich_doc_names(doc_row, geo)
+            # Likewise, a codes-only snapshot ships official_lookup_url NULL — rebuild the link
+            # to the Registraduría's PDF from the bundled per-acta hash map (template unchanged).
+            if not doc.get("official_lookup_url"):
+                doc["official_lookup_url"] = official_url_for(doc.get("document_id"))
             frows = db.execute(
                 """
                 SELECT vf.page_number, vf.row_number, vf.section, vf.candidate_number,
@@ -863,10 +1150,11 @@ def create_app(
                 "turnstile_sitekey": poll_cfg.turnstile_sitekey if turnstile_on else "",
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/votar",
-                "page_title": "Vota las casillas — Veeduría ciudadana E-14 2026",
+                "page_title": "Marca las casillas alteradas — Veeduría ciudadana E-14 2026",
                 "meta_description": (
-                    "Mira casillas de votos escritas a mano, al azar y sin saber de qué mesa "
-                    "son, y vota si se ven bien o extrañas. Veeduría ciudadana elecciones 2026."
+                    "Revisa una mesa completa: mira las casillas de votos escritas a mano, sin "
+                    "saber de qué mesa son, y marca las que se vean alteradas. Veeduría "
+                    "ciudadana elecciones Colombia 2026."
                 ),
             },
         )
@@ -944,32 +1232,178 @@ def create_app(
         skip = {c for c in exclude.split(",") if c}
         return {"items": _feed_payload(n, skip)}
 
+    def _acta_deck_payload(exclude_docs: set[str] | None = None) -> list[dict]:
+        """All candidate crops of ONE randomly-picked acta, shuffled and anonymized.
+
+        Powers the grid-voting page: the contributor sees every casilla of a single mesa
+        at once (so the whole acta gets reviewed in one pass) WITHOUT learning which mesa
+        it is — the response carries only opaque cids + image urls, never the document id,
+        location or candidate names. Picks the acta the same cheap random-PK way the feed
+        samples crops (a few index seeks, snappy even on a cold page cache); see
+        [[_feed_payload]]. ``exclude_docs`` is unused server-side today but lets a caller
+        steer away from a just-served acta. Registers every cid so /c/{cid} and
+        /api/vote-batch can resolve them.
+        """
+        exclude_docs = exclude_docs or set()
+        with conn() as db:
+            maxid = db.execute("SELECT max(id) AS m FROM vote_fields").fetchone()["m"] or 0
+            document_id = None
+            attempts = 0
+            while document_id is None and maxid and attempts < 12:
+                attempts += 1
+                ids = [random.randint(1, maxid) for _ in range(8)]
+                placeholders = ",".join("?" * len(ids))
+                rows = db.execute(
+                    f"SELECT document_id FROM vote_fields WHERE id IN ({placeholders}) "
+                    f"AND row_type='candidate' AND raw_crop_path IS NOT NULL",
+                    ids,
+                ).fetchall()
+                for r in rows:
+                    if r["document_id"] not in exclude_docs:
+                        document_id = r["document_id"]
+                        break
+            if document_id is None:
+                return []
+            frows = db.execute(
+                "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
+                "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "
+                "ORDER BY page_number, row_number",
+                (document_id,),
+            ).fetchall()
+        reg: list[tuple[str, str, str, str]] = []
+        items: list[dict] = []
+        for fr in frows:
+            fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
+            cid = crop_id(poll_cfg.form_token_secret, fkey)
+            reg.append((cid, fkey, fr["raw_crop_path"], document_id))
+            items.append({"cid": cid, "img_url": f"/c/{cid}"})
+        community.register_cids(reg)
+        random.shuffle(items)  # break ballot order so position can't hint the candidate
+        return items
+
+    @app.get("/api/acta-deck")
+    async def api_acta_deck():
+        # One random anonymized acta as a grid of casillas. No acta id / location ever leaks.
+        return {"items": _acta_deck_payload()}
+
     def _hot_crops_payload() -> list[dict]:
-        """Resolve the hot-crop ranking into anonymized billboard cards with public tallies."""
+        """Resolve the hot-crop ranking into public billboard cards.
+
+        Unlike the swipe deck, the billboard is intentionally *de-anonymized*: the published
+        tally is public and a card links to its acta so people can investigate. Only the
+        voting act stays anonymous (no per-voter identity is ever exposed). Each item carries
+        the crop image, its acta ``document_id`` + a location label, and the public tallies.
+        """
         hot = community.hot_crops(HOTLIST_SIZE)
         if not hot:
             return []
         keys = [h["field_key"] for h in hot]
         with conn() as db:
-            crop_by_key: dict[str, tuple[str, str]] = {}
+            meta_by_key: dict[str, dict] = {}
             for fkey in keys:
                 looked = lookup_candidate_appeal(db, fkey)
-                if looked:
-                    doc_id = fkey.rsplit(":", 3)[0]
-                    crop_by_key[fkey] = (looked[0], doc_id)
+                if not looked:
+                    continue
+                doc_id = fkey.rsplit(":", 3)[0]
+                doc = db.execute(
+                    "SELECT department_name, department_code, municipality_name, mesa "
+                    "FROM documents WHERE document_id=?",
+                    (doc_id,),
+                ).fetchone()
+                loc = doc_id
+                if doc:
+                    loc = " · ".join(x for x in (
+                        doc["department_name"] or doc["department_code"],
+                        doc["municipality_name"],
+                        f"mesa {doc['mesa']}" if doc["mesa"] else None,
+                    ) if x) or doc_id
+                meta_by_key[fkey] = {"crop_rel": looked[0], "document_id": doc_id, "loc": loc}
         out = []
         for h in hot:
-            cr = crop_by_key.get(h["field_key"])
-            if not cr:
+            m = meta_by_key.get(h["field_key"])
+            if not m:
                 continue
-            cid = cid_for(h["field_key"], cr[0], cr[1])
-            out.append({"cid": cid, "img_url": f"/c/{cid}",
-                        "good": h["good"], "strange": h["strange"]})
+            # cid_for registers the cid so /c/{cid} resolves the image without exposing the path.
+            cid = cid_for(h["field_key"], m["crop_rel"], m["document_id"])
+            out.append({
+                "cid": cid,
+                "img_url": crop_cdn_url(m["crop_rel"], config.CDN_BASE_URL) or f"/c/{cid}",
+                "document_id": m["document_id"],
+                "loc": m["loc"],
+                "good": h["good"],
+                "strange": h["strange"],
+            })
+        return out
+
+    def _acta_card(db, doc_id: str, reporters: int, doc_row=None) -> dict | None:
+        """One billboard-style card for an acta: a representative thumbnail (its most-flagged
+        casilla), a location label, and a crowd tally (distinct reporters + how many casillas were
+        flagged). Shared by the public billboard (``_hot_actas_payload``) and the
+        ``/browse?review=1`` ("Ver todas") list so both render the identical tile. Pass ``doc_row``
+        to reuse a row already fetched (the review list already has it) and skip the geo lookup.
+        """
+        if doc_row is None:
+            doc_row = db.execute(
+                "SELECT department_name, department_code, municipality_name, municipality_code, "
+                "zone, puesto, mesa, place_name FROM documents WHERE document_id=?",
+                (doc_id,),
+            ).fetchone()
+        if not doc_row:
+            return None
+        doc = enrich_doc_names(doc_row, geo)  # fill missing names from the lookup
+        frows = db.execute(
+            "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
+            "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "
+            "ORDER BY page_number, row_number",
+            (doc_id,),
+        ).fetchall()
+        if not frows:
+            return None
+        fkeys = [field_key_of(doc_id, r["page_number"], r["row_number"], r["section"]) for r in frows]
+        counts = community.counts_among(fkeys)
+        # Thumbnail = the acta's most-flagged casilla; tally = how many casillas got flagged.
+        best = max(range(len(frows)), key=lambda i: counts[fkeys[i]]["strange"])
+        flagged = sum(1 for k in fkeys if counts[k]["strange"] > 0)
+        loc = " · ".join(x for x in (
+            doc["department_name"] or doc["department_code"],
+            doc["municipality_name"],
+            f"mesa {doc['mesa']}" if doc["mesa"] else None,
+        ) if x) or doc_id
+        crop_rel = frows[best]["raw_crop_path"]
+        img = crop_cdn_url(crop_rel, config.CDN_BASE_URL) or ("/crop?path=" + quote(crop_rel))
+        return {
+            "document_id": doc_id,
+            "img_url": img,
+            "loc": loc,
+            "place_name": doc["place_name"],
+            "reporters": reporters,
+            "flagged": flagged,
+            "n_candidates": len(frows),
+        }
+
+    def _hot_actas_payload() -> list[dict]:
+        """Most-reported ACTAS for the public billboard — one card per mesa, not per crop.
+
+        Ranks actas by how many distinct people flagged anything in them (``acta_popularity`` —
+        the same crowd signal the ``/browse?review=1`` list uses, available on both the SQLite and
+        Aurora stores), then builds one ``_acta_card`` per top acta. De-anonymized on purpose: the
+        billboard links straight to the acta so people can investigate. Bounded to HOTLIST_SIZE.
+        """
+        pop = _agg_cached("popularity", community.acta_popularity)
+        if not pop:
+            return []
+        top = sorted(pop.items(), key=lambda kv: kv[1], reverse=True)[:HOTLIST_SIZE]
+        out: list[dict] = []
+        with conn() as db:
+            for doc_id, reporters in top:
+                card = _acta_card(db, doc_id, reporters)
+                if card:
+                    out.append(card)
         return out
 
     @app.get("/api/billboard")
     async def api_billboard():
-        # Public, anonymized leaderboard of the most-voted crops (counts shown).
+        # Public leaderboard of the most-reported crops (tallies + acta link shown).
         return {"items": _hot_crops_payload()}
 
     @app.get("/api/acta-crops")
@@ -1091,6 +1525,65 @@ def create_app(
             tally = (await asyncio.to_thread(community.counts_among, [field_key]))[field_key]
         return _flag_response(
             {"ok": True, "good": tally["good"], "strange": tally["strange"]}, 200, sid, new_sid
+        )
+
+    @app.post("/api/vote-batch")
+    async def api_vote_batch(request: Request, payload: dict = Body(...)):
+        """Cast a whole acta's worth of votes at once: ``{strange:[cid...], good:[cid...]}``.
+
+        The grid-voting page (/votar) shows every casilla of one anonymized mesa; the
+        contributor marks the ones that look altered and sends. Marked cids become 'strange'
+        flags, the rest 'good' (appeal) votes. Same anti-abuse path as the single /api/vote
+        (origin, honeypot/form-token, optional Turnstile), but the rate limiter is charged
+        ONCE for the whole submit — a normal full acta is ~10-20 crops and must not exhaust
+        the token bucket. Duplicate votes are deduped downstream; a repeat submit is harmless.
+        """
+        strange = payload.get("strange") or []
+        good = payload.get("good") or []
+        if not isinstance(strange, list) or not isinstance(good, list):
+            raise HTTPException(status_code=400, detail="strange and good must be lists of cids")
+        # Bound the batch so one submit can't enqueue an unbounded amount of work.
+        strange = [str(c) for c in strange][:80]
+        good = [str(c) for c in good][:80]
+
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+
+        if not _origin_allowed(request):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
+        # One rate charge per submit (not per crop): a full-acta batch is one contribution.
+        if not await asyncio.to_thread(
+            community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
+        ):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        bot = bot_check(payload, sid, poll_cfg)
+        if bot == "honeypot":
+            return _flag_response({"ok": True, "strange": 0, "good": 0}, 200, sid, new_sid)
+        if bot:
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        if poll_cfg.turnstile_enabled and not verify_turnstile(
+            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
+        ):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+
+        async def record(cid: str, value: str) -> bool:
+            row = await asyncio.to_thread(resolve_cid_cached, cid)
+            if not row:
+                return False
+            field_key = row["field_key"]
+            if vote_publisher is not None:
+                await asyncio.to_thread(vote_publisher.publish, field_key, token, value)
+            elif value == "strange":
+                await asyncio.to_thread(community.record_flag, field_key, token)
+            else:
+                await asyncio.to_thread(community.record_appeal, field_key, token)
+            return True
+
+        n_strange = sum([await record(c, "strange") for c in strange])
+        n_good = sum([await record(c, "good") for c in good])
+        return _flag_response(
+            {"ok": True, "strange": n_strange, "good": n_good}, 200, sid, new_sid
         )
 
     return app

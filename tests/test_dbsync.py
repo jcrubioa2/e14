@@ -239,6 +239,61 @@ def test_publish_db_refuses_to_shrink_live_db(tmp_path: Path) -> None:
     assert info2 is not None and not info2.get("guarded")
 
 
+def test_publish_db_allows_smaller_bytes_when_acta_count_holds(tmp_path: Path) -> None:
+    """Regression: a slimmer-but-complete snapshot (fewer bytes, same/more actas) must
+    publish. The guard keys on acta count, not raw bytes, so a schema slim-down never trips it."""
+    out = tmp_path / "out"
+    _make_db(out / "results" / "results.sqlite", 60)  # 60 actas, tiny in bytes
+
+    class _OkS3:
+        def __init__(self) -> None:
+            # New-style live pointer: 100 actas, but a huge raw_size from an un-slimmed build.
+            self.objects = {dbsync.POINTER_KEY: json.dumps(
+                {"key": "db/results-big.sqlite.gz", "sha256": "a" * 64,
+                 "size": 60_000_000, "raw_size": 800_000_000, "n_docs": 100}).encode()}
+
+        def get_object(self, Bucket, Key):  # noqa: N803
+            return {"Body": type("B", (), {"read": lambda s: self.objects[Key]})()}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _OkS3()
+    info = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    # 60 actas >= 0.5*100, so it publishes despite being a fraction of the live bytes.
+    assert info is not None and not info.get("guarded")
+    assert info["n_docs"] == 60
+    pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
+    assert pointer["n_docs"] == 60  # pointer now carries the count for future count-based guards
+
+
+def test_publish_db_refuses_when_acta_count_drops(tmp_path: Path) -> None:
+    """Count-based guard: a real drop in actas (wrong --output-dir / stub) is still refused."""
+    out = tmp_path / "out"
+    _make_db(out / "results" / "results.sqlite", 40)  # 40 actas
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects = {dbsync.POINTER_KEY: json.dumps(
+                {"key": "db/results-big.sqlite.gz", "sha256": "a" * 64,
+                 "size": 60_000_000, "raw_size": 800_000_000, "n_docs": 100}).encode()}
+
+        def get_object(self, Bucket, Key):  # noqa: N803
+            return {"Body": type("B", (), {"read": lambda s: self.objects[Key]})()}
+
+        def upload_file(self, *a, **k):
+            raise AssertionError("must not upload a DB that drops actas")
+
+        def put_object(self, *a, **k):  # noqa: N803
+            raise AssertionError("must not flip the pointer to a DB that drops actas")
+
+    info = dbsync.publish_db(out, bucket="b", client=_FakeS3(), verbose=False)
+    assert info is not None and info.get("guarded") is True  # 40 < 0.5*100
+
+
 def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) -> None:
     src_dir = tmp_path / "out"
     _make_db(src_dir / "results" / "results.sqlite", 2)
@@ -259,6 +314,7 @@ def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) ->
     assert info["key"] in s3.objects
     pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
     assert pointer["sha256"] == info["sha256"] and pointer["key"] == info["key"]
+    assert pointer["n_docs"] == info["n_docs"] == 2  # count recorded for the count-based guard
 
 
 def test_build_serving_db_drops_fat_columns_and_tables(tmp_path: Path) -> None:

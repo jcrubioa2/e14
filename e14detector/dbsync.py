@@ -201,9 +201,14 @@ def publish_db(
     candidate crops are all in the upload manifest. Returns None if that frontier is empty
     (nothing safe to publish yet) so the loop can simply wait.
 
-    Guard: refuses to flip the live pointer to a DB drastically smaller (<50% raw size)
-    than the one currently published, unless ``allow_shrink``. This prevents a misconfigured
-    run (e.g. wrong --output-dir pointing at a stub DB) from nuking the live national DB.
+    Guard: refuses to flip the live pointer to a DB that holds drastically fewer actas
+    (<50% of the live ``n_docs``) than the one currently published, unless ``allow_shrink``.
+    This prevents a misconfigured run (e.g. wrong --output-dir pointing at a stub DB) from
+    nuking the live national DB. The count — not raw bytes — is the real "did we lose actas"
+    signal: a schema slim-down legitimately halves the bytes while keeping every acta, so a
+    byte-size guard would false-trip on it. Legacy pointers written before ``n_docs`` existed
+    fall back to the old byte heuristic (which fires at most once: the gated publish writes
+    ``n_docs``, after which the guard is permanently count-based).
     """
     src = Path(output_dir) / "results" / "results.sqlite"
     if not src.exists():
@@ -229,6 +234,13 @@ def publish_db(
                 return None  # nothing safe to publish yet
         digest = _sha256(snap)  # sha of the DECOMPRESSED db (what the reader installs)
         raw_size = snap.stat().st_size
+        # Acta count is the guard's real signal (invariant to schema slimming). In
+        # --only-uploaded mode this is the kept frontier; otherwise the whole registry.
+        _c = sqlite3.connect(snap)
+        try:
+            n_docs = _c.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        finally:
+            _c.close()
         key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
         # Inspect the currently-published pointer for the unchanged-skip and shrink guard.
         try:
@@ -240,16 +252,32 @@ def publish_db(
                 if verbose:
                     print("publish-db: unchanged since last publish; skipping upload", flush=True)
                 return {"key": key, "sha256": digest, "size": cur.get("size", 0),
-                        "kept": kept if only_uploaded else None, "skipped": True}
+                        "n_docs": n_docs, "kept": kept if only_uploaded else None, "skipped": True}
+            cur_docs = cur.get("n_docs")
             cur_raw = cur.get("raw_size", 0)
-            if not allow_shrink and cur_raw and raw_size < 0.5 * cur_raw:
-                msg = (f"publish-db: REFUSING to publish — new DB ({raw_size/1e6:.0f} MB) is "
-                       f"<50% of the live DB ({cur_raw/1e6:.0f} MB). Wrong --output-dir? "
-                       f"Pass allow_shrink=True to override.")
+            guard_msg = None
+            if not allow_shrink:
+                if cur_docs:
+                    # Count-based guard: refuse only on a real drop in actas. Bytes ignored,
+                    # so a slimmer-but-complete snapshot publishes normally.
+                    if n_docs < 0.5 * cur_docs:
+                        guard_msg = (f"publish-db: REFUSING to publish — new DB has {n_docs} acta(s), "
+                                     f"<50% of the live DB's {cur_docs}. Wrong --output-dir? "
+                                     f"Pass allow_shrink=True to override.")
+                elif cur_raw and raw_size < 0.5 * cur_raw:
+                    # Legacy pointer without n_docs (one-time migration): fall back to bytes.
+                    # A slim-down can legitimately trip this once; verify the acta count, then
+                    # override with --allow-shrink. The resulting publish records n_docs, so
+                    # subsequent runs are guarded on count and never false-trip on size again.
+                    guard_msg = (f"publish-db: REFUSING to publish — new DB ({raw_size/1e6:.0f} MB) is "
+                                 f"<50% of the live DB ({cur_raw/1e6:.0f} MB) and the live pointer "
+                                 f"predates acta-count tracking. If this is a slim-down (acta count "
+                                 f"OK), pass allow_shrink=True once to override.")
+            if guard_msg:
                 if verbose:
-                    print(msg, flush=True)
+                    print(guard_msg, flush=True)
                 return {"key": key, "sha256": digest, "size": 0, "raw_size": raw_size,
-                        "kept": kept if only_uploaded else None, "guarded": True}
+                        "n_docs": n_docs, "kept": kept if only_uploaded else None, "guarded": True}
         # gzip the snapshot — a paths/metadata DB (mostly NULL columns + repetitive crop
         # paths) compresses ~10x, so the upload is far smaller and cycles stay short.
         gz = Path(str(snap) + ".gz")
@@ -268,12 +296,13 @@ def publish_db(
         )
         # ... then flip the pointer last (never cache it).
         pointer = json.dumps({"key": key, "sha256": digest, "size": gz_size,
-                              "raw_size": raw_size, "ts": int(time.time())})
+                              "raw_size": raw_size, "n_docs": n_docs, "ts": int(time.time())})
         client.put_object(
             Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
-    return {"key": key, "sha256": digest, "size": gz_size, "kept": kept if only_uploaded else None}
+    return {"key": key, "sha256": digest, "size": gz_size, "n_docs": n_docs,
+            "kept": kept if only_uploaded else None}
 
 
 # --- pointer status (reader-side, stdlib) ----------------------------------
@@ -296,6 +325,7 @@ def pointer_status(cdn_base: str, *, timeout: float = 10.0) -> dict | None:
             "sha": (p.get("sha256") or "")[:12],
             "gz_size": p.get("size", 0),
             "raw_size": p.get("raw_size", 0),
+            "n_docs": p.get("n_docs", 0),
             "ts": ts,
             "age_secs": int(time.time()) - ts if ts else None,
         }
