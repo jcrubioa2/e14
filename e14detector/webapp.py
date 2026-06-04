@@ -996,15 +996,19 @@ def create_app(
                 doc_rows = list(head) + list(rest_rows)
             # "Ver todas" (review) renders the same billboard tile (thumb + loc + tally) as the
             # "Actas más reportadas" strip — build a card per acta on this page (bounded to
-            # BROWSE_ACTAS_PER_PAGE).
+            # BROWSE_ACTAS_PER_PAGE). Each card costs a vote_fields lookup + a counts_among
+            # round-trip, so cache the page's cards for the same 45s window as the other crowd
+            # aggregates (keyed by filters+page; tallies tolerate slight staleness).
             voted_cards = []
             if review:
-                voted_cards = [
+                ck = "voted_cards:" + "|".join(
+                    str(x or "") for x in (department, municipality, zone, puesto, q, page))
+                voted_cards = _agg_cached(ck, lambda: [
                     c for c in (
                         _acta_card(db, r["document_id"], popularity.get(r["document_id"], 0), r)
                         for r in doc_rows
                     ) if c
-                ]
+                ])
             departments = _departments(db, geo)
             # Dependent drop-downs: each level is populated only once its parent is chosen.
             municipios = _municipios(db, department, geo)
