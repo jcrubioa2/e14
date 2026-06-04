@@ -461,6 +461,19 @@ class CommunityStore:
             voters.setdefault(doc, set()).add(r["voter_token"])
         return {doc: len(v) for doc, v in voters.items()}
 
+    def total_reviews(self) -> int:
+        """How many mesas the community has reviewed in total — one "revisión" per completed mesa
+        (an Enviar votes on a mesa's casillas). Counted as distinct (person, mesa) pairs across both
+        vote directions, so an all-"se ve bien" submission counts too and re-reviewing the same mesa
+        doesn't double-count. The mesa id is the field key minus its last 3 (page:row:section) parts,
+        matching ``acta_popularity``."""
+        seen: set[tuple[str, str]] = set()
+        with self._lock:
+            for tbl in ("flags", "appeals"):
+                for r in self.conn.execute(f"SELECT field_key, voter_token FROM {tbl}"):
+                    seen.add((r["voter_token"], r["field_key"].rsplit(":", 3)[0]))
+        return len(seen)
+
     def published_keys(self) -> list[str]:
         """All field keys currently published as strange (few — only confirmed ones)."""
         with self._lock:

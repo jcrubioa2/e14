@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <meta name="description" content="{{ meta_description }}">
+  <link rel="canonical" href="{{ canonical }}">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="es_CO">
+  <meta property="og:site_name" content="Veeduría ciudadana E-14 2026">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ meta_description }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{{ page_title }}">
+  <meta name="twitter:description" content="{{ meta_description }}">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"WebSite","name":"Veeduría ciudadana E-14 2026","url":"{{ site_url }}","inLanguage":"es-CO","description":"{{ meta_description }}"}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      --paper:#FBFAF6; --paper-2:#F2EFE6; --card:#FFFFFF;
+      --ink:#1C1A15; --ink-soft:#6E695E; --ink-faint:#9A9488;
+      --line:#E6E1D4; --line-strong:#D8D2C2;
+      --red:#D93A28; --red-deep:#A82A1B; --red-tint:#FCEDE9; --red-line:#F0B5AB;
+      --green:#2F7D52;
+      --accent:#161410; --link:#0E6E64;
+      --r:15px;
+      --shadow:0 1px 1px rgba(28,26,21,.03), 0 6px 20px -8px rgba(28,26,21,.14);
+    }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html, body { margin:0; }
+    body {
+      font-family:"Hanken Grotesk", system-ui, sans-serif; color:var(--ink);
+      background-color:var(--paper);
+      background-image:
+        radial-gradient(120% 70% at 100% -8%, rgba(217,58,40,.05), transparent 55%),
+        radial-gradient(circle at 1px 1px, rgba(28,26,21,.045) 1px, transparent 0);
+      background-size:auto, 22px 22px; background-attachment:fixed, fixed;
+      -webkit-font-smoothing:antialiased;
+    }
+    a { color:var(--link); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .muted { color:var(--ink-faint); font-size:13px; }
+
+    header { border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.66), rgba(255,255,255,0)); }
+    header .wrap, main { max-width:1080px; margin:0 auto; padding:0 22px; }
+    header .wrap { padding-top:26px; padding-bottom:24px; }
+    .eyebrow { display:flex; align-items:center; gap:9px; font-size:11.5px; font-weight:700;
+               letter-spacing:.16em; text-transform:uppercase; color:var(--red-deep); }
+    .eyebrow .tick { width:7px; height:7px; border-radius:2px; background:var(--red); transform:rotate(45deg); }
+    h1 { margin:11px 0 0; font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:40px;
+         line-height:1.03; letter-spacing:-.015em; max-width:18ch; }
+    h1 em { font-style:italic; color:var(--red-deep); }
+    .lede { margin:14px 0 0; color:var(--ink-soft); font-size:15.5px; line-height:1.55; max-width:66ch; }
+
+    main { padding-top:26px; padding-bottom:48px; }
+    section { margin-bottom:26px; }
+    .sec-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:5px; }
+    .sec-head h2 { margin:0; font-family:"Fraunces", serif; font-weight:600; font-size:23px; letter-spacing:-.01em; }
+    .sec-head a { font-size:13.5px; font-weight:700; white-space:nowrap; }
+    .sec-sub { color:var(--ink-soft); font-size:13.5px; margin:0 0 14px; }
+
+    /* Billboard — most reported actas */
+    .board-list { display:grid; grid-template-columns:repeat(auto-fill, minmax(255px, 1fr)); gap:13px; }
+    /* The outer left bar scales with the acta's "extraña" tone (--flag, 0..1): faint when the crowd
+       barely leans extraña, full red when it overwhelmingly does. */
+    .board-item { display:flex; gap:13px; align-items:center; border:1px solid var(--line);
+                  border-left:3px solid rgba(217,58,40, calc(var(--flag, 0)));
+                  border-radius:13px; padding:12px; background:var(--card); color:inherit; box-shadow:var(--shadow);
+                  transition:transform .14s, box-shadow .14s, border-color .14s; }
+    .board-item:hover { transform:translateY(-2px); text-decoration:none; border-color:var(--red-line);
+                  border-left-color:rgba(217,58,40, calc(var(--flag, 0)));
+                  box-shadow:0 2px 2px rgba(168,42,27,.04), 0 16px 30px -14px rgba(168,42,27,.34); }
+    .board-thumb { flex:0 0 86px; height:60px; border:1px solid var(--line); border-radius:9px; background:#fff;
+                  display:flex; align-items:center; justify-content:center; overflow:hidden; }
+    .board-thumb img { max-width:100%; max-height:100%; object-fit:contain; }
+    .board-info { min-width:0; }
+    .board-loc { font-size:13.5px; font-weight:700; line-height:1.25; overflow:hidden; text-overflow:ellipsis;
+                 display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+    .board-tally { font-size:12.5px; color:var(--ink-soft); margin-top:4px; }
+    .board-tally b { color:var(--red-deep); font-variant-numeric:tabular-nums; }
+
+    /* Pager + count line under the billboard */
+    .board-foot { display:flex; align-items:baseline; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-top:18px; }
+    .count-line { color:var(--ink-soft); font-size:13px; }
+    .pager { display:flex; gap:12px; justify-content:flex-end; }
+    .pager a { font-weight:700; font-size:14px; }
+
+    /* Reserved slot for future statistics */
+    .stats-soon { border:1px dashed var(--line-strong); border-radius:14px; padding:20px 18px; background:rgba(255,255,255,.4);
+                  color:var(--ink-faint); font-size:13.5px; line-height:1.55; }
+    .stats-soon b { color:var(--ink-soft); font-weight:700; }
+
+    .empty { text-align:center; color:var(--ink-soft); padding:48px 18px; font-size:15px; }
+    .empty .big { font-family:"Fraunces", serif; font-size:21px; color:var(--ink); display:block; margin-bottom:6px; }
+
+    @media (max-width:760px) { h1 { font-size:32px; } }
+    @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+  </style>
+</head>
+<body>
+  {% include "_appbar.html" %}
+  {% include "_intro_modal.html" %}
+  <header>
+    <div class="wrap">
+      <div class="eyebrow"><span class="tick"></span> Veeduría ciudadana · E-14</div>
+      <h1>Lo que la comunidad ha <em>reportado</em></h1>
+      <p class="lede">Reportes a nivel nacional: las mesas donde m&aacute;s gente ha marcado casillas como extra&ntilde;as. Una mirada en conjunto a lo que la veedur&iacute;a ciudadana est&aacute; encontrando.</p>
+    </div>
+  </header>
+
+  <main>
+    {% if hot_actas %}
+    <section aria-labelledby="board-h">
+      <div class="sec-head">
+        <h2 id="board-h">Actas m&aacute;s reportadas como extra&ntilde;as</h2>
+        <a href="/buscar?review=1">Ver en el buscador &rarr;</a>
+      </div>
+      <p class="sec-sub">Las mesas donde m&aacute;s gente ha marcado casillas como extra&ntilde;as. Toca una para abrir su acta.</p>
+      <div class="board-list">
+        {% for a in hot_actas %}
+        <a class="board-item" style="--flag:{{ '%.3f'|format(a.flag_level) }}" href="/acta/{{ a.document_id }}">
+          <div class="board-thumb"><img loading="lazy" src="{{ a.img_url }}" alt="casilla reportada de esta mesa"></div>
+          <div class="board-info">
+            <div class="board-loc">{{ a.loc }}</div>
+            <div class="board-tally"><b>{{ a.reporters }}</b> persona{{ "s" if a.reporters != 1 else "" }} la reportaron &middot; <b>{{ a.flagged }}</b> casilla{{ "s" if a.flagged != 1 else "" }} marcada{{ "s" if a.flagged != 1 else "" }}</div>
+          </div>
+        </a>
+        {% endfor %}
+      </div>
+      <div class="board-foot">
+        <span class="count-line">{{ total }} acta{{ "s" if total != 1 else "" }} reportada{{ "s" if total != 1 else "" }} &middot; p&aacute;gina {{ page }} de {{ pages }}</span>
+        {% if pages > 1 %}
+        <nav class="pager" aria-label="P&aacute;ginas">
+          {% if page > 1 %}<a href="/reportes{{ '?page=' ~ (page - 1) if page - 1 > 1 else '' }}">&larr; Anterior</a>{% endif %}
+          {% if page < pages %}<a href="/reportes?page={{ page + 1 }}">Siguiente &rarr;</a>{% endif %}
+        </nav>
+        {% endif %}
+      </div>
+    </section>
+    {% else %}
+    <section>
+      <div class="empty"><span class="big">A&uacute;n no hay reportes</span>S&eacute; de las primeras personas en revisar una mesa y marcar lo que se vea extra&ntilde;o.</div>
+    </section>
+    {% endif %}
+
+    {# Future statistics (participation, per-department reports, trends) land in this section. #}
+    <section aria-labelledby="stats-h">
+      <div class="sec-head"><h2 id="stats-h">Estad&iacute;sticas</h2></div>
+      <div class="stats-soon"><b>Pr&oacute;ximamente.</b> Aqu&iacute; mostraremos estad&iacute;sticas de la veedur&iacute;a: participaci&oacute;n, reportes por departamento y tendencias a medida que crece la comunidad.</div>
+    </section>
+  </main>
+
+  {% include "_footer.html" %}
+</body>
+</html>

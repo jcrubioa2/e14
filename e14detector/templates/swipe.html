@@ -61,13 +61,23 @@
     header h1 { margin:0; font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:33px;
                 line-height:1.02; letter-spacing:-.012em; }
     header h1 em { font-style:italic; color:var(--red-deep); }
-    .browse { flex:0 0 auto; color:var(--ink); text-decoration:none; font-size:13px; font-weight:600;
-              border:1px solid var(--line-strong); border-radius:999px; padding:7px 13px; background:var(--card);
-              white-space:nowrap; transition:border-color .15s, transform .1s; }
-    .browse:hover { border-color:var(--ink-faint); transform:translateY(-1px); }
-    .sub { margin-top:13px; color:var(--ink-soft); font-size:14.5px; line-height:1.55; max-width:60ch; }
-    .sub b { color:var(--ink); font-weight:700; }
-    .sub .hl { color:var(--red-deep); font-weight:700; }
+    /* First-visit onboarding: a compact 3-step strip above the feed, dismissible and remembered
+       (localStorage) so repeat / viral visitors get the clean feed straight away. */
+    .onboard { position:relative; background:var(--card); border:1px solid var(--line); border-radius:14px;
+               padding:15px 16px 14px; box-shadow:var(--shadow); margin-bottom:18px; }
+    .onboard.is-dismissed { display:none; }
+    .onboard-head { font-size:11.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+                    color:var(--ink-faint); margin-bottom:11px; }
+    .onboard-steps { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+    .onboard-step { padding-right:6px; }
+    .onboard-step .no { font-family:"Fraunces", serif; font-weight:600; font-size:15px; color:var(--red-deep); }
+    .onboard-step b { display:block; margin:2px 0 3px; font-size:14px; }
+    .onboard-step span { color:var(--ink-soft); font-size:12.5px; line-height:1.45; }
+    .onboard-close { position:absolute; top:8px; right:9px; width:28px; height:28px; border:none; cursor:pointer;
+                     background:transparent; color:var(--ink-faint); font-size:19px; line-height:1; border-radius:8px;
+                     display:inline-flex; align-items:center; justify-content:center; transition:background .12s, color .12s; }
+    .onboard-close:hover { background:var(--paper-2); color:var(--ink); }
+    @media (max-width:560px) { .onboard-steps { grid-template-columns:1fr; gap:9px; } }
 
     main { max-width:780px; margin:0 auto; padding:18px 20px 26px; }
 
@@ -191,20 +201,46 @@
   </style>
 </head>
 <body>
+  {% include "_appbar.html" %}
+  {% include "_intro_modal.html" %}
   <header>
     <div class="head-inner">
       <div class="eyebrow"><span class="tick"></span> Veeduría ciudadana · E-14</div>
       <div class="head-top">
         <h1>Revisa una <em>mesa</em></h1>
-        <a class="browse" href="/browse">Buscar un acta &rarr;</a>
       </div>
-      <p class="sub">Estas casillas son de <b>una misma mesa</b> (no sabes cuál). Toca las que se vean <span class="hl">extrañas</span> — la casilla sigue visible para que la revises; toca de nuevo para desmarcar. Al final pulsa <b>Enviar</b>.</p>
     </div>
   </header>
 
   <div class="toast" id="toast" aria-live="polite"></div>
 
   <main>
+    <!-- First-visit "how to use": shown once, dismissible, remembered so repeat visitors skip it. -->
+    <div class="onboard" id="onboard" hidden>
+      <button class="onboard-close" id="onboard-close" type="button" aria-label="Cerrar la ayuda">&times;</button>
+      <div class="onboard-head">C&oacute;mo funciona</div>
+      <div class="onboard-steps">
+        <div class="onboard-step"><span class="no">01</span><b>Mira las casillas</b><span>Son los votos escritos a mano de una misma mesa an&oacute;nima.</span></div>
+        <div class="onboard-step"><span class="no">02</span><b>Marca las extra&ntilde;as</b><span>Toca las que se vean alteradas; toca de nuevo para desmarcar.</span></div>
+        <div class="onboard-step"><span class="no">03</span><b>Pulsa Enviar</b><span>Si ninguna se ve rara, env&iacute;ala tal cual. Aparece otra mesa.</span></div>
+      </div>
+    </div>
+    <script>
+      // Onboarding: reveal once, persist dismissal so the viral repeat visitor isn't slowed.
+      (function () {
+        var ob = document.getElementById('onboard');
+        if (!ob) return;
+        var KEY = 'e14_onboard_dismissed';
+        var dismissed = false;
+        try { dismissed = localStorage.getItem(KEY) === '1'; } catch (e) {}
+        if (!dismissed) ob.hidden = false;
+        document.getElementById('onboard-close').addEventListener('click', function () {
+          ob.classList.add('is-dismissed');
+          try { localStorage.setItem(KEY, '1'); } catch (e) {}
+        });
+      })();
+    </script>
+
     <!-- Honeypot: hidden from people, tripped by form-filling bots. -->
     <input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"
            aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
@@ -529,7 +565,8 @@
       const good = deck.map((it) => it.cid).filter((c) => !marked.has(c));
       reviewed++;
       persistReviewed();
-      renderReviewed();                  // tick the chip up immediately (count + rank + progress)
+      renderReviewed();                  // tick the personal chip up immediately (count + rank + progress)
+      if (window.e14BumpReviews) window.e14BumpReviews(1);  // and the community total in the app bar
       // On a milestone, let the rank chip's unlock toast carry the moment; otherwise a plain thanks.
       const r = rankFor(reviewed);
       if (r && r.at > lastRankAt) { lastRankAt = r.at; celebrateRank(r); }

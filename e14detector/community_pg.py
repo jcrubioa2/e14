@@ -279,6 +279,26 @@ class PgCommunityStore:
         )
         return {r["doc"]: int(r["n"]) for r in rows}
 
+    def total_reviews(self) -> int:
+        # Total mesas reviewed = distinct (person, mesa) across both vote directions (an Enviar
+        # votes on a mesa's casillas). doc = field_key minus its last 3 ':'-parts, as in
+        # acta_popularity; UNION ALL folds flags + appeals so all-"se ve bien" mesas count too.
+        rows = self._rows(
+            """
+            SELECT COUNT(*) AS n FROM (
+                SELECT DISTINCT voter_token,
+                       array_to_string(
+                           (string_to_array(field_key, ':'))
+                               [1 : array_length(string_to_array(field_key, ':'), 1) - 3],
+                           ':') AS doc
+                FROM (SELECT voter_token, field_key FROM flags
+                      UNION ALL
+                      SELECT voter_token, field_key FROM appeals) u
+            ) t
+            """
+        )
+        return int(rows[0]["n"]) if rows else 0
+
     def published_keys(self) -> list[str]:
         rows = self._rows("SELECT field_key FROM field_state WHERE published=1")
         return [r["field_key"] for r in rows]

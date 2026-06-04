@@ -1,0 +1,133 @@
+{# Shared app bar: a slim national-load progress line ABOVE a horizontal 3-tab index that
+   separates the app's three flows. Included as the first child of <body> on every public
+   page. All classes are namespaced `.appbar*` so they can't collide with each page's own
+   inline CSS; colors reference the editorial design tokens (--paper/--ink/--red/--link/--line)
+   that every public template defines in :root. Context: `active` ("revisar"|"reportes"|
+   "buscar") highlights the current tab; `progress` (optional) drives the load strip. #}
+<style>
+  .appbar-wrap { border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.18)); }
+  .appbar-inner { max-width:980px; margin:0 auto; padding:0 20px; }
+
+  /* National-load progress: findable but understated — one line of label + count, a 4px bar.
+     Kept above the tabs so it informs without being protagonist. */
+  .appbar-progress { padding:9px 0 8px; }
+  .appbar-progress-top { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+  .appbar-progress-label { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+                           font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-soft); }
+  /* Community impact: total mesas reviewed. Subtle, tabular, always in view (on every page). */
+  .appbar-reviews { flex:0 0 auto; display:inline-flex; align-items:center; gap:6px; font-size:11.5px;
+                    color:var(--ink-soft); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .appbar-reviews b { color:var(--ink); font-weight:800; }
+  .appbar-reviews-tick { width:13px; height:13px; flex:0 0 auto; border-radius:50%; background:var(--green); position:relative; }
+  .appbar-reviews-tick::after { content:""; position:absolute; left:4.5px; top:2.5px; width:3px; height:6px;
+                    border:solid #fff; border-width:0 1.5px 1.5px 0; transform:rotate(45deg); }
+  .appbar-progress-bar { height:4px; border-radius:999px; background:var(--paper-2); overflow:hidden; margin-top:6px;
+                         box-shadow:inset 0 0 0 1px rgba(28,26,21,.04); }
+  .appbar-progress-bar > span { display:block; height:100%; min-width:4px; border-radius:999px;
+                         background:linear-gradient(90deg, var(--red), var(--red-deep)); transition:width .6s cubic-bezier(.2,.7,.2,1); }
+  .appbar-progress.done .appbar-progress-bar > span { background:var(--green); }
+
+  /* Tab index: three equal links, active = ink text + red underline. Scrolls horizontally on
+     the narrowest phones (longest label is "Reportes globales") instead of wrapping. */
+  .appbar-tabs { display:flex; gap:4px; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+  .appbar-tabs::-webkit-scrollbar { display:none; }
+  .appbar-tab { flex:1 1 auto; white-space:nowrap; text-align:center; min-height:44px;
+                display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:11px 14px;
+                font-size:14px; font-weight:700; color:var(--ink-soft); text-decoration:none;
+                border-bottom:2.5px solid transparent; transition:color .14s, border-color .14s; }
+  .appbar-tab:hover { color:var(--ink); text-decoration:none; }
+  .appbar-tab.is-active { color:var(--ink); border-bottom-color:var(--red); }
+  .appbar-tab .appbar-tab-dot { width:7px; height:7px; border-radius:2px; background:var(--red);
+                transform:rotate(45deg); opacity:0; transition:opacity .14s; }
+  .appbar-tab.is-active .appbar-tab-dot { opacity:1; }
+
+  @media (max-width:480px) {
+    .appbar-reviews-more { display:none; }
+    .appbar-tab { padding:11px 12px; font-size:13.5px; }
+    .appbar-tab .appbar-tab-dot { display:none; }
+  }
+  @media (prefers-reduced-motion: reduce) { .appbar-progress-bar > span { transition:none; } }
+</style>
+<div class="appbar-wrap">
+  <div class="appbar-inner">
+    {% if progress or total_reviews %}
+    <div class="appbar-progress {% if progress and progress.complete %}done{% endif %}" aria-live="polite">
+      <div class="appbar-progress-top">
+        <span class="appbar-progress-label">{% if progress %}{% if progress.complete %}Todas las actas est&aacute;n disponibles{% else %}Cargando las actas a nivel nacional &middot; {{ progress.pct }}%{% endif %}{% endif %}</span>
+        {% if total_reviews %}
+        <span class="appbar-reviews" title="Mesas revisadas por la comunidad en total">
+          <span class="appbar-reviews-tick" aria-hidden="true"></span>
+          <b data-count="{{ total_reviews }}">{{ "{:,}".format(total_reviews).replace(",", ".") }}</b> revisiones<span class="appbar-reviews-more"> de la comunidad</span>
+        </span>
+        {% endif %}
+      </div>
+      {% if progress %}<div class="appbar-progress-bar"><span style="width: {{ progress.pct }}%"></span></div>{% endif %}
+    </div>
+    {% endif %}
+    <nav class="appbar-tabs" aria-label="Secciones">
+      <a class="appbar-tab {% if active == 'revisar' %}is-active{% endif %}" href="/votar"{% if active == 'revisar' %} aria-current="page"{% endif %}><span class="appbar-tab-dot" aria-hidden="true"></span>Revisar</a>
+      <a class="appbar-tab {% if active == 'reportes' %}is-active{% endif %}" href="/reportes"{% if active == 'reportes' %} aria-current="page"{% endif %}><span class="appbar-tab-dot" aria-hidden="true"></span>Reportes globales</a>
+      <a class="appbar-tab {% if active == 'buscar' %}is-active{% endif %}" href="/buscar"{% if active == 'buscar' %} aria-current="page"{% endif %}><span class="appbar-tab-dot" aria-hidden="true"></span>Buscar acta</a>
+    </nav>
+  </div>
+</div>
+<script>
+  // Community total counter. Two jobs: (1) on a fresh page it animates only when the value is new
+  // to this session or changed since the last page (tabs are full navigations, so without this it
+  // would re-run from 0 on every tab switch — the last shown value lives in sessionStorage). (2) It
+  // stays ALIVE for someone reviewing on /votar (who never reloads): each of their submits bumps it
+  // +1 via window.e14BumpReviews, and a light poll folds in everyone else's reviews. Reduced-motion
+  // / no-JS just show the server number.
+  (function () {
+    var el = document.querySelector('.appbar-reviews b[data-count]');
+    if (!el) return;
+    var fmt = function (n) { return Math.round(n).toLocaleString('es-CO'); };
+    var KEY = 'e14_reviews_seen';
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var shown = parseInt(el.getAttribute('data-count'), 10) || 0;  // current logical value
+    var raf = null;
+    var remember = function (v) { try { sessionStorage.setItem(KEY, String(v)); } catch (e) {} };
+
+    // Tween the displayed number from its current value to `to`, cancelling any in-flight tween.
+    function animateTo(to, dur) {
+      to = Math.max(0, Math.round(to));
+      if (to === shown) { el.textContent = fmt(to); return; }
+      var from = shown; shown = to; remember(to);
+      if (reduce) { el.textContent = fmt(to); return; }
+      if (raf) cancelAnimationFrame(raf);
+      var start = null; dur = dur || 900;
+      raf = requestAnimationFrame(function step(ts) {
+        if (start === null) start = ts;
+        var p = Math.min(1, (ts - start) / dur), eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = fmt(from + (to - from) * eased);
+        if (p < 1) raf = requestAnimationFrame(step);
+        else { el.textContent = fmt(to); raf = null; }
+      });
+    }
+
+    // Initial paint: instant if unchanged this session, otherwise ramp into the server value.
+    var target = shown, prev = null;
+    try { var s = sessionStorage.getItem(KEY); if (s !== null) prev = parseInt(s, 10); } catch (e) {}
+    if (reduce || prev === target) { el.textContent = fmt(target); remember(target); }
+    else {
+      // First view this session ramps the last stretch for momentum; a later change ramps the delta.
+      shown = (prev === null) ? Math.max(0, target - Math.min(target, 60)) : prev;
+      el.textContent = fmt(shown);
+      animateTo(target);
+    }
+
+    // Reviewer feedback: a /votar submit adds this contributor's mesa to the community total right
+    // away. Never show less than what they've already seen, even if a staler poll comes back lower.
+    window.e14BumpReviews = function (delta) { animateTo(shown + (delta || 1), 650); };
+
+    // Keep it alive for an active reviewer: fold in everyone else's reviews periodically. The server
+    // value is 300s-cached, so this is cheap; reconcile with max so optimistic bumps survive.
+    if (!reduce) setInterval(function () {
+      if (document.hidden) return;
+      fetch('/api/total-reviews', { headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) { if (d && typeof d.total === 'number') animateTo(Math.max(shown, d.total)); })
+        .catch(function () {});
+    }, 90000);
+  })();
+</script>
