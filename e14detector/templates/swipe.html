@@ -33,7 +33,7 @@
       --ink:#1C1A15; --ink-soft:#6E695E; --ink-faint:#9A9488;
       --line:#E6E1D4; --line-strong:#D8D2C2;
       --red:#D93A28; --red-deep:#A82A1B; --red-tint:#FCEDE9; --red-line:#F0B5AB;
-      --green:#2F7D52;
+      --green:#2F7D52; --gold:#C28A2B;
       --accent:#161410;             /* primary action — ink */
       --link:#0E6E64;               /* sole non-red brand hue */
       --r:15px;
@@ -71,13 +71,32 @@
 
     main { max-width:780px; margin:0 auto; padding:18px 20px 26px; }
 
-    .meta { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+    .meta { display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px; margin-bottom:16px; }
     .tag { display:inline-flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line);
            border-radius:999px; padding:6px 13px 6px 11px; font-size:13px; font-weight:700; color:var(--ink);
            box-shadow:var(--shadow); }
     .tag .n { font-variant-numeric:tabular-nums; }
     .tag .dot { width:7px; height:7px; border-radius:50%; background:var(--link); box-shadow:0 0 0 3px rgba(14,110,100,.14); }
-    .reviewed { color:var(--ink-faint); font-size:12.5px; font-weight:600; }
+
+    /* Reviewer rank: a small chip whose emblem, label and color upgrade at milestones (1, 5, 15,
+       40, 100, 250 mesas). A 2px progress sliver creeps toward the next unlock so the chip visibly
+       "fills" as you review; crossing a threshold pulses the chip + fires a celebratory toast. */
+    .rank { position:relative; display:inline-flex; align-items:center; gap:7px; background:var(--card);
+            border:1px solid var(--line); border-radius:999px; padding:4px 12px 6px 6px; box-shadow:var(--shadow);
+            transition:transform .25s cubic-bezier(.2,.7,.3,1); --rank:var(--link); }
+    .rank[hidden] { display:none; }
+    .rank .badge { width:20px; height:20px; border-radius:50%; flex:0 0 auto; display:inline-flex; align-items:center;
+                   justify-content:center; font-size:11px; line-height:1; color:#fff; background:var(--rank);
+                   box-shadow:0 1px 2px rgba(28,26,21,.22); transition:background .35s; }
+    .rank .name { font-size:12.5px; font-weight:800; color:var(--ink); letter-spacing:.005em; }
+    .rank .n { font-size:11.5px; font-weight:700; color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+    .rank .next { font-size:11px; font-weight:600; color:var(--ink-faint); }
+    .rank .prog { position:absolute; left:10px; right:10px; bottom:2.5px; height:2px; border-radius:2px;
+                  background:var(--line); overflow:hidden; }
+    .rank .prog i { display:block; height:100%; width:0; border-radius:2px; background:var(--rank);
+                    transition:width .55s cubic-bezier(.2,.7,.3,1), background .35s; }
+    .rank.bump { animation:rankPulse .7s cubic-bezier(.2,.7,.3,1); }
+    @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
 
     .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
     @media (max-width:470px) { .grid { grid-template-columns:repeat(2, 1fr); gap:11px; } }
@@ -165,6 +184,8 @@
              opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; }
     .toast.show { opacity:1; transform:translate(-50%,0); }
     .toast.warn { background:var(--red-deep); }
+    .toast.win { background:var(--rank, var(--link)); font-weight:700; }
+    .toast.win b { font-weight:800; }
 
     @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
   </style>
@@ -194,7 +215,7 @@
 
     <div class="meta" id="meta" hidden>
       <span class="tag"><span class="dot"></span><span class="n" id="deck-count">0</span> casillas</span>
-      <span class="reviewed" id="reviewed"></span>
+      <span class="rank" id="reviewed" hidden></span>
     </div>
 
     <!-- The skeleton grid is rendered by JS (skeleton()) with a dynamic tile count so the loading
@@ -234,10 +255,11 @@
 
     let deck = [];
     const marked = new Set();
-    let reviewed = 0;
     let loading = false;
     let sending = false;
     let lastSig = '';
+    let nextDeck = null;          // prefetched next mesa (items), or null
+    let prefetching = false;
 
     const THANKS = [
       '¡Gracias! Mesa enviada.', '¡Listo! Gracias por revisar esta mesa.',
@@ -245,6 +267,53 @@
       '¡Gracias! Vamos con la siguiente.',
     ];
     function thanks() { return THANKS[Math.floor(Math.random() * THANKS.length)]; }
+
+    // --- Reviewer rank / milestones ----------------------------------------------------
+    // The count of mesas reviewed persists across visits (localStorage) and unlocks an evolving
+    // rank. Thresholds are spaced so the early ones come quickly (momentum) and later ones reward
+    // sustained veeduría.
+    const RANKS = [
+      { at: 1,   name: 'Primera mesa',       color: 'var(--link)' },
+      { at: 5,   name: 'En marcha',          color: '#0E8C7E' },
+      { at: 15,  name: 'Veeduría constante', color: 'var(--green)' },
+      { at: 40,  name: 'Guardia del voto',   color: 'var(--gold)' },
+      { at: 100, name: 'Centinela',          color: 'var(--red)' },
+      { at: 250, name: 'Veeduría de élite',  color: 'var(--red-deep)' },
+    ];
+    function rankFor(n) { let r = null; for (const t of RANKS) { if (n >= t.at) r = t; else break; } return r; }
+    function nextRank(n) { for (const t of RANKS) { if (n < t.at) return t; } return null; }
+    function loadReviewed() { try { return parseInt(localStorage.getItem('e14_reviewed') || '0', 10) || 0; } catch (e) { return 0; } }
+    function persistReviewed() { try { localStorage.setItem('e14_reviewed', String(reviewed)); } catch (e) {} }
+
+    let reviewed = loadReviewed();
+    let lastRankAt = (rankFor(reviewed) || { at: 0 }).at;   // prime silently so a returning user isn't re-congratulated
+
+    function renderReviewed() {
+      if (reviewed <= 0) { reviewedEl.hidden = true; reviewedEl.innerHTML = ''; return; }
+      const r = rankFor(reviewed) || RANKS[0];
+      const nx = nextRank(reviewed);
+      let pct = 100;
+      if (nx) { const base = r.at; pct = Math.round(((reviewed - base) / (nx.at - base)) * 100); pct = Math.max(7, Math.min(100, pct)); }
+      reviewedEl.style.setProperty('--rank', r.color);
+      reviewedEl.title = nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas)') : '¡Nivel máximo alcanzado!';
+      reviewedEl.innerHTML =
+        '<span class="badge">★</span>' +
+        '<span class="name">' + r.name + '</span>' +
+        '<span class="n">' + reviewed + (reviewed === 1 ? ' mesa' : ' mesas') + '</span>' +
+        (nx ? '<span class="next">faltan ' + (nx.at - reviewed) + '</span>' : '') +
+        '<span class="prog"><i style="width:' + pct + '%"></i></span>';
+      reviewedEl.hidden = false;
+    }
+
+    function celebrateRank(r) {
+      reviewedEl.classList.remove('bump'); void reviewedEl.offsetWidth; reviewedEl.classList.add('bump');
+      const t = document.getElementById('toast');
+      t.style.setProperty('--rank', r.color);
+      t.innerHTML = '✦ Nivel desbloqueado · <b>' + r.name + '</b>';
+      t.classList.remove('warn'); t.classList.add('win', 'show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { t.classList.remove('show', 'win'); }, 2300);
+    }
 
     // --- Turnstile session gate ---------------------------------------------------------
     const turnstileOn = !!window.__turnstileSitekey;
@@ -379,7 +448,7 @@
 
       deckCountEl.textContent = deck.length;
       meta.hidden = false;
-      reviewedEl.textContent = reviewed ? ('· ' + reviewed + ' mesa' + (reviewed === 1 ? '' : 's') + ' revisada' + (reviewed === 1 ? '' : 's')) : '';
+      renderReviewed();
       noteEl.hidden = false;
       bar.hidden = false;
       updateCount();
@@ -398,21 +467,41 @@
       meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
     }
 
+    // One fetch of a fresh mesa, with a single retry so we don't serve the same mesa twice in a row.
+    async function fetchDeck() {
+      for (let i = 0; i < 2; i++) {
+        const res = await fetch('/api/acta-deck');
+        const data = await res.json();
+        const items = data.items || [];
+        const sig = items.map((x) => x.cid).sort().join(',');
+        if (sig !== lastSig || !items.length) { lastSig = sig; return items; }
+      }
+      return [];
+    }
+
+    // Warm the NEXT mesa while the contributor reviews the current one: fetch its deck and preload
+    // every crop so the next grid renders near-instantly (cached images => no shimmer wait).
+    async function prefetchNext() {
+      if (prefetching || nextDeck) return;
+      prefetching = true;
+      try {
+        const items = await fetchDeck();
+        nextDeck = items;
+        items.forEach((it) => { const im = new Image(); im.src = it.img_url; });
+      } catch (e) { nextDeck = null; } finally { prefetching = false; }
+    }
+
     async function loadDeck() {
       if (loading) return;
       loading = true;
       try {
-        let items = [];
-        for (let i = 0; i < 2; i++) {
-          const res = await fetch('/api/acta-deck');
-          const data = await res.json();
-          items = data.items || [];
-          const sig = items.map((x) => x.cid).sort().join(',');
-          if (sig !== lastSig || !items.length) { lastSig = sig; break; }
-        }
+        let items;
+        if (nextDeck && nextDeck.length) { items = nextDeck; nextDeck = null; }  // use the prefetched mesa
+        else { nextDeck = null; items = await fetchDeck(); }
         deck = items;
         if (!deck.length) { renderEmpty('No hay mesas disponibles por ahora.'); return; }
         renderDeck();
+        prefetchNext();                  // queue up the following mesa
       } catch (e) {
         board.innerHTML = '<div class="err">No se pudo cargar la mesa. Recarga la página para intentarlo.</div>';
         meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
@@ -439,7 +528,12 @@
       const strange = deck.map((it) => it.cid).filter((c) => marked.has(c));
       const good = deck.map((it) => it.cid).filter((c) => !marked.has(c));
       reviewed++;
-      showToast(thanks());
+      persistReviewed();
+      renderReviewed();                  // tick the chip up immediately (count + rank + progress)
+      // On a milestone, let the rank chip's unlock toast carry the moment; otherwise a plain thanks.
+      const r = rankFor(reviewed);
+      if (r && r.at > lastRankAt) { lastRankAt = r.at; celebrateRank(r); }
+      else { showToast(thanks()); }
       sendBatch(strange, good);          // optimistic: don't block the next mesa on the response
       board.innerHTML = skeleton();
       bar.hidden = true;
