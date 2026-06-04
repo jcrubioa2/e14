@@ -61,6 +61,90 @@ def make_snapshot(src_db: Path, dest: Path) -> str:
     return _sha256(dest)
 
 
+# The only columns the public vote-counting site reads from vote_fields. The detector's
+# working DB carries ~30 columns (CV scores, VLM json, debug/slot/comparison crop paths)
+# plus a cv_features table — ~2 GB the site never queries. Serving just the candidate
+# registry keeps the whole DB small enough to sit in the box's page cache, so the feed
+# stays warm. ``vlm_classification`` is kept: it's a short, mostly-NULL enum still read by
+# the appeal seed flag (lookup_candidate_appeal), and costs almost nothing.
+_SERVE_VF_COLS = (
+    "id, document_id, page_number, row_number, row_type, section, "
+    "candidate_number, candidate_name, raw_crop_path, vlm_classification"
+)
+_SERVE_VF_DDL = """
+CREATE TABLE vote_fields (
+    id INTEGER PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    page_number INTEGER NOT NULL,
+    row_number INTEGER NOT NULL,
+    row_type TEXT NOT NULL,
+    section TEXT,
+    candidate_number INTEGER,
+    candidate_name TEXT,
+    raw_crop_path TEXT,
+    vlm_classification TEXT
+)
+"""
+
+
+def build_serving_db(src_db: Path, dest: Path) -> str:
+    """Build the slim public-serving DB and return its sha256.
+
+    Copies only the candidate registry (the columns above) + the full ``documents`` table
+    (the /acta view does ``SELECT *``) + the indexes the live queries use. ``id`` values are
+    preserved verbatim so the feed's dense random-PK sampling still works. The source is
+    read read-only (``mode=ro``), so this is safe while the local crop writer runs under WAL.
+    """
+    src_db = Path(src_db)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    con = sqlite3.connect(dest, uri=True, timeout=120.0)
+    try:
+        con.execute(f"ATTACH DATABASE 'file:{src_db.resolve()}?mode=ro' AS src")
+        con.executescript(_SERVE_VF_DDL)
+        con.execute(
+            f"INSERT INTO vote_fields ({_SERVE_VF_COLS}) "
+            f"SELECT {_SERVE_VF_COLS} FROM src.vote_fields"
+        )
+        # documents copied whole, with its original schema (PK + columns) reproduced.
+        doc_sql = con.execute(
+            "SELECT sql FROM src.sqlite_master WHERE type='table' AND name='documents'"
+        ).fetchone()[0]
+        con.execute(doc_sql)
+        con.execute("INSERT INTO documents SELECT * FROM src.documents")
+        # Precompute candidate-crop count per acta so /browse never has to join+GROUP BY the
+        # 1.5M-row vote_fields table on every page load (that was ~4s). With this column the
+        # browse list is a pure documents-table query (~100k rows). Newer source DBs already
+        # carry n_candidates (maintained by DetectorStore); older ones don't — add it if
+        # missing, then recompute here so the served value is always correct and authoritative.
+        if "n_candidates" not in {r[1] for r in con.execute("PRAGMA table_info(documents)")}:
+            con.execute("ALTER TABLE documents ADD COLUMN n_candidates INTEGER NOT NULL DEFAULT 0")
+        # Build the vote_fields indexes FIRST: the n_candidates recompute below is a correlated
+        # COUNT subquery keyed on (document_id, row_type), so without this index it degrades to a
+        # full vote_fields scan per document (~113k × 1.5M rows = minutes). With it, each count is
+        # an index range probe and the whole UPDATE runs in seconds.
+        con.execute("CREATE INDEX idx_vf_doc_type ON vote_fields(document_id, row_type)")
+        con.execute("CREATE INDEX idx_vf_crop ON vote_fields(raw_crop_path)")
+        con.execute(
+            "UPDATE documents SET n_candidates = COALESCE("
+            "(SELECT COUNT(*) FROM vote_fields vf WHERE vf.document_id = documents.document_id "
+            "AND vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL), 0)"
+        )
+        # Remaining indexes the live site relies on: geo drill-down and the browse list order
+        # (only over actas that have candidate crops).
+        doc_cols = {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+        if "department_code" in doc_cols:
+            con.execute("CREATE INDEX idx_doc_browse ON documents(department_code, document_id) WHERE n_candidates>0")
+        if {"department_code", "municipality_code", "zone", "puesto"} <= doc_cols:
+            con.execute("CREATE INDEX idx_doc_geo ON documents(department_code, municipality_code, zone, puesto)")
+        con.commit()
+    finally:
+        con.close()
+    return _sha256(dest)
+
+
 def _s3_client():
     import boto3  # local-only; lazy so the reader/serve path never imports it
 
@@ -117,9 +201,14 @@ def publish_db(
     candidate crops are all in the upload manifest. Returns None if that frontier is empty
     (nothing safe to publish yet) so the loop can simply wait.
 
-    Guard: refuses to flip the live pointer to a DB drastically smaller (<50% raw size)
-    than the one currently published, unless ``allow_shrink``. This prevents a misconfigured
-    run (e.g. wrong --output-dir pointing at a stub DB) from nuking the live national DB.
+    Guard: refuses to flip the live pointer to a DB that holds drastically fewer actas
+    (<50% of the live ``n_docs``) than the one currently published, unless ``allow_shrink``.
+    This prevents a misconfigured run (e.g. wrong --output-dir pointing at a stub DB) from
+    nuking the live national DB. The count — not raw bytes — is the real "did we lose actas"
+    signal: a schema slim-down legitimately halves the bytes while keeping every acta, so a
+    byte-size guard would false-trip on it. Legacy pointers written before ``n_docs`` existed
+    fall back to the old byte heuristic (which fires at most once: the gated publish writes
+    ``n_docs``, after which the guard is permanently count-based).
     """
     src = Path(output_dir) / "results" / "results.sqlite"
     if not src.exists():
@@ -138,7 +227,9 @@ def publish_db(
 
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "snapshot.sqlite"
-        make_snapshot(src, snap)
+        # Slim public-serving snapshot (registry + geo only), not a full copy of the
+        # detector working DB — see build_serving_db.
+        build_serving_db(src, snap)
         if only_uploaded:
             manifest = Path(manifest) if manifest else Path(output_dir) / "review" / "uploaded_crops.txt"
             uploaded = set(manifest.read_text(encoding="utf-8").split()) if manifest.exists() else set()
@@ -149,6 +240,13 @@ def publish_db(
                 return None  # nothing safe to publish yet
         digest = _sha256(snap)  # sha of the DECOMPRESSED db (what the reader installs)
         raw_size = snap.stat().st_size
+        # Acta count is the guard's real signal (invariant to schema slimming). In
+        # --only-uploaded mode this is the kept frontier; otherwise the whole registry.
+        _c = sqlite3.connect(snap)
+        try:
+            n_docs = _c.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        finally:
+            _c.close()
         key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
         # Inspect the currently-published pointer for the unchanged-skip and shrink guard.
         try:
@@ -160,16 +258,32 @@ def publish_db(
                 if verbose:
                     print("publish-db: unchanged since last publish; skipping upload", flush=True)
                 return {"key": key, "sha256": digest, "size": cur.get("size", 0),
-                        "kept": kept if only_uploaded else None, "skipped": True}
+                        "n_docs": n_docs, "kept": kept if only_uploaded else None, "skipped": True}
+            cur_docs = cur.get("n_docs")
             cur_raw = cur.get("raw_size", 0)
-            if not allow_shrink and cur_raw and raw_size < 0.5 * cur_raw:
-                msg = (f"publish-db: REFUSING to publish — new DB ({raw_size/1e6:.0f} MB) is "
-                       f"<50% of the live DB ({cur_raw/1e6:.0f} MB). Wrong --output-dir? "
-                       f"Pass allow_shrink=True to override.")
+            guard_msg = None
+            if not allow_shrink:
+                if cur_docs:
+                    # Count-based guard: refuse only on a real drop in actas. Bytes ignored,
+                    # so a slimmer-but-complete snapshot publishes normally.
+                    if n_docs < 0.5 * cur_docs:
+                        guard_msg = (f"publish-db: REFUSING to publish — new DB has {n_docs} acta(s), "
+                                     f"<50% of the live DB's {cur_docs}. Wrong --output-dir? "
+                                     f"Pass allow_shrink=True to override.")
+                elif cur_raw and raw_size < 0.5 * cur_raw:
+                    # Legacy pointer without n_docs (one-time migration): fall back to bytes.
+                    # A slim-down can legitimately trip this once; verify the acta count, then
+                    # override with --allow-shrink. The resulting publish records n_docs, so
+                    # subsequent runs are guarded on count and never false-trip on size again.
+                    guard_msg = (f"publish-db: REFUSING to publish — new DB ({raw_size/1e6:.0f} MB) is "
+                                 f"<50% of the live DB ({cur_raw/1e6:.0f} MB) and the live pointer "
+                                 f"predates acta-count tracking. If this is a slim-down (acta count "
+                                 f"OK), pass allow_shrink=True once to override.")
+            if guard_msg:
                 if verbose:
-                    print(msg, flush=True)
+                    print(guard_msg, flush=True)
                 return {"key": key, "sha256": digest, "size": 0, "raw_size": raw_size,
-                        "kept": kept if only_uploaded else None, "guarded": True}
+                        "n_docs": n_docs, "kept": kept if only_uploaded else None, "guarded": True}
         # gzip the snapshot — a paths/metadata DB (mostly NULL columns + repetitive crop
         # paths) compresses ~10x, so the upload is far smaller and cycles stay short.
         gz = Path(str(snap) + ".gz")
@@ -188,12 +302,13 @@ def publish_db(
         )
         # ... then flip the pointer last (never cache it).
         pointer = json.dumps({"key": key, "sha256": digest, "size": gz_size,
-                              "raw_size": raw_size, "ts": int(time.time())})
+                              "raw_size": raw_size, "n_docs": n_docs, "ts": int(time.time())})
         client.put_object(
             Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
-    return {"key": key, "sha256": digest, "size": gz_size, "kept": kept if only_uploaded else None}
+    return {"key": key, "sha256": digest, "size": gz_size, "n_docs": n_docs,
+            "kept": kept if only_uploaded else None}
 
 
 # --- multi-writer merge (local crop machines) --------------------------------
@@ -393,6 +508,7 @@ def pointer_status(cdn_base: str, *, timeout: float = 10.0) -> dict | None:
             "sha": (p.get("sha256") or "")[:12],
             "gz_size": p.get("size", 0),
             "raw_size": p.get("raw_size", 0),
+            "n_docs": p.get("n_docs", 0),
             "ts": ts,
             "age_secs": int(time.time()) - ts if ts else None,
         }

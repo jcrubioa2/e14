@@ -16,8 +16,7 @@ from e14detector.community import (
     verify_form_token,
     voter_token,
 )
-from e14detector.schemas import DocumentMetadata, FieldClassification, VoteField
-from e14detector.vlm.base import VLMReviewResult
+from e14detector.schemas import DocumentMetadata, VoteField
 from e14detector.webapp import create_app
 
 
@@ -125,17 +124,6 @@ def test_voter_token_is_per_ip_per_day_not_per_cookie() -> None:
 
 # --- Webapp build helpers -------------------------------------------------
 
-class _FakeReviewer:
-    """Deterministic stand-in for the VLM, used only by the operator admin path now."""
-
-    def __init__(self, classification: FieldClassification) -> None:
-        self.classification = classification
-
-    def review_vote_field(self, image_paths, metadata, thinking_budget=None, prompt_text=None,
-                          temperature=None) -> VLMReviewResult:
-        return VLMReviewResult(self.classification, 0.9, None, {}, "stub")
-
-
 def _make_db(tmp_path: Path, docs_rows: dict[str, int], **doc_meta) -> tuple[Path, Path]:
     """Build a results DB with ``docs_rows`` = {document_id: n_candidate_rows}. One shared crop."""
     output_dir = tmp_path / "out"
@@ -157,14 +145,14 @@ def _make_db(tmp_path: Path, docs_rows: dict[str, int], **doc_meta) -> tuple[Pat
     return output_dir, db
 
 
-def _build_app(tmp_path: Path, reviewer=None, n_rows: int = 3, form_secret: str = "",
+def _build_app(tmp_path: Path, n_rows: int = 3, form_secret: str = "",
                rate_bucket: float = 10_000, turnstile_secret: str = "", turnstile_enabled: bool = False):
     output_dir, db = _make_db(tmp_path, {"doc1": n_rows})
     poll = PollConfig(rate_refill_per_min=0.0 if rate_bucket < 100 else 10_000, rate_bucket=rate_bucket,
                       turnstile_secret=turnstile_secret, turnstile_enabled=turnstile_enabled,
                       voter_salt="t", form_token_secret=form_secret, form_min_seconds=0.0)
     return create_app(results_db=db, output_dir=output_dir,
-                      community_db=tmp_path / "community.sqlite", reviewer=reviewer, poll=poll)
+                      community_db=tmp_path / "community.sqlite", poll=poll)
 
 
 def _feed_cid(client: TestClient, n: int = 5) -> str:
@@ -310,15 +298,18 @@ def test_billboard_shows_public_counts(tmp_path: Path) -> None:
     client.post("/api/vote", json={"cid": cid, "value": "strange"}, headers={"x-forwarded-for": "1.1.1.1"})
     items = client.get("/api/billboard").json()["items"]
     assert items and items[0]["strange"] == 1
-    assert set(items[0].keys()) == {"cid", "img_url", "good", "strange"}
-    assert "doc1" not in client.get("/api/billboard").text  # anonymized
+    # The billboard is intentionally de-anonymized (public tally + acta link); each card
+    # carries the document id and a location label so it can link through to /acta.
+    assert set(items[0].keys()) == {"cid", "img_url", "document_id", "loc", "good", "strange"}
+    assert items[0]["document_id"] == "doc1"
 
 
 def test_votar_page_renders(tmp_path: Path) -> None:
     client = TestClient(_build_app(tmp_path))
     page = client.get("/votar")
     assert page.status_code == 200
-    assert "/api/feed" in page.text and "/api/vote" in page.text  # the deck wiring
+    # The grid-voting page loads a whole acta and submits it as a batch.
+    assert "/api/acta-deck" in page.text and "/api/vote-batch" in page.text
 
 
 def test_acta_page_is_readonly_with_public_counts(tmp_path: Path) -> None:
@@ -382,7 +373,7 @@ def test_high_vote_label_shows_from_crowd_alone(tmp_path: Path, monkeypatch) -> 
     assert client.get("/browse").text.count("muy reportada por la comunidad") >= 1
 
 
-# --- Operator admin path (unchanged VLM tooling) --------------------------
+# --- Operator admin path --------------------------------------------------
 
 def test_admin_poll_is_token_gated(tmp_path: Path, monkeypatch) -> None:
     from e14detector import config as _config
@@ -401,20 +392,3 @@ def test_admin_poll_is_token_gated(tmp_path: Path, monkeypatch) -> None:
     assert client.get("/admin/poll?key=wrong").status_code == 403
     ok = client.get("/admin/poll?key=s3cret")
     assert ok.status_code == 200 and "Cand 1" in ok.text and "MEDELLIN" in ok.text
-
-
-def test_admin_review_runs_on_demand_and_can_record(tmp_path: Path, monkeypatch) -> None:
-    from e14detector import config as _config
-    app = _build_app(tmp_path, reviewer=_FakeReviewer(FieldClassification.SUSPICIOUS_OVERLAP))
-    client = TestClient(app)
-    fk = field_key_of("doc1", 1, 1, None)
-    monkeypatch.setattr(_config, "ADMIN_TOKEN", "")
-    assert client.get(f"/admin/review?field_key={fk}").status_code == 404
-    monkeypatch.setattr(_config, "ADMIN_TOKEN", "k")
-    assert client.get(f"/admin/review?key=bad&field_key={fk}").status_code == 403
-    j = client.get(f"/admin/review?key=k&field_key={fk}").json()
-    assert j["classification"] == "SUSPICIOUS_OVERLAP" and j["strange"] is True and j["recorded"] is False
-    assert app.state.community.state_of(fk) is None
-    j2 = client.get(f"/admin/review?key=k&field_key={fk}&record=1").json()
-    assert j2["recorded"] is True
-    assert app.state.community.state_of(fk)["vlm_state"] == "STRANGE"

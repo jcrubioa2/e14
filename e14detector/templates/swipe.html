@@ -13,199 +13,606 @@
   <meta property="og:description" content="{{ meta_description }}">
   <meta property="og:url" content="{{ canonical }}">
   <meta name="twitter:card" content="summary">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <script>
-    // In-app bot check (no CAPTCHA): a signed token issued with this page load is sent
-    // back with each vote; the server rejects forged or impossibly-fast submits.
+    // In-app bot check: a signed token sent back with each submit; the server rejects forged
+    // or impossibly-fast submits. When Turnstile is on, this starts EMPTY and is fetched from
+    // /api/session after a challenge solve (see __tsInit / establishSession below).
     window.__formToken = "{{ form_token }}";
+    window.__turnstileSitekey = "{{ turnstile_sitekey }}";
   </script>
+  {% if turnstile_sitekey %}
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=__tsInit" async defer></script>
+  {% endif %}
   <style>
-    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --good:#1a7f37; --ink:#202124; --accent:#0969da; }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; }
-    body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: #fff; }
-    header { background: var(--bg); border-bottom: 1px solid var(--line); padding: 12px 16px; text-align: center; }
-    header h1 { margin: 0; font-size: 17px; }
-    header .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
-    header a { color: var(--accent); text-decoration: none; }
-    main { max-width: 560px; margin: 0 auto; padding: 14px 16px 28px; }
-    .deck { position: relative; min-height: 320px; display: flex; align-items: center; justify-content: center; }
-    .card { width: 100%; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); padding: 18px; background: #fff; text-align: center; touch-action: pan-y; }
-    .card .prompt { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
-    .card img.crop { max-width: 100%; max-height: 200px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
-    .tally { margin-top: 12px; font-size: 13px; color: var(--muted); min-height: 18px; }
-    .tally b.s { color: var(--bad); } .tally b.g { color: var(--good); }
-    .buttons { display: flex; gap: 12px; margin-top: 16px; }
-    .buttons button { flex: 1; height: 56px; border-radius: 12px; border: 2px solid; font-size: 16px; font-weight: 700; cursor: pointer; background: #fff; }
-    .b-good { color: var(--good); border-color: var(--good); }
-    .b-good:hover { background: #eaf6ec; }
-    .b-bad { color: var(--bad); border-color: var(--bad); }
-    .b-bad:hover { background: #fff1f0; }
-    .b-skip { display: block; width: 100%; height: 44px; margin-top: 10px; border-radius: 12px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 14px; font-weight: 600; cursor: pointer; }
-    .b-skip:hover { background: var(--bg); }
-    .siblings-toggle { display: block; width: 100%; margin-top: 14px; background: none; border: none; color: var(--accent); font-size: 13px; cursor: pointer; }
-    .siblings { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
-    .sib { border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
-    .sib img { max-width: 100%; max-height: 70px; object-fit: contain; }
-    .sib .c { font-size: 11px; color: var(--muted); margin-top: 4px; }
-    .empty, .err { text-align: center; color: var(--muted); padding: 40px 0; }
-    .progress { text-align: center; color: var(--muted); font-size: 12px; margin-top: 10px; }
+    :root {
+      color-scheme: light;
+      --paper:#FBFAF6; --paper-2:#F2EFE6; --card:#FFFFFF;
+      --ink:#1C1A15; --ink-soft:#6E695E; --ink-faint:#9A9488;
+      --line:#E6E1D4; --line-strong:#D8D2C2;
+      --red:#D93A28; --red-deep:#A82A1B; --red-tint:#FCEDE9; --red-line:#F0B5AB;
+      --green:#2F7D52; --gold:#C28A2B; --legend:#6E2238;  /* deep wine — endless "legendaria" tail */
+      --accent:#161410;             /* primary action — ink */
+      --link:#0E6E64;               /* sole non-red brand hue */
+      --r:15px;
+      --shadow:0 1px 1px rgba(28,26,21,.03), 0 6px 20px -8px rgba(28,26,21,.14);
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin:0; }
+    body {
+      font-family:"Hanken Grotesk", system-ui, sans-serif; color:var(--ink);
+      background-color:var(--paper); padding-bottom:96px;
+      background-image:
+        radial-gradient(120% 80% at 100% -10%, rgba(217,58,40,.05), transparent 60%),
+        radial-gradient(circle at 1px 1px, rgba(28,26,21,.045) 1px, transparent 0);
+      background-size:auto, 22px 22px;
+      background-attachment:fixed, fixed;
+      -webkit-font-smoothing:antialiased;
+    }
+
+    header { border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.7), rgba(255,255,255,0)); }
+    .head-inner { max-width:780px; margin:0 auto; padding:22px 20px 18px; }
+    .eyebrow { display:flex; align-items:center; gap:9px; font-size:11.5px; font-weight:700;
+               letter-spacing:.16em; text-transform:uppercase; color:var(--red-deep); }
+    .eyebrow .tick { width:7px; height:7px; border-radius:2px; background:var(--red); transform:rotate(45deg); }
+    .head-top { display:flex; align-items:flex-end; justify-content:space-between; gap:14px; margin-top:9px; }
+    header h1 { margin:0; font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:33px;
+                line-height:1.02; letter-spacing:-.012em; }
+    header h1 em { font-style:italic; color:var(--red-deep); }
+    /* First-visit onboarding: a compact 3-step strip above the feed, dismissible and remembered
+       (localStorage) so repeat / viral visitors get the clean feed straight away. */
+    .onboard { position:relative; background:var(--card); border:1px solid var(--line); border-radius:14px;
+               padding:15px 16px 14px; box-shadow:var(--shadow); margin-bottom:18px; }
+    .onboard.is-dismissed { display:none; }
+    .onboard-head { font-size:11.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+                    color:var(--ink-faint); margin-bottom:11px; }
+    .onboard-steps { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+    .onboard-step { padding-right:6px; }
+    .onboard-step .no { font-family:"Fraunces", serif; font-weight:600; font-size:15px; color:var(--red-deep); }
+    .onboard-step b { display:block; margin:2px 0 3px; font-size:14px; }
+    .onboard-step span { color:var(--ink-soft); font-size:12.5px; line-height:1.45; }
+    .onboard-close { position:absolute; top:8px; right:9px; width:28px; height:28px; border:none; cursor:pointer;
+                     background:transparent; color:var(--ink-faint); font-size:19px; line-height:1; border-radius:8px;
+                     display:inline-flex; align-items:center; justify-content:center; transition:background .12s, color .12s; }
+    .onboard-close:hover { background:var(--paper-2); color:var(--ink); }
+    @media (max-width:560px) { .onboard-steps { grid-template-columns:1fr; gap:9px; } }
+
+    main { max-width:780px; margin:0 auto; padding:18px 20px 26px; }
+
+    .meta { display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px; margin-bottom:16px; }
+    .tag { display:inline-flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line);
+           border-radius:999px; padding:6px 13px 6px 11px; font-size:13px; font-weight:700; color:var(--ink);
+           box-shadow:var(--shadow); }
+    .tag .n { font-variant-numeric:tabular-nums; }
+    .tag .dot { width:7px; height:7px; border-radius:50%; background:var(--link); box-shadow:0 0 0 3px rgba(14,110,100,.14); }
+
+    /* Reviewer rank: a small chip whose emblem, label and color upgrade at named milestones (1 →
+       1000 mesas), then an endless "Veeduría legendaria I, II, III…" tail so it never caps out. A
+       2px progress sliver creeps toward the next unlock so the chip visibly "fills" as you review;
+       crossing a threshold pulses the chip + fires a celebratory toast. */
+    .rank { position:relative; display:inline-flex; align-items:center; gap:7px; background:var(--card);
+            border:1px solid var(--line); border-radius:999px; padding:4px 12px 6px 6px; box-shadow:var(--shadow);
+            transition:transform .25s cubic-bezier(.2,.7,.3,1); --rank:var(--link); }
+    .rank[hidden] { display:none; }
+    .rank .badge { width:20px; height:20px; border-radius:50%; flex:0 0 auto; display:inline-flex; align-items:center;
+                   justify-content:center; font-size:11px; line-height:1; color:#fff; background:var(--rank);
+                   box-shadow:0 1px 2px rgba(28,26,21,.22); transition:background .35s; }
+    .rank .name { font-size:12.5px; font-weight:800; color:var(--ink); letter-spacing:.005em; }
+    .rank .n { font-size:11.5px; font-weight:700; color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+    .rank .next { font-size:11px; font-weight:600; color:var(--ink-faint); }
+    .rank .prog { position:absolute; left:10px; right:10px; bottom:2.5px; height:2px; border-radius:2px;
+                  background:var(--line); overflow:hidden; }
+    .rank .prog i { display:block; height:100%; width:0; border-radius:2px; background:var(--rank);
+                    transition:width .55s cubic-bezier(.2,.7,.3,1), background .35s; }
+    .rank.bump { animation:rankPulse .7s cubic-bezier(.2,.7,.3,1); }
+    @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
+
+    .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
+    @media (max-width:470px) { .grid { grid-template-columns:repeat(2, 1fr); gap:11px; } }
+
+    .tile {
+      position:relative; border:1.5px solid var(--line); border-radius:var(--r); background:var(--card);
+      padding:13px 13px 10px; cursor:pointer; box-shadow:var(--shadow); outline:none;
+      display:flex; flex-direction:column; gap:7px; min-height:114px;
+      transition:transform .14s cubic-bezier(.2,.7,.2,1), border-color .14s, box-shadow .14s, background .14s;
+    }
+    .tile:hover { transform:translateY(-3px); border-color:var(--line-strong); box-shadow:0 2px 2px rgba(28,26,21,.04), 0 14px 28px -12px rgba(28,26,21,.22); }
+    .tile:active { transform:translateY(-1px) scale(.985); }
+    .tile:focus-visible { border-color:var(--ink); box-shadow:0 0 0 3px rgba(28,26,21,.12); }
+    /* The thumb background matches the ballot paper (white) so a contained crop that doesn't fill
+       the box letterboxes seamlessly — no tinted band or inner border peeking around the image.
+       Loading is told apart from a loaded-blank crop by the shimmer below, not by a frame. */
+    .tile .thumb { position:relative; flex:1 1 auto; display:flex; align-items:center; justify-content:center;
+                   min-height:74px; border-radius:9px; overflow:hidden; background:#fff; }
+    .tile img { max-width:100%; max-height:92px; object-fit:contain; pointer-events:none;
+                user-select:none; -webkit-user-drag:none; opacity:0; transition:opacity .25s ease; }
+    .tile .thumb.ready img { opacity:1; }
+
+    /* Per-tile loading placeholder — IDENTICAL to the initial skeleton (dashed cream shimmer) so the
+       whole load experience is consistent: every tile starts as a skeleton and morphs into the real
+       crop once its own image loads. The thumb goes transparent so the tile's shimmer shows through. */
+    .tile.is-loading { cursor:default; border-style:dashed; box-shadow:none;
+                       background:linear-gradient(100deg,#f4f1ea 30%,#fbfaf6 50%,#f4f1ea 70%);
+                       background-size:200% 100%; animation:sh 1.25s infinite linear; }
+    .tile.is-loading .thumb { background:transparent; }
+    .tile.is-loading .cap { visibility:hidden; }
+    .tile .thumb.failed::after { content:"sin imagen"; position:absolute; inset:0; display:flex;
+                                 align-items:center; justify-content:center; font-size:9.5px; font-weight:700;
+                                 letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); }
+
+    /* The crop is the evidence — it stays at FULL opacity, never covered. The "extraña" state is
+       signalled around the content only: a vermilion ring + faint tint, plus a small caption in
+       its own reserved row (so it never overlaps the box). Voters can still read it and un-tap. */
+    .tile .cap { height:13px; line-height:13px; font-size:9.5px; font-weight:800; letter-spacing:.14em;
+                 text-transform:uppercase; color:var(--red-deep); opacity:0; transition:opacity .14s; }
+    .tile.marked { border-color:var(--red); background:var(--red-tint);
+                   box-shadow:0 0 0 1px var(--red) inset, 0 2px 2px rgba(168,42,27,.05), 0 12px 26px -12px rgba(168,42,27,.3); }
+    .tile.marked .cap { opacity:1; }
+
+    .tile.skeleton { cursor:default; animation:none; border-style:dashed; border-color:var(--line);
+             background:linear-gradient(100deg,#f4f1ea 30%,#fbfaf6 50%,#f4f1ea 70%); background-size:200% 100%;
+             animation:sh 1.25s infinite linear; }
+    @keyframes sh { to { background-position:-200% 0; } }
+
+    /* Entrance for tiles that DIDN'T already have a placeholder (deck has more casillas than the
+       skeleton guessed). They slide+scale in one by one; reused placeholders stay put, so the grid
+       grows into its target instead of swapping like a new page. The actual transition (with its
+       per-tile stagger delay) is set inline in JS, then cleared so hover stays snappy. */
+    .tile.enter { opacity:0; transform:scale(.92) translateY(10px); }
+
+    .note { margin:20px 2px 0; text-align:center; color:var(--ink-faint); font-size:12.5px; line-height:1.5; }
+
+    .empty, .err { text-align:center; color:var(--ink-soft); padding:64px 18px; font-size:15px; }
+    .empty .big { font-family:"Fraunces", serif; font-size:21px; color:var(--ink); display:block; margin-bottom:6px; }
+
+    /* Sticky ballot bar */
+    .bar { position:fixed; left:0; right:0; bottom:0; z-index:40;
+           background:rgba(251,250,246,.82); backdrop-filter:saturate(1.5) blur(12px);
+           border-top:1px solid var(--line-strong); box-shadow:0 -8px 24px -16px rgba(28,26,21,.3); }
+    .bar-inner { max-width:780px; margin:0 auto; padding:13px 20px; display:flex; align-items:center; gap:12px;
+                 padding-bottom:calc(13px + env(safe-area-inset-bottom)); }
+    .count { display:flex; flex-direction:column; gap:1px; line-height:1.1; min-width:0; }
+    .count .num { font-family:"Fraunces", serif; font-size:23px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--red-deep); }
+    .count.zero .num { color:var(--green); }
+    .count .lab { font-size:11.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint); }
+    .spacer { flex:1 1 auto; }
+    .btn { font:inherit; cursor:pointer; border-radius:12px; height:50px; font-weight:700; transition:transform .1s, background .15s, border-color .15s; }
+    .btn:active { transform:scale(.97); }
+    .b-skip { padding:0 16px; border:1px solid var(--line-strong); background:var(--card); color:var(--ink-soft); font-size:14px; }
+    .b-skip:hover { border-color:var(--ink-faint); color:var(--ink); }
+    .b-send { padding:0 22px; border:none; color:var(--paper); background:var(--accent); font-size:15px;
+              display:inline-flex; align-items:center; gap:9px; box-shadow:0 6px 18px -6px rgba(22,20,16,.5); }
+    .b-send:hover { background:#000; }
+    .b-send .pill { background:rgba(255,255,255,.18); border-radius:999px; padding:2px 9px; font-size:13px; font-variant-numeric:tabular-nums; }
+    .b-send.allgood { background:var(--green); box-shadow:0 6px 18px -6px rgba(47,125,82,.5); }
+    .b-send.allgood:hover { background:#266c45; }
+
+    .toast { position:fixed; left:50%; top:18px; transform:translate(-50%,-16px); z-index:60;
+             background:var(--ink); color:var(--paper); font-size:14px; font-weight:600;
+             padding:11px 18px; border-radius:13px; box-shadow:0 10px 30px -8px rgba(28,26,21,.5);
+             opacity:0; pointer-events:none; transition:opacity .2s, transform .2s; }
+    .toast.show { opacity:1; transform:translate(-50%,0); }
+    .toast.warn { background:var(--red-deep); }
+    .toast.win { background:var(--rank, var(--link)); font-weight:700; }
+    .toast.win b { font-weight:800; }
+
+    @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
   </style>
 </head>
 <body>
+  {% include "_appbar.html" %}
+  {% include "_intro_modal.html" %}
   <header>
-    <h1>¿Se ve bien o extraña?</h1>
-    <div class="sub">Casillas de votos al azar y anónimas · <a href="/browse">buscar un acta &rarr;</a></div>
+    <div class="head-inner">
+      <div class="eyebrow"><span class="tick"></span> Veeduría ciudadana · E-14</div>
+      <div class="head-top">
+        <h1>Revisa una <em>mesa</em></h1>
+      </div>
+    </div>
   </header>
+
+  <div class="toast" id="toast" aria-live="polite"></div>
+
   <main>
+    <!-- First-visit "how to use": shown once, dismissible, remembered so repeat visitors skip it. -->
+    <div class="onboard" id="onboard" hidden>
+      <button class="onboard-close" id="onboard-close" type="button" aria-label="Cerrar la ayuda">&times;</button>
+      <div class="onboard-head">C&oacute;mo funciona</div>
+      <div class="onboard-steps">
+        <div class="onboard-step"><span class="no">01</span><b>Mira las casillas</b><span>Son los votos escritos a mano de una misma mesa an&oacute;nima.</span></div>
+        <div class="onboard-step"><span class="no">02</span><b>Marca las extra&ntilde;as</b><span>Toca las que se vean alteradas; toca de nuevo para desmarcar.</span></div>
+        <div class="onboard-step"><span class="no">03</span><b>Pulsa Enviar</b><span>Si ninguna se ve rara, env&iacute;ala tal cual. Aparece otra mesa.</span></div>
+      </div>
+    </div>
+    <script>
+      // Onboarding: reveal once, persist dismissal so the viral repeat visitor isn't slowed.
+      (function () {
+        var ob = document.getElementById('onboard');
+        if (!ob) return;
+        var KEY = 'e14_onboard_dismissed';
+        var dismissed = false;
+        try { dismissed = localStorage.getItem(KEY) === '1'; } catch (e) {}
+        if (!dismissed) ob.hidden = false;
+        document.getElementById('onboard-close').addEventListener('click', function () {
+          ob.classList.add('is-dismissed');
+          try { localStorage.setItem(KEY, '1'); } catch (e) {}
+        });
+      })();
+    </script>
+
     <!-- Honeypot: hidden from people, tripped by form-filling bots. -->
     <input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"
            aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0">
 
-    <div class="deck" id="deck">
-      <div class="empty" id="loading">Cargando casillas…</div>
+    <!-- Cloudflare Turnstile (invisible): solved once on load, exchanged at /api/session for
+         the form token. Only present when a sitekey is configured. -->
+    {% if turnstile_sitekey %}<div id="ts" style="display:none"></div>{% endif %}
+
+    <div class="meta" id="meta" hidden>
+      <span class="tag"><span class="dot"></span><span class="n" id="deck-count">0</span> casillas</span>
+      <span class="rank" id="reviewed" hidden></span>
     </div>
-    <div class="progress" id="progress"></div>
+
+    <!-- The skeleton grid is rendered by JS (skeleton()) with a dynamic tile count so the loading
+         state varies; the real deck then reconciles into these same tiles. -->
+    <div id="board"></div>
+    <div class="note" id="note" hidden>¿Ninguna se ve rara? Envía la mesa tal cual — todas se cuentan como “se ven bien”.</div>
   </main>
 
-  <script>
-    // Anonymized swipe feed: cards come from /api/feed as { cid, img_url }; a vote POSTs
-    // { cid, value } to /api/vote. The client tracks swiped cids in localStorage (best-effort
-    // "don't repeat"); the server's vote tables ignore true duplicates regardless.
-    const deck = document.getElementById('deck');
-    const progressEl = document.getElementById('progress');
-    const SEEN_KEY = 'e14_seen_cids';
-    let seen = new Set();
-    try { seen = new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]')); } catch (e) {}
-    let queue = [];
-    let voted = 0;
-    let fetching = false;
+  <div class="bar" id="bar" hidden>
+    <div class="bar-inner">
+      <div class="count zero" id="count">
+        <span class="num" id="count-num">0</span>
+        <span class="lab" id="count-lab">marcadas</span>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn b-skip" id="skip" type="button">Saltar mesa</button>
+      <button class="btn b-send allgood" id="send" type="button">Enviar</button>
+    </div>
+  </div>
 
-    function rememberSeen(cid) {
-      seen.add(cid);
-      try {
-        // Cap stored history so localStorage can't grow without bound.
-        const arr = [...seen].slice(-2000);
-        seen = new Set(arr);
-        localStorage.setItem(SEEN_KEY, JSON.stringify(arr));
-      } catch (e) {}
+  <script>
+    // Grid voting: GET /api/acta-deck returns every casilla of ONE anonymized mesa as
+    // { cid, img_url } (shuffled, no acta id leaks). The contributor marks the strange ones;
+    // "Enviar" POSTs { strange:[cid...], good:[cid...] } to /api/vote-batch (marked => strange,
+    // the rest => good). Then a fresh mesa loads.
+    const board = document.getElementById('board');
+    const bar = document.getElementById('bar');
+    const sendBtn = document.getElementById('send');
+    const skipBtn = document.getElementById('skip');
+    const countEl = document.getElementById('count');
+    const countNum = document.getElementById('count-num');
+    const countLab = document.getElementById('count-lab');
+    const meta = document.getElementById('meta');
+    const deckCountEl = document.getElementById('deck-count');
+    const reviewedEl = document.getElementById('reviewed');
+    const noteEl = document.getElementById('note');
+
+    let deck = [];
+    const marked = new Set();
+    let loading = false;
+    let sending = false;
+    let lastSig = '';
+    let nextDeck = null;          // prefetched next mesa (items), or null
+    let prefetching = false;
+
+    const THANKS = [
+      '¡Gracias! Mesa enviada.', '¡Listo! Gracias por revisar esta mesa.',
+      '¡Gracias por ayudar en la veeduría!', '¡Mesa registrada, gracias!',
+      '¡Gracias! Vamos con la siguiente.',
+    ];
+    function thanks() { return THANKS[Math.floor(Math.random() * THANKS.length)]; }
+
+    // --- Reviewer rank / milestones ----------------------------------------------------
+    // The count of mesas reviewed persists across visits (localStorage) and unlocks an evolving
+    // rank. Thresholds are spaced so the early ones come quickly (momentum) and later ones reward
+    // sustained veeduría.
+    const RANKS = [
+      { at: 1,    name: 'Primera mesa',       color: 'var(--link)' },
+      { at: 5,    name: 'En marcha',          color: '#0E8C7E' },
+      { at: 15,   name: 'Veeduría constante', color: 'var(--green)' },
+      { at: 40,   name: 'Guardia del voto',   color: 'var(--gold)' },
+      { at: 100,  name: 'Centinela',          color: 'var(--red)' },
+      { at: 250,  name: 'Veeduría de élite',  color: 'var(--red-deep)' },
+      { at: 500,  name: 'Centinela mayor',    color: 'var(--red-deep)' },
+      { at: 1000, name: 'Guardián nacional',  color: 'var(--legend)' },
+    ];
+    // Beyond the last named rank the ladder becomes ENDLESS "grados de honor": a legendary title with
+    // a growing Roman numeral, each grade spaced by a gap that widens as you climb. So there is always
+    // a next level to chase and unlocks keep firing — the most committed veedores never hit a dead cap.
+    const LEGEND_BASE = RANKS[RANKS.length - 1].at;     // 1000 — the last named threshold
+    const LEGEND_NAME = 'Veeduría legendaria';
+    // Mesas to reach legendary grade g (1,2,3,…): gap starts at 500 and grows 250/grade —
+    // I=1500, II=2250, III=3250, IV=4500, …
+    function legendThreshold(g) { return LEGEND_BASE + g * 500 + (g * (g - 1) / 2) * 250; }
+    function legendGrade(n) { let g = 0; while (legendThreshold(g + 1) <= n) g++; return g; }
+    function roman(n) {
+      const M = [[1000,'M'],[900,'CM'],[500,'D'],[400,'CD'],[100,'C'],[90,'XC'],[50,'L'],[40,'XL'],[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
+      let s = ''; for (const [v, sym] of M) while (n >= v) { s += sym; n -= v; } return s;
+    }
+    // Each legendary grade cycles a metallic prestige color, so an endless tail still reads as a
+    // visible upgrade: bronce → plata → oro → platino → vino, then repeats.
+    const LEGEND_CYCLE = ['#9C6B3F', '#8A8F98', '#C28A2B', '#5E6A72', '#6E2238'];
+    function legendRank(g) {
+      return { at: legendThreshold(g), name: LEGEND_NAME + ' ' + roman(g),
+               color: LEGEND_CYCLE[(g - 1) % LEGEND_CYCLE.length] };
+    }
+    function rankFor(n) {
+      const g = n >= LEGEND_BASE ? legendGrade(n) : 0;
+      if (g >= 1) return legendRank(g);
+      let r = null; for (const t of RANKS) { if (n >= t.at) r = t; else break; } return r;
+    }
+    function nextRank(n) {
+      for (const t of RANKS) { if (n < t.at) return t; }
+      return legendRank(legendGrade(n) + 1);            // past every named rank: the next legendary grade
+    }
+    function loadReviewed() { try { return parseInt(localStorage.getItem('e14_reviewed') || '0', 10) || 0; } catch (e) { return 0; } }
+    function persistReviewed() { try { localStorage.setItem('e14_reviewed', String(reviewed)); } catch (e) {} }
+
+    let reviewed = loadReviewed();
+    let lastRankAt = (rankFor(reviewed) || { at: 0 }).at;   // prime silently so a returning user isn't re-congratulated
+
+    function renderReviewed() {
+      if (reviewed <= 0) { reviewedEl.hidden = true; reviewedEl.innerHTML = ''; return; }
+      const r = rankFor(reviewed) || RANKS[0];
+      const nx = nextRank(reviewed);
+      let pct = 100;
+      if (nx) { const base = r.at; pct = Math.round(((reviewed - base) / (nx.at - base)) * 100); pct = Math.max(7, Math.min(100, pct)); }
+      reviewedEl.style.setProperty('--rank', r.color);
+      reviewedEl.title = nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas)') : '¡Nivel máximo alcanzado!';
+      reviewedEl.innerHTML =
+        '<span class="badge">★</span>' +
+        '<span class="name">' + r.name + '</span>' +
+        '<span class="n">' + reviewed + (reviewed === 1 ? ' mesa' : ' mesas') + '</span>' +
+        (nx ? '<span class="next">faltan ' + (nx.at - reviewed) + '</span>' : '') +
+        '<span class="prog"><i style="width:' + pct + '%"></i></span>';
+      reviewedEl.hidden = false;
     }
 
-    async function refill() {
-      if (fetching) return;
-      fetching = true;
+    function celebrateRank(r) {
+      reviewedEl.classList.remove('bump'); void reviewedEl.offsetWidth; reviewedEl.classList.add('bump');
+      const t = document.getElementById('toast');
+      t.style.setProperty('--rank', r.color);
+      t.innerHTML = '✦ Nivel desbloqueado · <b>' + r.name + '</b>';
+      t.classList.remove('warn'); t.classList.add('win', 'show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { t.classList.remove('show', 'win'); }, 2300);
+    }
+
+    // --- Turnstile session gate ---------------------------------------------------------
+    const turnstileOn = !!window.__turnstileSitekey;
+    let tsWidget = null;
+    let establishing = false;
+
+    window.__tsInit = function () {
       try {
-        const excl = [...seen].slice(-50).join(',');
-        const res = await fetch('/api/feed?n=12&exclude=' + encodeURIComponent(excl));
-        const data = await res.json();
-        for (const it of (data.items || [])) {
-          if (!seen.has(it.cid)) queue.push(it);
+        tsWidget = window.turnstile.render('#ts', {
+          sitekey: window.__turnstileSitekey,
+          size: 'invisible',
+          callback: function (token) { establishSession(token); },
+          'expired-callback': function () { window.__formToken = ''; ensureSession(); },
+          'error-callback': function () { establishing = false; },
+        });
+      } catch (e) {}
+    };
+    function ensureSession() {
+      if (!turnstileOn || establishing || !window.turnstile || tsWidget === null) return;
+      establishing = true;
+      try { window.turnstile.reset(tsWidget); window.turnstile.execute(tsWidget); }
+      catch (e) { establishing = false; }
+    }
+    async function establishSession(token) {
+      try {
+        const res = await fetch('/api/session', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ turnstile_token: token }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok && data.form_token) window.__formToken = data.form_token;
+      } catch (e) {} finally { establishing = false; }
+    }
+    function voteReady() { return !turnstileOn || !!window.__formToken; }
+
+    let toastTimer = null;
+    function showToast(msg, warn) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.toggle('warn', !!warn);
+      t.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove('show'), 1300);
+    }
+
+    function updateCount() {
+      const n = marked.size;
+      countEl.classList.toggle('zero', n === 0);
+      countNum.textContent = n;
+      countLab.textContent = n === 1 ? 'marcada' : 'marcadas';
+      if (n === 0) {
+        sendBtn.classList.add('allgood');
+        sendBtn.innerHTML = 'Todas se ven bien';
+      } else {
+        sendBtn.classList.remove('allgood');
+        sendBtn.innerHTML = 'Enviar <span class="pill">' + n + '</span>';
+      }
+    }
+
+    function toggle(tile, cid) {
+      if (tile.classList.contains('is-loading')) return;  // not yet loaded — ignore the tap
+      if (marked.has(cid)) { marked.delete(cid); tile.classList.remove('marked'); tile.setAttribute('aria-pressed', 'false'); }
+      else { marked.add(cid); tile.classList.add('marked'); tile.setAttribute('aria-pressed', 'true'); }
+      updateCount();
+    }
+
+    // Turn a tile element into a live casilla: load its crop, wire mark/undo. Used both for
+    // reused placeholders (filled in place) and brand-new tiles (which also animate in).
+    function fillTile(tile, it) {
+      tile.tabIndex = 0;
+      tile.setAttribute('role', 'button');
+      tile.setAttribute('aria-pressed', 'false');
+      tile.setAttribute('aria-label', 'Marcar esta casilla como extraña');
+      tile.innerHTML = '<div class="thumb"><img alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
+        '<span class="cap" aria-hidden="true">Extraña</span>';
+      const thumb = tile.querySelector('.thumb');
+      const img = thumb.querySelector('img');
+      const ready = () => { tile.classList.remove('is-loading'); thumb.classList.add('ready'); };
+      if (img.complete && img.naturalWidth) ready();
+      else {
+        img.addEventListener('load', ready);
+        img.addEventListener('error', () => { tile.classList.remove('is-loading'); thumb.classList.add('failed'); });
+      }
+      tile.addEventListener('click', () => toggle(tile, it.cid));
+      tile.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(tile, it.cid); }
+      });
+    }
+
+    // Reconcile the on-screen grid (currently shimmering skeletons) INTO the loaded deck instead of
+    // swapping the whole board. Placeholders that line up with a casilla are filled where they sit
+    // (preserved). If the deck has more casillas than we guessed, the extra tiles appear one by one
+    // with a staggered slide-in. If we guessed too many, the leftovers retire one by one.
+    function renderDeck() {
+      marked.clear();
+      let grid = board.querySelector('.grid');
+      if (!grid) { board.innerHTML = ''; grid = document.createElement('div'); grid.className = 'grid'; board.appendChild(grid); }
+      grid.removeAttribute('aria-hidden');          // it's interactive now, not decorative
+      const placeholders = Array.from(grid.children);
+      const need = deck.length;
+      let appeared = 0;                              // counts net-new tiles, for the entrance stagger
+
+      deck.forEach((it, i) => {
+        let tile = placeholders[i];
+        const isNew = !tile;
+        if (isNew) {
+          tile = document.createElement('div');
+          tile.className = 'tile is-loading enter';
+          grid.appendChild(tile);
+        } else {
+          tile.className = 'tile is-loading';        // reuse the placeholder in place
         }
-      } catch (e) {} finally { fetching = false; }
+        fillTile(tile, it);
+        if (isNew) {
+          const delay = appeared++ * 0.07;
+          requestAnimationFrame(() => {
+            tile.style.transition = 'opacity .42s ease ' + delay + 's, transform .46s cubic-bezier(.2,.75,.25,1) ' + delay + 's';
+            tile.classList.remove('enter');
+          });
+          setTimeout(() => { tile.style.transition = ''; }, (0.46 + delay) * 1000 + 80);
+        }
+      });
+
+      // Retire any placeholders the deck didn't need, one by one.
+      placeholders.slice(need).forEach((tile, k) => {
+        const d = k * 0.05;
+        tile.style.pointerEvents = 'none';
+        tile.style.transition = 'opacity .3s ease ' + d + 's, transform .3s ease ' + d + 's';
+        requestAnimationFrame(() => { tile.style.opacity = '0'; tile.style.transform = 'scale(.9)'; });
+        setTimeout(() => tile.remove(), 300 + d * 1000 + 60);
+      });
+
+      deckCountEl.textContent = deck.length;
+      meta.hidden = false;
+      renderReviewed();
+      noteEl.hidden = false;
+      bar.hidden = false;
+      updateCount();
+    }
+
+    // Dynamic placeholder count (5–13) so the loading state isn't always the same six tiles. The
+    // deck then grows/shrinks this grid into its real size.
+    function randSkel() { return 5 + Math.floor(Math.random() * 9); }
+    function skeleton() {
+      return '<div class="grid" aria-hidden="true">' +
+        '<div class="tile skeleton"></div>'.repeat(randSkel()) + '</div>';
     }
 
     function renderEmpty(msg) {
-      deck.innerHTML = '<div class="empty">' + msg + '</div>';
+      board.innerHTML = '<div class="empty"><span class="big">Gracias por participar</span>' + msg + '</div>';
+      meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
     }
 
-    function renderCard(card) {
-      deck.innerHTML = '';
-      const el = document.createElement('div');
-      el.className = 'card';
-      el.innerHTML =
-        '<div class="prompt">¿El número de esta casilla se ve normal o alterado?</div>' +
-        '<img class="crop" alt="votos escritos a mano" src="' + card.img_url + '">' +
-        '<div class="tally" id="tally"></div>' +
-        '<div class="buttons">' +
-        '  <button class="b-good" id="vote-good">Se ve bien</button>' +
-        '  <button class="b-bad" id="vote-bad">Se ve extraña</button>' +
-        '</div>' +
-        '<button class="b-skip" id="vote-skip">No estoy seguro · saltar</button>' +
-        '<button class="siblings-toggle" id="sib-toggle">Ver las otras casillas de esta acta</button>' +
-        '<div class="siblings" id="siblings" hidden></div>';
-      deck.appendChild(el);
-      document.getElementById('vote-good').addEventListener('click', () => castVote(card, 'good'));
-      document.getElementById('vote-bad').addEventListener('click', () => castVote(card, 'strange'));
-      document.getElementById('vote-skip').addEventListener('click', () => skipCard(card));
-      document.getElementById('sib-toggle').addEventListener('click', () => loadSiblings(card));
+    // One fetch of a fresh mesa, with a single retry so we don't serve the same mesa twice in a row.
+    async function fetchDeck() {
+      for (let i = 0; i < 2; i++) {
+        const res = await fetch('/api/acta-deck');
+        const data = await res.json();
+        const items = data.items || [];
+        const sig = items.map((x) => x.cid).sort().join(',');
+        if (sig !== lastSig || !items.length) { lastSig = sig; return items; }
+      }
+      return [];
     }
 
-    // "No estoy seguro": advance without recording any vote. We still mark the cid seen so
-    // it doesn't immediately reappear in this session; nothing is sent to the server.
-    function skipCard(card) {
-      rememberSeen(card.cid);
-      next();
-    }
-
-    async function castVote(card, value) {
-      const goodBtn = document.getElementById('vote-good');
-      const badBtn = document.getElementById('vote-bad');
-      goodBtn.disabled = badBtn.disabled = true;
-      rememberSeen(card.cid);
-      const hp = document.getElementById('hp-website');
-      const tally = document.getElementById('tally');
+    // Warm the NEXT mesa while the contributor reviews the current one: fetch its deck and preload
+    // every crop so the next grid renders near-instantly (cached images => no shimmer wait).
+    async function prefetchNext() {
+      if (prefetching || nextDeck) return;
+      prefetching = true;
       try {
-        const res = await fetch('/api/vote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cid: card.cid, value: value,
-                                 form_token: window.__formToken, website: hp ? hp.value : '' }),
-        });
-        if (res.status === 429) {
-          tally.textContent = 'Vas muy rápido, espera un momento…';
-          goodBtn.disabled = badBtn.disabled = false;
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
-        if (data && data.ok) {
-          tally.innerHTML = '¡Gracias! · <b class="s">' + (data.strange || 0) + ' extrañas</b> · <b class="g">' + (data.good || 0) + ' bien</b>';
-          voted++;
-          setTimeout(next, 550);
-        } else {
-          tally.textContent = 'No se pudo enviar';
-          goodBtn.disabled = badBtn.disabled = false;
-        }
+        const items = await fetchDeck();
+        nextDeck = items;
+        items.forEach((it) => { const im = new Image(); im.src = it.img_url; });
+      } catch (e) { nextDeck = null; } finally { prefetching = false; }
+    }
+
+    async function loadDeck() {
+      if (loading) return;
+      loading = true;
+      try {
+        let items;
+        if (nextDeck && nextDeck.length) { items = nextDeck; nextDeck = null; }  // use the prefetched mesa
+        else { nextDeck = null; items = await fetchDeck(); }
+        deck = items;
+        if (!deck.length) { renderEmpty('No hay mesas disponibles por ahora.'); return; }
+        renderDeck();
+        prefetchNext();                  // queue up the following mesa
       } catch (e) {
-        tally.textContent = 'Error de red';
-        goodBtn.disabled = badBtn.disabled = false;
-      }
+        board.innerHTML = '<div class="err">No se pudo cargar la mesa. Recarga la página para intentarlo.</div>';
+        meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
+      } finally { loading = false; }
     }
 
-    async function loadSiblings(card) {
-      const box = document.getElementById('siblings');
-      const toggle = document.getElementById('sib-toggle');
-      if (!box.hidden) { box.hidden = true; return; }
-      box.hidden = false;
-      box.innerHTML = '<div class="c">Cargando…</div>';
-      try {
-        const data = await (await fetch('/api/acta-crops?cid=' + encodeURIComponent(card.cid))).json();
-        box.innerHTML = '';
-        for (const s of (data.items || [])) {
-          const d = document.createElement('div');
-          d.className = 'sib';
-          d.innerHTML = '<img loading="lazy" src="' + s.img_url + '" alt="casilla de la misma acta">' +
-                        '<div class="c">' + s.strange + ' extrañas · ' + s.good + ' bien</div>';
-          box.appendChild(d);
-        }
-        if (!box.children.length) box.innerHTML = '<div class="c">Sin más casillas.</div>';
-      } catch (e) { box.innerHTML = '<div class="c">No se pudieron cargar.</div>'; }
-      toggle.textContent = 'Ocultar las otras casillas';
+    function sendBatch(strange, good) {
+      const hp = document.getElementById('hp-website');
+      return fetch('/api/vote-batch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strange: strange, good: good,
+                               form_token: window.__formToken, website: hp ? hp.value : '' }),
+      }).then(async (res) => {
+        if (res.status === 429) { showToast('Vas muy rápido, espera un momento…', true); return; }
+        const data = await res.json().catch(() => ({}));
+        if (!(data && data.ok) && turnstileOn) { window.__formToken = ''; ensureSession(); }
+      }).catch(() => {});
     }
 
-    async function next() {
-      progressEl.textContent = voted ? ('Has votado ' + voted + ' casilla' + (voted === 1 ? '' : 's')) : '';
-      if (queue.length < 4) refill();  // prefetch when running low
-      if (!queue.length) {
-        await refill();
-        if (!queue.length) { renderEmpty('No hay más casillas por ahora. ¡Gracias por participar!'); return; }
-      }
-      renderCard(queue.shift());
+    function submitDeck() {
+      if (sending) return;
+      if (!voteReady()) { showToast('Verificando…', true); ensureSession(); return; }
+      sending = true;
+      const strange = deck.map((it) => it.cid).filter((c) => marked.has(c));
+      const good = deck.map((it) => it.cid).filter((c) => !marked.has(c));
+      reviewed++;
+      persistReviewed();
+      renderReviewed();                  // tick the personal chip up immediately (count + rank + progress)
+      if (window.e14BumpReviews) window.e14BumpReviews(1);  // and the community total in the app bar
+      // On a milestone, let the rank chip's unlock toast carry the moment; otherwise a plain thanks.
+      const r = rankFor(reviewed);
+      if (r && r.at > lastRankAt) { lastRankAt = r.at; celebrateRank(r); }
+      else { showToast(thanks()); }
+      sendBatch(strange, good);          // optimistic: don't block the next mesa on the response
+      board.innerHTML = skeleton();
+      bar.hidden = true;
+      sending = false;
+      loadDeck();
     }
 
-    (async function start() {
-      await refill();
-      if (!queue.length) { renderEmpty('No hay casillas disponibles todavía.'); return; }
-      next();
-    })();
+    sendBtn.addEventListener('click', submitDeck);
+    skipBtn.addEventListener('click', () => { showToast('Mesa saltada', true); board.innerHTML = skeleton(); bar.hidden = true; loadDeck(); });
+
+    board.innerHTML = skeleton();   // initial shimmer; loadDeck reconciles it into the real mesa
+    loadDeck();
   </script>
 </body>
 </html>

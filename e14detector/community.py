@@ -461,6 +461,19 @@ class CommunityStore:
             voters.setdefault(doc, set()).add(r["voter_token"])
         return {doc: len(v) for doc, v in voters.items()}
 
+    def total_reviews(self) -> int:
+        """How many mesas the community has reviewed in total — one "revisión" per completed mesa
+        (an Enviar votes on a mesa's casillas). Counted as distinct (person, mesa) pairs across both
+        vote directions, so an all-"se ve bien" submission counts too and re-reviewing the same mesa
+        doesn't double-count. The mesa id is the field key minus its last 3 (page:row:section) parts,
+        matching ``acta_popularity``."""
+        seen: set[tuple[str, str]] = set()
+        with self._lock:
+            for tbl in ("flags", "appeals"):
+                for r in self.conn.execute(f"SELECT field_key, voter_token FROM {tbl}"):
+                    seen.add((r["voter_token"], r["field_key"].rsplit(":", 3)[0]))
+        return len(seen)
+
     def published_keys(self) -> list[str]:
         """All field keys currently published as strange (few — only confirmed ones)."""
         with self._lock:
@@ -633,3 +646,30 @@ class CommunityStore:
             ).fetchall()
         return [{"field_key": r["field_key"], "good": r["good"] or 0,
                  "strange": r["strange"] or 0} for r in rows]
+
+
+def make_store(sqlite_path: str | Path | None = None):
+    """Open the community store, picking the backend by environment.
+
+    If ``AURORA_CLUSTER_ARN`` + ``AURORA_SECRET_ARN`` are set, votes go to the
+    durable Aurora/Postgres backend (over the RDS Data API); otherwise the local
+    SQLite store is used (tests, local dev, the single-machine fallback). Both
+    expose the same API, so callers (``webapp.py``, ``vote_worker.py``) are
+    identical either way. ``sqlite_path`` is required only on the SQLite path.
+    """
+    import os
+
+    cluster = os.environ.get("AURORA_CLUSTER_ARN")
+    secret = os.environ.get("AURORA_SECRET_ARN")
+    if cluster and secret:
+        from .community_pg import PgCommunityStore  # lazy: keeps boto3 off the SQLite path
+
+        return PgCommunityStore(
+            cluster, secret, database=os.environ.get("AURORA_DATABASE", "e14")
+        )
+    if sqlite_path is None:
+        raise RuntimeError(
+            "make_store: no Aurora env (AURORA_CLUSTER_ARN/AURORA_SECRET_ARN) and no "
+            "sqlite_path given"
+        )
+    return CommunityStore(sqlite_path)

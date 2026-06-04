@@ -19,34 +19,34 @@
     th { color:var(--muted); font-weight:600; position:sticky; top:0; background:#fff; }
     td.num { text-align:right; font-variant-numeric: tabular-nums; }
     a { color: var(--accent); text-decoration:none; }
-    .tag { display:inline-block; border-radius:999px; padding:1px 8px; font-size:11px; border:1px solid var(--line); }
-    .s-STRANGE { background:#fff1f0; color:var(--bad); border-color:#f1a7a0; }
-    .s-PENDING { background:#ddf4ff; color:var(--accent); border-color:#9ccbf0; }
-    .s-CLEAN { background:#eaf6ec; color:#1a7f37; border-color:#aedcb8; }
-    .s-NONE { color:var(--muted); }
     .muted { color: var(--muted); }
     .pipeline { margin-top:12px; padding:8px 12px; border-radius:8px; font-size:13px; border:1px solid var(--line); }
     .pipeline.ok { background:#eaf6ec; border-color:#aedcb8; }
     .pipeline.warn { background:#fff8e6; border-color:#e6c34a; }
     .pipeline .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:#1a7f37; vertical-align:middle; }
     .pipeline.warn .dot { background:#b88200; }
+    .status { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    .tile { border:1px solid var(--line); border-left-width:4px; border-radius:6px; padding:6px 10px; font-size:12px; color:var(--muted); min-width:120px; }
+    .tile b { display:block; font-size:14px; color:var(--ink); margin-top:2px; }
+    .tile.ok { border-left-color:#1a7f37; }
+    .tile.warn { border-left-color:#b88200; background:#fff8e6; }
+    .tile.bad { border-left-color:var(--bad); background:#fdeceb; }
+    .errlist { margin-top:8px; font-size:12px; color:var(--bad); }
+    .errlist div { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   </style>
 </head>
 <body>
   <header>
     <h1>Panel de votación &mdash; operador</h1>
-    <div class="muted">Datos privados (conteos + veredictos de IA). No indexado. Casillas con actividad de la comunidad.<br>
-      Modelo en vivo (poll): <b>{{ live_model }}</b> &middot; en cada fila puedes probar la IA en vivo o con otro modelo.</div>
+    <div class="muted">Datos privados (conteos de la comunidad). No indexado. Casillas con actividad de la comunidad.</div>
     <div class="cards">
       <div class="card">campos<b>{{ summary.fields }}</b></div>
       <div class="card">votos totales<b>{{ summary.votes }}</b></div>
-      <div class="card">en revisi&oacute;n<b>{{ summary.pending }}</b></div>
       <div class="card">sospechosas (publicadas)<b>{{ summary.strange }}</b></div>
-      <div class="card">IA: limpias<b>{{ summary.clean }}</b></div>
       <div class="card">apelaciones aceptadas<b>{{ summary.cleared }}</b></div>
     </div>
     {% if pipeline %}
-    <div class="pipeline {{ 'warn' if pipeline.pointer_stale else 'ok' }}">
+    <div class="pipeline {{ 'warn' if pipeline.pointer_stale and not pipeline.complete else 'ok' }}">
       <span class="dot"></span>
       <b>Publicación:</b>
       {{ pipeline.synced_label }} de {{ pipeline.total_label }} actas servidas ({{ pipeline.pct }}%)
@@ -55,15 +55,36 @@
       {%- if pipeline.pointer_age_min is not none %} &middot;
         publicación hace {{ pipeline.pointer_age_min }} min
         {%- if pipeline.pointer_raw_mb %} ({{ pipeline.pointer_raw_mb }} MB, sha {{ pipeline.pointer_sha }}){% endif %}
-        {%- if pipeline.pointer_stale %} <b>&mdash; ¿publicador detenido?</b>{% endif %}
+        {%- if pipeline.pointer_stale and not pipeline.complete %} <b>&mdash; ¿publicador detenido?</b>{% endif %}
       {%- endif %}
     </div>
+    {% endif %}
+    {% if health %}
+    <div class="status">
+      <div class="tile ok">app{% if health.region %} &middot; {{ health.region }}{% endif %}{% if health.machine %} &middot; {{ health.machine }}{% endif %}<b>activa {{ health.uptime_min }} min</b></div>
+      <div class="tile {{ 'ok' if health.db_present else 'bad' }}">DB servida<b>{{ health.db_size_mb }} MB</b></div>
+      <div class="tile {{ 'warn' if health.pointer_stale else 'ok' }}">publicaci&oacute;n<b>{% if health.pointer_age_min is not none %}hace {{ health.pointer_age_min }} min{% else %}&mdash;{% endif %}</b></div>
+      <div class="tile {{ 'ok' if health.votes_ok else 'bad' }}">backend de votos<b>{{ 'conectado' if health.votes_ok else 'SIN CONEXION' }}</b></div>
+      {% if health.publisher %}
+      <div class="tile {{ 'bad' if health.sqs is none else ('warn' if health.sqs.waiting > 100 else 'ok') }}">cola SQS<b>{% if health.sqs is none %}sin lectura{% else %}{{ health.sqs.waiting }} en espera &middot; {{ health.sqs.in_flight }} en proceso{% endif %}</b></div>
+      {% else %}
+      <div class="tile">cola SQS<b>modo local</b></div>
+      {% endif %}
+      <div class="tile {{ 'warn' if health.err_5xx else 'ok' }}">errores 5xx<b>{{ health.err_5xx }}</b></div>
+      <div class="tile {{ 'ok' if health.alerts_on else 'warn' }}">alertas<b>{{ 'Telegram' if health.alerts_on else 'sin configurar' }}</b></div>
+      <div class="tile">cach&eacute; de conteos<b>{{ health.counts_cache }}</b></div>
+    </div>
+    {% if health.recent_errors %}
+    <div class="errlist">
+      {% for e in health.recent_errors %}<div>{{ e.detail }}</div>{% endfor %}
+    </div>
+    {% endif %}
     {% endif %}
   </header>
   <main>
     <table>
       <thead><tr>
-        <th>Acta</th><th>Candidato</th><th>Votos</th><th>IA</th><th>Disp&oacute; a</th>
+        <th>Acta</th><th>Candidato</th><th>Votos</th>
         <th>Public.</th><th>Apel.</th><th>Apel. estado</th><th>Limpiada</th><th>hash</th><th></th>
       </tr></thead>
       <tbody>
@@ -72,24 +93,15 @@
         <td>{{ r.acta }}</td>
         <td>{{ r.candidate }}</td>
         <td class="num">{{ r.votes }}</td>
-        <td><span class="tag s-{{ r.vlm_state }}">{{ r.vlm_state }}</span></td>
-        <td class="num">{{ r.triggered_at_votes or "" }}</td>
         <td>{% if r.published %}s&iacute;{% endif %}</td>
         <td class="num">{{ r.appeals or "" }}</td>
         <td>{% if r.appeal_state != "NONE" %}{{ r.appeal_state }}{% endif %}</td>
         <td>{% if r.appeal_cleared %}s&iacute;{% endif %}</td>
         <td class="muted">{{ r.image_hash }}</td>
-        <td style="white-space:nowrap">
-          <a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a><br>
-          {% set fk = r.field_key|urlencode %}
-          <span class="muted">probar:</span>
-          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&model={{ m|urlencode }}" target="_blank" rel="noopener">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}<br>
-          <span class="muted">aplicar:</span>
-          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&record=1&model={{ m|urlencode }}" target="_blank" rel="noopener" onclick="return confirm('Aplicar veredicto de {{ label }} a esta casilla?')">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}
-        </td>
+        <td style="white-space:nowrap"><a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a></td>
       </tr>
       {% else %}
-      <tr><td colspan="11" class="muted">Sin actividad de la comunidad todav&iacute;a.</td></tr>
+      <tr><td colspan="9" class="muted">Sin actividad de la comunidad todav&iacute;a.</td></tr>
       {% endfor %}
       </tbody>
     </table>

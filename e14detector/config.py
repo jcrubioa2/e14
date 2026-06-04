@@ -37,6 +37,12 @@ DEFAULT_RESULTS_JSONL = DEFAULT_OUTPUT_DIR / "results" / "results.jsonl"
 # rollout progress ("X de Y actas sincronizadas"); override per-deployment.
 NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
 
+# A stale snapshot pointer only means a *stalled* publisher while the rollout is still in
+# progress; once the served set reaches ~this percent of the national total, the publisher
+# has legitimately finished and stops flipping the pointer, so the stalled-publisher alert
+# auto-suppresses (no hard switch needed). The 2% slack absorbs national-total estimate error.
+ROLLOUT_COMPLETE_PCT = float(os.environ.get("E14_ROLLOUT_COMPLETE_PCT", "98"))
+
 # A crop flagged by at least this many distinct voters gets a strong "muy reportada"
 # badge regardless of the model verdict (the crowd signal stands on its own).
 HIGH_VOTE_THRESHOLD = int(os.environ.get("E14_HIGH_VOTE_THRESHOLD", "100"))
@@ -155,6 +161,12 @@ COMMUNITY_DB = os.environ.get("E14_COMMUNITY_DB", str(DEFAULT_OUTPUT_DIR / "comm
 # Per-voter token-bucket rate limit (defeats casual scripted flooding).
 RATE_REFILL_PER_MIN = float(os.environ.get("E14_RATE_REFILL_PER_MIN", "10"))
 RATE_BUCKET = float(os.environ.get("E14_RATE_BUCKET", "20"))
+# Short-TTL cache for public per-crop tallies (counts_among) on the render paths (feed deck,
+# acta page, billboard cards). Keeps a popular acta/feed from making an Aurora (RDS Data API)
+# round-trip per view. Separate from the 45s aggregate cache: tallies tolerate a few seconds of
+# staleness (the vote response is already optimistic), so a small TTL collapses the read QPS to
+# Aurora while staying fresh. 0 disables the cache (always query the store).
+COUNTS_TTL = float(os.environ.get("E14_COUNTS_TTL", "8"))
 # Cloudflare Turnstile (anti-bot). Secret verifies server-side; sitekey is public
 # and rendered into the page. When the secret is empty, verification is skipped
 # (local/dev), so the feature degrades gracefully offline.
@@ -167,6 +179,17 @@ TURNSTILE_ENABLED = os.environ.get("E14_TURNSTILE_ENABLED", "").lower() in ("1",
 # Operator-only poll dashboard (/admin/poll): private vote counts + AI verdicts. Disabled
 # (404) unless this token is set; access requires ?key=<token>.
 ADMIN_TOKEN = os.environ.get("E14_ADMIN_TOKEN", "")
+
+# --- Web hardening -------------------------------------------------------------------------
+# Origins permitted to cast votes (comma-separated, e.g. "https://e14-poll.fly.dev,https://
+# midomain.org"). When set, /api/vote rejects a request whose Origin header is present but not
+# in this list — blocking cross-site (CSRF-style) auto-voting from another page using a
+# visitor's session. Empty => not enforced (local dev / tests). A request with NO Origin (a
+# non-browser client) is left to the rate-limit / Turnstile controls, not blocked here.
+ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("E14_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# Interactive API docs (/docs, /redoc, /openapi.json) publish the full route+schema surface.
+# Off by default (prod); set E14_EXPOSE_DOCS=1 for local exploration.
+EXPOSE_DOCS = os.environ.get("E14_EXPOSE_DOCS", "").lower() in ("1", "true", "yes")
 # Salt for the daily, rotating voter-identity hash (privacy: no raw IPs stored).
 VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
 # In-app bot check (replaces Turnstile when there is no owned domain). The acta page

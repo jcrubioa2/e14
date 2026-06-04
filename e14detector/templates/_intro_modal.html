@@ -1,0 +1,79 @@
+{# First-visit mission modal: a centered card over a blurred backdrop that explains the whole
+   idea ("revisión aleatoria, resultados públicos") the first time someone lands on the site,
+   from any page. Dismissed with the big button (or Esc / backdrop), remembered in localStorage
+   so it never shows again. Independent from the /votar "Cómo funciona" steps strip (separate
+   key). Scoped `.intro-*` CSS; colors use the editorial tokens every page defines in :root. #}
+<style>
+  .intro-overlay { position:fixed; inset:0; z-index:200; display:flex; align-items:center; justify-content:center;
+                   padding:22px; background:rgba(28,26,21,.34); backdrop-filter:saturate(1.4) blur(7px);
+                   -webkit-backdrop-filter:saturate(1.4) blur(7px); opacity:0; transition:opacity .28s ease; }
+  .intro-overlay.show { opacity:1; }
+  .intro-overlay[hidden] { display:none; }
+  .intro-card { width:100%; max-width:460px; background:var(--paper); border:1px solid var(--line);
+                border-radius:20px; padding:26px 24px 22px; box-shadow:0 24px 60px -18px rgba(28,26,21,.5);
+                transform:translateY(10px) scale(.985); transition:transform .3s cubic-bezier(.2,.7,.2,1);
+                max-height:calc(100vh - 44px); overflow-y:auto; }
+  .intro-overlay.show .intro-card { transform:none; }
+  .intro-eyebrow { display:flex; align-items:center; gap:9px; font-size:11px; font-weight:700;
+                   letter-spacing:.16em; text-transform:uppercase; color:var(--red-deep); }
+  .intro-tick { width:7px; height:7px; border-radius:2px; background:var(--red); transform:rotate(45deg); }
+  .intro-title { margin:13px 0 0; font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:27px;
+                 line-height:1.08; letter-spacing:-.012em; }
+  .intro-title em { font-style:italic; color:var(--red-deep); }
+  .intro-body { margin-top:13px; }
+  .intro-body p { margin:0 0 11px; color:var(--ink-soft); font-size:14.5px; line-height:1.58; }
+  .intro-body p:last-child { margin-bottom:0; }
+  .intro-body b { color:var(--ink); font-weight:700; }
+  .intro-hl { color:var(--red-deep); font-weight:700; }
+  .intro-btn { margin-top:20px; width:100%; border:none; cursor:pointer; border-radius:13px; height:52px;
+               background:var(--accent); color:var(--paper); font:inherit; font-weight:700; font-size:15.5px;
+               box-shadow:0 10px 26px -10px rgba(22,20,16,.55); transition:background .15s, transform .1s; }
+  .intro-btn:hover { background:#000; }
+  .intro-btn:active { transform:scale(.98); }
+  .intro-foot { margin:13px 0 0; text-align:center; color:var(--ink-faint); font-size:12px; }
+  @media (max-width:420px) { .intro-title { font-size:23px; } .intro-card { padding:22px 18px 18px; } }
+  @media (prefers-reduced-motion: reduce) { .intro-overlay, .intro-card { transition:none; } }
+</style>
+<div class="intro-overlay" id="intro-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="intro-title">
+  <div class="intro-card">
+    <div class="intro-eyebrow"><span class="intro-tick"></span> Veeduría ciudadana &middot; E-14</div>
+    <h2 class="intro-title" id="intro-title">Revisi&oacute;n <em>aleatoria</em>, resultados <em>p&uacute;blicos</em></h2>
+    <div class="intro-body">
+      <p>Esta es una <b>veedur&iacute;a ciudadana</b> de las actas E-14 de las elecciones presidenciales de Colombia 2026 &mdash; la planilla donde se anotan a mano los votos de cada mesa.</p>
+      <p>Te mostramos las casillas de una <b>mesa al azar y an&oacute;nima</b>: no sabes de qu&eacute; acta son. Marcas las que se vean <span class="intro-hl">extrañas</span>. As&iacute; nadie puede dirigir la revisi&oacute;n hacia un resultado concreto &mdash; todos miramos una muestra justa.</p>
+      <p>Lo que vota la comunidad es <b>p&uacute;blico y auditable</b>: cada casilla muestra cu&aacute;ntas personas la ven extra&ntilde;a, y las actas m&aacute;s reportadas quedan a la vista de todos.</p>
+    </div>
+    <button class="intro-btn" id="intro-accept" type="button">Entendido, empezar &rarr;</button>
+    <p class="intro-foot">C&oacute;digo abierto &middot; sin cuentas &middot; desde el celular</p>
+  </div>
+</div>
+<script>
+  // Show once, ever: a returning visitor (localStorage flag set) never even reveals the overlay.
+  (function () {
+    var ov = document.getElementById('intro-overlay');
+    if (!ov) return;
+    var KEY = 'e14_intro_seen';
+    var seen = false;
+    try { seen = localStorage.getItem(KEY) === '1'; } catch (e) {}
+    if (seen) return;
+    ov.hidden = false;
+    requestAnimationFrame(function () { ov.classList.add('show'); });   // next frame => fade-in runs
+    document.body.style.overflow = 'hidden';                            // lock scroll while open
+    var btn = document.getElementById('intro-accept');
+    try { btn.focus({ preventScroll: true }); } catch (e) {}
+    var closed = false;
+    function dismiss() {
+      if (closed) return;
+      closed = true;
+      ov.classList.remove('show');
+      try { localStorage.setItem(KEY, '1'); } catch (e) {}
+      document.body.style.overflow = '';
+      var done = function () { ov.hidden = true; };
+      ov.addEventListener('transitionend', done, { once: true });
+      setTimeout(done, 400);   // fallback (reduced-motion has no transitionend)
+    }
+    btn.addEventListener('click', dismiss);
+    ov.addEventListener('click', function (e) { if (e.target === ov) dismiss(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !closed) dismiss(); });
+  })();
+</script>

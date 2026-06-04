@@ -315,6 +315,21 @@ def cmd_publish_fleet(args: argparse.Namespace) -> int:
     info = publish_fleet(Path(args.output_dir), bucket=args.bucket, verbose=True)
     if info is None:
         return 1
+    print(f"publish-fleet: ok (sha={info.get('sha256', '?')[:12]})")
+    return 0
+
+
+def cmd_publish_reconcile(args: argparse.Namespace) -> int:
+    """Rebuild the upload manifest from the bucket so a fresh machine resumes incrementally."""
+    from .publish import reconcile_manifest
+
+    info = reconcile_manifest(
+        output_dir=Path(args.output_dir), bucket=args.bucket, prefix=args.prefix
+    )
+    print(
+        f"reconcile: bucket had {info['listed']} crop object(s); "
+        f"manifest {info['before']} -> {info['after']} key(s)"
+    )
     return 0
 
 
@@ -590,9 +605,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish_db.add_argument(
         "--allow-shrink", action="store_true",
-        help="override the guard that refuses to replace the live DB with one <50% its size",
+        help="override the guard that refuses to replace the live DB with one holding <50% its "
+             "actas (or, for legacy pointers, <50% its bytes)",
     )
     publish_db.set_defaults(func=cmd_publish_db)
+
+    reconcile = sub.add_parser(
+        "publish-reconcile",
+        help="rebuild the upload manifest from the bucket so any machine resumes incrementally "
+        "(run once before publish-loop on a new publisher)",
+    )
+    reconcile.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    reconcile.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    reconcile.add_argument("--prefix", default="crops/", help="object key prefix to list")
+    reconcile.set_defaults(func=cmd_publish_reconcile)
 
     publish_loop = sub.add_parser(
         "publish-loop",

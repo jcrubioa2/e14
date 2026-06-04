@@ -108,7 +108,7 @@ def refresh_progress(queue: dict[str, Any], *, results_db: Path | None) -> None:
         return
     done = load_done_counts(results_db)
     for dep, info in queue["departments"].items():
-        dn = done.get(dep, info.get("done", 0))
+        dn = done.get(dep, 0)
         info["done"] = dn
         if _dept_complete(info):
             info["status"] = "done"
