@@ -126,6 +126,12 @@
              animation:sh 1.25s infinite linear; }
     @keyframes sh { to { background-position:-200% 0; } }
 
+    /* Entrance for tiles that DIDN'T already have a placeholder (deck has more casillas than the
+       skeleton guessed). They slide+scale in one by one; reused placeholders stay put, so the grid
+       grows into its target instead of swapping like a new page. The actual transition (with its
+       per-tile stagger delay) is set inline in JS, then cleared so hover stays snappy. */
+    .tile.enter { opacity:0; transform:scale(.92) translateY(10px); }
+
     .note { margin:20px 2px 0; text-align:center; color:var(--ink-faint); font-size:12.5px; line-height:1.5; }
 
     .empty, .err { text-align:center; color:var(--ink-soft); padding:64px 18px; font-size:15px; }
@@ -191,12 +197,9 @@
       <span class="reviewed" id="reviewed"></span>
     </div>
 
-    <div id="board">
-      <div class="grid" aria-hidden="true">
-        <div class="tile skeleton"></div><div class="tile skeleton"></div><div class="tile skeleton"></div>
-        <div class="tile skeleton"></div><div class="tile skeleton"></div><div class="tile skeleton"></div>
-      </div>
-    </div>
+    <!-- The skeleton grid is rendered by JS (skeleton()) with a dynamic tile count so the loading
+         state varies; the real deck then reconciles into these same tiles. -->
+    <div id="board"></div>
     <div class="note" id="note" hidden>¿Ninguna se ve rara? Envía la mesa tal cual — todas se cuentan como “se ven bien”.</div>
   </main>
 
@@ -308,35 +311,72 @@
       updateCount();
     }
 
+    // Turn a tile element into a live casilla: load its crop, wire mark/undo. Used both for
+    // reused placeholders (filled in place) and brand-new tiles (which also animate in).
+    function fillTile(tile, it) {
+      tile.tabIndex = 0;
+      tile.setAttribute('role', 'button');
+      tile.setAttribute('aria-pressed', 'false');
+      tile.setAttribute('aria-label', 'Marcar esta casilla como extraña');
+      tile.innerHTML = '<div class="thumb"><img alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
+        '<span class="cap" aria-hidden="true">Extraña</span>';
+      const thumb = tile.querySelector('.thumb');
+      const img = thumb.querySelector('img');
+      const ready = () => { tile.classList.remove('is-loading'); thumb.classList.add('ready'); };
+      if (img.complete && img.naturalWidth) ready();
+      else {
+        img.addEventListener('load', ready);
+        img.addEventListener('error', () => { tile.classList.remove('is-loading'); thumb.classList.add('failed'); });
+      }
+      tile.addEventListener('click', () => toggle(tile, it.cid));
+      tile.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(tile, it.cid); }
+      });
+    }
+
+    // Reconcile the on-screen grid (currently shimmering skeletons) INTO the loaded deck instead of
+    // swapping the whole board. Placeholders that line up with a casilla are filled where they sit
+    // (preserved). If the deck has more casillas than we guessed, the extra tiles appear one by one
+    // with a staggered slide-in. If we guessed too many, the leftovers retire one by one.
     function renderDeck() {
       marked.clear();
-      board.innerHTML = '';
-      const grid = document.createElement('div');
-      grid.className = 'grid';
-      deck.forEach((it, idx) => {
-        const tile = document.createElement('div');
-        tile.className = 'tile is-loading';
-        tile.tabIndex = 0;
-        tile.setAttribute('role', 'button');
-        tile.setAttribute('aria-pressed', 'false');
-        tile.setAttribute('aria-label', 'Marcar esta casilla como extraña');
-        tile.innerHTML = '<div class="thumb"><img alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
-          '<span class="cap" aria-hidden="true">Extraña</span>';
-        const thumb = tile.querySelector('.thumb');
-        const img = thumb.querySelector('img');
-        const ready = () => { tile.classList.remove('is-loading'); thumb.classList.add('ready'); };
-        if (img.complete && img.naturalWidth) ready();
-        else {
-          img.addEventListener('load', ready);
-          img.addEventListener('error', () => { tile.classList.remove('is-loading'); thumb.classList.add('failed'); });
+      let grid = board.querySelector('.grid');
+      if (!grid) { board.innerHTML = ''; grid = document.createElement('div'); grid.className = 'grid'; board.appendChild(grid); }
+      grid.removeAttribute('aria-hidden');          // it's interactive now, not decorative
+      const placeholders = Array.from(grid.children);
+      const need = deck.length;
+      let appeared = 0;                              // counts net-new tiles, for the entrance stagger
+
+      deck.forEach((it, i) => {
+        let tile = placeholders[i];
+        const isNew = !tile;
+        if (isNew) {
+          tile = document.createElement('div');
+          tile.className = 'tile is-loading enter';
+          grid.appendChild(tile);
+        } else {
+          tile.className = 'tile is-loading';        // reuse the placeholder in place
         }
-        tile.addEventListener('click', () => toggle(tile, it.cid));
-        tile.addEventListener('keydown', (e) => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(tile, it.cid); }
-        });
-        grid.appendChild(tile);
+        fillTile(tile, it);
+        if (isNew) {
+          const delay = appeared++ * 0.07;
+          requestAnimationFrame(() => {
+            tile.style.transition = 'opacity .42s ease ' + delay + 's, transform .46s cubic-bezier(.2,.75,.25,1) ' + delay + 's';
+            tile.classList.remove('enter');
+          });
+          setTimeout(() => { tile.style.transition = ''; }, (0.46 + delay) * 1000 + 80);
+        }
       });
-      board.appendChild(grid);
+
+      // Retire any placeholders the deck didn't need, one by one.
+      placeholders.slice(need).forEach((tile, k) => {
+        const d = k * 0.05;
+        tile.style.pointerEvents = 'none';
+        tile.style.transition = 'opacity .3s ease ' + d + 's, transform .3s ease ' + d + 's';
+        requestAnimationFrame(() => { tile.style.opacity = '0'; tile.style.transform = 'scale(.9)'; });
+        setTimeout(() => tile.remove(), 300 + d * 1000 + 60);
+      });
+
       deckCountEl.textContent = deck.length;
       meta.hidden = false;
       reviewedEl.textContent = reviewed ? ('· ' + reviewed + ' mesa' + (reviewed === 1 ? '' : 's') + ' revisada' + (reviewed === 1 ? '' : 's')) : '';
@@ -345,9 +385,12 @@
       updateCount();
     }
 
+    // Dynamic placeholder count (5–13) so the loading state isn't always the same six tiles. The
+    // deck then grows/shrinks this grid into its real size.
+    function randSkel() { return 5 + Math.floor(Math.random() * 9); }
     function skeleton() {
       return '<div class="grid" aria-hidden="true">' +
-        '<div class="tile skeleton"></div>'.repeat(6) + '</div>';
+        '<div class="tile skeleton"></div>'.repeat(randSkel()) + '</div>';
     }
 
     function renderEmpty(msg) {
@@ -407,6 +450,7 @@
     sendBtn.addEventListener('click', submitDeck);
     skipBtn.addEventListener('click', () => { showToast('Mesa saltada', true); board.innerHTML = skeleton(); bar.hidden = true; loadDeck(); });
 
+    board.innerHTML = skeleton();   // initial shimmer; loadDeck reconciles it into the real mesa
     loadDeck();
   </script>
 </body>
