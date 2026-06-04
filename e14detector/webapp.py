@@ -235,7 +235,9 @@ def _acta_hash_conn(path: Path = ACTA_HASHES_PATH) -> "sqlite3.Connection | None
     try:
         if not path.exists():
             return None
-        return _connect(path)
+        # Shared across requests (and thus threads), unlike the per-request results conn — so it
+        # must not be thread-bound. Read-only + SELECT-only, so cross-thread reads are safe.
+        return _connect(path, same_thread=False)
     except sqlite3.Error as exc:  # noqa: BLE001 — the link is a nicety, never crash serving
         print(f"_acta_hash_conn: {exc}", flush=True)
         return None
@@ -271,9 +273,9 @@ def official_url_for(document_id: str | None) -> str | None:
         return None
     return official_acta_url(document_id, bytes(row[0]).hex())
 
-def _connect(db_path: Path) -> sqlite3.Connection:
+def _connect(db_path: Path, same_thread: bool = True) -> sqlite3.Connection:
     uri = f"file:{db_path.resolve()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=30.0)
+    conn = sqlite3.connect(uri, uri=True, timeout=30.0, check_same_thread=same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA busy_timeout=30000")
