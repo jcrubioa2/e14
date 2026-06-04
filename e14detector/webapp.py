@@ -429,6 +429,161 @@ def parse_field_key(field_key: str) -> tuple[str, int, int, str] | None:
         return None
 
 
+def _candidate_display_name(candidate_name: str | None, candidate_number: int | None) -> str:
+    name = (candidate_name or "").strip()
+    if name:
+        return name
+    if candidate_number is not None:
+        return f"Candidato {candidate_number}"
+    return "Sin nombre"
+
+
+def reports_by_candidate(
+    db: sqlite3.Connection, field_keys: list[str], *, chunk_size: int = 400
+) -> list[dict[str, Any]]:
+    """Group distinct flagged crops by candidate; each crop counts once in the stats.
+
+    ``field_keys`` should be the distinct keys from ``flags`` (see
+    ``CommunityStore.distinct_flagged_field_keys``). Multiple voters on the same crop
+    do not increase its count.
+    """
+    parsed: list[tuple[str, str, int, int, str]] = []
+    seen: set[str] = set()
+    for fk in field_keys:
+        if fk in seen:
+            continue
+        seen.add(fk)
+        parts = parse_field_key(fk)
+        if parts is None:
+            continue
+        doc, page, row, section = parts
+        parsed.append((fk, doc, page, row, section))
+    if not parsed:
+        return []
+
+    counts: collections.Counter[str] = collections.Counter()
+    for i in range(0, len(parsed), chunk_size):
+        batch = parsed[i : i + chunk_size]
+        # Read-only results connection (query_only) — use a UNION subquery, not temp tables.
+        union_sql = " UNION ALL ".join(
+            "SELECT ? AS fk, ? AS doc, ? AS page, ? AS row, ? AS sec" for _ in batch
+        )
+        params: list[Any] = []
+        for fk, doc, page, row, section in batch:
+            params.extend([fk, doc, page, row, section])
+        rows = db.execute(
+            f"""
+            SELECT l.fk, vf.candidate_name, vf.candidate_number
+            FROM ({union_sql}) AS l
+            JOIN vote_fields vf
+              ON vf.document_id = l.doc
+             AND vf.page_number = l.page
+             AND vf.row_number = l.row
+             AND COALESCE(vf.section, '') = l.sec
+             AND vf.row_type = 'candidate'
+            """,
+            params,
+        ).fetchall()
+        matched = {r["fk"] for r in rows}
+        for r in rows:
+            label = _candidate_display_name(r["candidate_name"], r["candidate_number"])
+            counts[label] += 1
+        for fk, *_ in batch:
+            if fk not in matched:
+                counts["Sin nombre"] += 1
+
+    total = sum(counts.values())
+    out = [
+        {
+            "name": name,
+            "reports": n,
+            "pct": round(100.0 * n / total, 1) if total else 0.0,
+        }
+        for name, n in counts.most_common()
+    ]
+    return out
+
+
+GEO_DIR = Path(__file__).resolve().parent / "geo"
+MUNICIPIOS_GEOJSON = GEO_DIR / "colombia_municipios.geojson"
+DEPARTAMENTOS_GEOJSON = GEO_DIR / "colombia_departamentos.geojson"
+
+
+def doc_muni_index(db: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+    """document_id -> (department_code, municipality_code) for browsable actas."""
+    rows = db.execute(
+        """
+        SELECT document_id, department_code, municipality_code
+        FROM documents
+        WHERE n_candidates > 0
+          AND department_code IS NOT NULL AND department_code <> ''
+          AND municipality_code IS NOT NULL AND municipality_code <> ''
+        """
+    ).fetchall()
+    out: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        dep = str(r["department_code"]).strip().zfill(2)
+        muni = str(r["municipality_code"]).strip().zfill(3)
+        out[r["document_id"]] = (dep, muni)
+    return out
+
+
+def municipio_report_stats(
+    doc_index: dict[str, tuple[str, str]],
+    reported_docs: set[str],
+    geo: GeoNames,
+) -> dict[str, Any]:
+    """Per-municipio and per-department mesa counts with crowd-reported mesas."""
+    totals: collections.Counter[tuple[str, str]] = collections.Counter()
+    reported: collections.Counter[tuple[str, str]] = collections.Counter()
+    for doc_id, key in doc_index.items():
+        totals[key] += 1
+        if doc_id in reported_docs:
+            reported[key] += 1
+
+    municipios: list[dict[str, Any]] = []
+    for (dep, muni), total in totals.items():
+        rep = reported.get((dep, muni), 0)
+        municipios.append({
+            "dep": dep,
+            "muni": muni,
+            "name": geo.muni(dep, muni) or muni,
+            "dep_name": geo.dept(dep) or dep,
+            "total": total,
+            "reported": rep,
+            "pct": round(100.0 * rep / total, 1) if total else 0.0,
+        })
+    municipios.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"], r["muni"]))
+
+    dept_totals: collections.Counter[str] = collections.Counter()
+    dept_reported: collections.Counter[str] = collections.Counter()
+    for (dep, _muni), total in totals.items():
+        dept_totals[dep] += total
+        dept_reported[dep] += reported.get((dep, _muni), 0)
+
+    departments: list[dict[str, Any]] = []
+    for dep in sorted(dept_totals.keys()):
+        total = dept_totals[dep]
+        rep = dept_reported[dep]
+        departments.append({
+            "dep": dep,
+            "name": geo.dept(dep) or dep,
+            "total": total,
+            "reported": rep,
+            "pct": round(100.0 * rep / total, 1) if total else 0.0,
+        })
+    departments.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"]))
+
+    return {
+        "municipios": municipios,
+        "departments": departments,
+        "summary": {
+            "total_mesas": sum(dept_totals.values()),
+            "reported_mesas": len(reported_docs & doc_index.keys()),
+        },
+    }
+
+
 def _es_thousands(n: int) -> str:
     """Format an integer with Colombian thousands separators (1234567 -> '1.234.567')."""
     return f"{n:,}".replace(",", ".")
@@ -1176,6 +1331,13 @@ def create_app(
         pages = max(1, math.ceil(len(_agg_cached("popularity", community.acta_popularity)) / REPORTES_PER_PAGE))
         page = max(1, min(page, pages))
         board = _agg_cached(f"hot_actas_p{page}", lambda: _hot_actas_page(page))
+
+        def _candidate_stats() -> list[dict[str, Any]]:
+            keys = community.distinct_flagged_field_keys()
+            with conn() as db:
+                return reports_by_candidate(db, keys)
+
+        candidate_stats = _agg_cached("candidate_stats", _candidate_stats)
         canon = config.SITE_URL + "/reportes" + (f"?page={board['page']}" if board["page"] > 1 else "")
         return templates.TemplateResponse(
             request,
@@ -1185,6 +1347,7 @@ def create_app(
                 "page": board["page"],
                 "pages": board["pages"],
                 "total": board["total"],
+                "candidate_stats": candidate_stats,
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
                 "active": "reportes",
@@ -1197,6 +1360,52 @@ def create_app(
                 ),
             },
         )
+
+    def _map_stats_all() -> dict[str, Any]:
+        pop = _agg_cached("popularity", community.acta_popularity)
+        reported = set(pop.keys())
+
+        def build() -> dict[str, Any]:
+            with conn() as db:
+                idx = doc_muni_index(db)
+            return municipio_report_stats(idx, reported, geo)
+
+        return _agg_cached("map_stats_all", build)
+
+    @app.get("/api/reportes/map")
+    async def api_reportes_map(department: str | None = None):
+        """Choropleth stats: national department rollups or per-municipio drill-down."""
+        stats = _map_stats_all()
+        if department:
+            dep = str(department).strip().zfill(2)
+            munis = [m for m in stats["municipios"] if m["dep"] == dep]
+            depts = [d for d in stats["departments"] if d["dep"] == dep]
+            return {
+                "view": "municipios",
+                "department": dep,
+                "departments": depts,
+                "municipios": munis,
+                "summary": stats["summary"],
+            }
+        return {
+            "view": "departments",
+            "department": None,
+            "departments": stats["departments"],
+            "municipios": stats["municipios"],
+            "summary": stats["summary"],
+        }
+
+    @app.get("/geo/colombia_municipios.geojson")
+    async def geo_municipios():
+        if not MUNICIPIOS_GEOJSON.is_file():
+            raise HTTPException(status_code=404, detail="map data not found")
+        return FileResponse(MUNICIPIOS_GEOJSON, media_type="application/geo+json")
+
+    @app.get("/geo/colombia_departamentos.geojson")
+    async def geo_departamentos():
+        if not DEPARTAMENTOS_GEOJSON.is_file():
+            raise HTTPException(status_code=404, detail="map data not found")
+        return FileResponse(DEPARTAMENTOS_GEOJSON, media_type="application/geo+json")
 
     @app.get("/buscar")
     async def buscar(

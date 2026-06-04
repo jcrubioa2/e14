@@ -22,6 +22,15 @@ from e14detector.webapp import create_app
 
 # --- CommunityStore unit tests --------------------------------------------
 
+def test_distinct_flagged_field_keys_one_per_crop(tmp_path: Path) -> None:
+    store = CommunityStore(tmp_path / "c.sqlite")
+    store.record_flag("k1", "a")
+    store.record_flag("k1", "b")
+    store.record_flag("k2", "a")
+    assert store.distinct_flagged_field_keys() == ["k1", "k2"]
+    store.close()
+
+
 def test_dedup_one_vote_per_identity(tmp_path: Path) -> None:
     store = CommunityStore(tmp_path / "c.sqlite")
     assert store.record_flag("k", "voter-a") is True
