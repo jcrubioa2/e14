@@ -456,12 +456,14 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
     """
     now = now or datetime.now(timezone.utc)
     total = max(1, config.NATIONAL_TOTAL_ACTAS)
+    # A browsable acta is one with >=1 candidate crop — exactly documents.n_candidates>0 (the
+    # precomputed column). Count it off the 122k-row documents table via idx_doc_browse instead of
+    # a COUNT(DISTINCT) + JOIN scan over the 1.5M-row vote_fields table (which dominated /browse).
     row = conn.execute(
-        "SELECT COUNT(DISTINCT vf.document_id) AS synced, "
-        "       MIN(d.processing_timestamp) AS first_ts, "
-        "       MAX(d.processing_timestamp) AS last_ts "
-        "FROM vote_fields vf JOIN documents d ON d.document_id = vf.document_id "
-        "WHERE vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL"
+        "SELECT COUNT(*) AS synced, "
+        "       MIN(processing_timestamp) AS first_ts, "
+        "       MAX(processing_timestamp) AS last_ts "
+        "FROM documents WHERE n_candidates>0"
     ).fetchone()
     synced = min(row["synced"] or 0, total)
     pct = round(synced * 100 / total, 1)
@@ -997,7 +999,7 @@ def create_app(
             municipios = _municipios(db, department, geo)
             zonas = _zonas(db, department, municipality)
             puestos = _puestos(db, department, municipality, zone)
-            progress = compute_sync_progress(db)
+            progress = _agg_cached("sync_progress", lambda: compute_sync_progress(db))
         high_voted_docs = {k.rsplit(":", 3)[0] for k in _agg_cached(
             "high_voted", lambda: community.high_voted_fields(config.HIGH_VOTE_THRESHOLD))}
         actas = [
