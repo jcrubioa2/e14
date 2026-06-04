@@ -35,6 +35,8 @@ from .vote_queue import make_publisher
 # /browse paginates over ACTAS (grouped), not individual crops.
 BROWSE_ACTAS_PER_PAGE = 12
 HOTLIST_SIZE = 8
+# /reportes pages through ALL reported actas (the billboard is no longer a fixed top-N).
+REPORTES_PER_PAGE = 12
 # The most-voted actas float silently to the top of /browse (crowd attention compounds).
 # Capped well under SQLite's bound-parameter limit so the "exclude these" clause is safe.
 VOTED_FLOAT_CAP = 300
@@ -280,6 +282,19 @@ def _connect(db_path: Path, same_thread: bool = True) -> sqlite3.Connection:
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+_FLAG_K = 8.0
+
+
+def _flag_level(strange: int, good: int) -> float:
+    """How red an "extraña" marker gets, 0..1. Scales with the NET margin (extrañas minus
+    "se ve bien"), NOT the raw ratio — so a single report is a faint blush and the red deepens as
+    consensus piles up, instead of jumping to full red on the first vote. ``_FLAG_K`` sets the
+    ramp: net == K is ~half red; it saturates toward 1 but never quite screams. 0 when the crowd
+    is balanced or leans "se ve bien"."""
+    net = strange - good
+    return net / (net + _FLAG_K) if net > 0 else 0.0
 
 
 def _warm_db(db_path: Path) -> None:
@@ -692,8 +707,12 @@ def create_app(
 
     @app.get("/")
     async def home():
-        # The public landing is the crowd-voting browser.
-        return RedirectResponse("/browse", status_code=308)
+        # The public landing is the anonymized review feed — the flagship, viral flow.
+        # 307 (temporary), NOT 308: the landing used to permanently redirect to /browse, and a
+        # 308 is cached by browsers indefinitely. Returning visitors who cached "/ -> /browse"
+        # would otherwise never re-ask the server and keep landing on /buscar. A temporary
+        # redirect is re-checked every visit, so the default can change safely.
+        return RedirectResponse("/votar", status_code=307)
 
     @app.get("/crop")
     async def crop(path: str):
@@ -762,9 +781,10 @@ def create_app(
     async def robots():
         body = (
             "User-agent: *\n"
-            "Allow: /browse\n"
-            "Allow: /acta/\n"
             "Allow: /votar\n"
+            "Allow: /reportes\n"
+            "Allow: /buscar\n"
+            "Allow: /acta/\n"
             "Disallow: /admin\n"
             "Disallow: /api/\n"
             "Disallow: /crop\n"
@@ -779,11 +799,16 @@ def create_app(
         with conn() as db:
             deps = _departments(db)
         from urllib.parse import quote as _quote
-        locs = [f"{config.SITE_URL}/votar", f"{config.SITE_URL}/browse", f"{config.SITE_URL}/browse?review=1"]
+        locs = [
+            f"{config.SITE_URL}/votar",
+            f"{config.SITE_URL}/reportes",
+            f"{config.SITE_URL}/buscar",
+            f"{config.SITE_URL}/buscar?review=1",
+        ]
         for d in deps:
             code = d["department_code"] or d["department_name"]
             if code:
-                locs.append(f"{config.SITE_URL}/browse?department={_quote(str(code))}")
+                locs.append(f"{config.SITE_URL}/buscar?department={_quote(str(code))}")
         body = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
@@ -815,17 +840,19 @@ def create_app(
                 opts = []
         return {"options": opts}
 
-    @app.get("/browse")
-    async def browse(
-        request: Request,
-        department: str | None = None,
-        municipality: str | None = None,
-        zone: str | None = None,
-        puesto: str | None = None,
-        q: str | None = None,
-        review: int = 0,
-        page: int = Query(1, ge=1),
-    ):
+    def _progress_ctx():
+        # National-load progress for the shared app bar. Cached (a cheap precomputed COUNT);
+        # opening a conn on a cache hit is negligible.
+        with conn() as db:
+            return _agg_cached("sync_progress", lambda: compute_sync_progress(db))
+
+    def _total_reviews():
+        # Community impact for the shared app bar: total mesas reviewed. A heavier aggregate (a
+        # distinct scan over the vote tables), so cache it generously — "impact" tolerates being a
+        # few minutes stale, and this keeps it off the per-request hot path.
+        return _agg_cached("total_reviews", community.total_reviews, ttl=300.0)
+
+    def _search_context(department, municipality, zone, puesto, q, review, page):
         # LEVEL 1: a browsable directory, one entry per ACTA (a polling table). Drill down
         # department -> municipio -> zona -> puesto (like the official site). Acta identity
         # IS visible here (this is the lookup view; anonymization is only for /votar). Actas
@@ -919,7 +946,11 @@ def create_app(
             municipios = _municipios(db, department, geo)
             zonas = _zonas(db, department, municipality)
             puestos = _puestos(db, department, municipality, zone)
-            progress = _agg_cached("sync_progress", lambda: compute_sync_progress(db))
+            # Graded "extraña" tone for the directory cards — same signal as the billboard. Only
+            # the voted actas need a lookup (the long unvoted tail is 0); bounded to the page and
+            # batched into a single counts call.
+            flag_levels = _acta_flag_levels(
+                db, [r["document_id"] for r in doc_rows if popularity.get(r["document_id"])])
         high_voted_docs = {k.rsplit(":", 3)[0] for k in _agg_cached(
             "high_voted", lambda: community.high_voted_fields(config.HIGH_VOTE_THRESHOLD))}
         actas = [
@@ -928,50 +959,107 @@ def create_app(
                 "doc": enrich_doc_names(r, geo),
                 "n_candidates": r["n_candidates"],
                 "high_voted": r["document_id"] in high_voted_docs,
+                "flag_level": flag_levels.get(r["document_id"], 0.0),
             }
             for r in doc_rows
         ]
-        # The community billboard (most-reported ACTAS) heads the directory on the first,
-        # unfiltered page — it's the social proof / "look what people found" hook. Skip it on
-        # deeper pages and the review view (which is itself a most-voted list).
-        hot_actas = _agg_cached("hot_actas", _hot_actas_payload) if (page == 1 and not review) else []
+        return {
+            "actas": actas,
+            "voted_cards": voted_cards,
+            "departments": departments,
+            "municipios": municipios,
+            "zonas": zonas,
+            "puestos": puestos,
+            "filters": {
+                "department": department or "",
+                "municipality": municipality or "",
+                "zone": zone or "",
+                "puesto": puesto or "",
+                "q": q or "",
+            },
+            "review": bool(review),
+            "page": page,
+            "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
+            "total": total_actas,
+        }
+
+    @app.get("/browse")
+    async def browse_redirect(request: Request):
+        # Back-compat: /browse was split into /buscar (search) + /reportes (global reports).
+        qs = request.url.query
+        # A *bare* /browse (no query) is almost always a returning visitor whose browser cached the
+        # old permanent "/ -> /browse" landing redirect (308, never re-checked). Send them to the
+        # flagship feed /votar (307, temporary) so the home experience is correct again. Real
+        # directory links carry a query (?review=1, ?department=…) -> keep those on /buscar (308).
+        if not qs:
+            return RedirectResponse("/votar", status_code=307)
+        return RedirectResponse("/buscar?" + qs, status_code=308)
+
+    @app.get("/reportes")
+    async def reportes(request: Request, page: int = Query(1, ge=1)):
+        # TAB 2 — Global reports: the paginated "most reported as extraña" billboard + room for
+        # future statistics. Pages through every reported acta, not just a fixed top-N.
+        # Clamp the page to the real page count BEFORE it becomes a cache key: _agg_cache is an
+        # unbounded, never-evicted process dict, so keying on a raw ?page= would let "?page=<huge>"
+        # mint endless entries. Clamping bounds the distinct keys to the actual number of pages
+        # (which the popularity dict — already cached, also used by /buscar?review=1 — gives cheaply).
+        pages = max(1, math.ceil(len(_agg_cached("popularity", community.acta_popularity)) / REPORTES_PER_PAGE))
+        page = max(1, min(page, pages))
+        board = _agg_cached(f"hot_actas_p{page}", lambda: _hot_actas_page(page))
+        canon = config.SITE_URL + "/reportes" + (f"?page={board['page']}" if board["page"] > 1 else "")
         return templates.TemplateResponse(
             request,
-            "browse.html",
+            "reportes.html",
             {
-                "actas": actas,
-                "voted_cards": voted_cards,
-                "hot_actas": hot_actas,
-                "progress": progress,
-                "departments": departments,
-                "municipios": municipios,
-                "zonas": zonas,
-                "puestos": puestos,
-                "filters": {
-                    "department": department or "",
-                    "municipality": municipality or "",
-                    "zone": zone or "",
-                    "puesto": puesto or "",
-                    "q": q or "",
-                },
-                "review": bool(review),
-                "page": page,
-                "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
-                "total": total_actas,
+                "hot_actas": board["cards"],
+                "page": board["page"],
+                "pages": board["pages"],
+                "total": board["total"],
+                "progress": _progress_ctx(),
+                "total_reviews": _total_reviews(),
+                "active": "reportes",
                 "site_url": config.SITE_URL,
-                "canonical": config.SITE_URL + ("/browse?review=1" if review else "/browse"),
-                "page_title": (
-                    "Actas más votadas por la comunidad — Veeduría ciudadana 2026"
-                    if review else
-                    "Veeduría ciudadana de las actas E-14 — elecciones Colombia 2026"
-                ),
+                "canonical": canon,
+                "page_title": "Reportes — actas más reportadas como extrañas | Veeduría ciudadana E-14 2026",
                 "meta_description": (
-                    "Revisa las actas E-14 de las elecciones presidenciales de Colombia 2026. "
-                    "Mira los votos escritos a mano en cada mesa y vota en el feed lo que se vea "
-                    "alterado. Veeduría ciudadana, abierta a todos."
+                    "Las mesas donde más gente ha marcado casillas como extrañas en las actas "
+                    "E-14 de las elecciones de Colombia 2026. Reportes de la veeduría ciudadana."
                 ),
             },
         )
+
+    @app.get("/buscar")
+    async def buscar(
+        request: Request,
+        department: str | None = None,
+        municipality: str | None = None,
+        zone: str | None = None,
+        puesto: str | None = None,
+        q: str | None = None,
+        review: int = 0,
+        page: int = Query(1, ge=1),
+    ):
+        # TAB 3 — Search a specific acta: the filterable directory (drill down dep -> muni ->
+        # zona -> puesto, like the official site). ``review=1`` narrows to the most-voted list.
+        ctx = _search_context(department, municipality, zone, puesto, q, review, page)
+        ctx.update({
+            "progress": _progress_ctx(),
+            "total_reviews": _total_reviews(),
+            "active": "buscar",
+            "site_url": config.SITE_URL,
+            "canonical": config.SITE_URL + ("/buscar?review=1" if review else "/buscar"),
+            "page_title": (
+                "Actas más votadas por la comunidad — Veeduría ciudadana 2026"
+                if review else
+                "Busca un acta E-14 — Veeduría ciudadana elecciones Colombia 2026"
+            ),
+            "meta_description": (
+                "Busca y revisa las actas E-14 de las elecciones presidenciales de Colombia "
+                "2026 por departamento, municipio o código. Mira los votos escritos a mano y "
+                "lo que la comunidad ha votado. Veeduría ciudadana, abierta a todos."
+            ),
+        })
+        return templates.TemplateResponse(request, "buscar.html", ctx)
 
     @app.get("/acta/{document_id}")
     async def acta_detail(request: Request, document_id: str):
@@ -1016,6 +1104,9 @@ def create_app(
             c["strange"] = tally["strange"]
             # Strong crowd signal stands on its own (no model verdict involved anymore).
             c["high_voted"] = tally["strange"] >= config.HIGH_VOTE_THRESHOLD
+            # Graded "extraña" tone (0..1): scales with the net margin (extrañas vs "se ve bien"),
+            # so a casilla's red ring deepens as more people flag it. See _flag_level.
+            c["flag_level"] = _flag_level(c["strange"], c["good"])
         loc = " · ".join(
             x for x in (doc["department_name"] or doc["department_code"],
                         doc["municipality_name"], f"mesa {doc['mesa']}" if doc["mesa"] else None) if x
@@ -1026,6 +1117,9 @@ def create_app(
             {
                 "doc": doc,
                 "crops": crops,
+                "progress": _progress_ctx(),
+                "total_reviews": _total_reviews(),
+                "active": "buscar",
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/acta/{doc['document_id']}",
                 "page_title": f"Acta E-14 — {loc} | Veeduría ciudadana 2026",
@@ -1057,6 +1151,9 @@ def create_app(
             {
                 "form_token": form_token,
                 "turnstile_sitekey": poll_cfg.turnstile_sitekey if turnstile_on else "",
+                "progress": _progress_ctx(),
+                "total_reviews": _total_reviews(),
+                "active": "revisar",
                 "site_url": config.SITE_URL,
                 "canonical": f"{config.SITE_URL}/votar",
                 "page_title": "Marca las casillas alteradas — Veeduría ciudadana E-14 2026",
@@ -1247,8 +1344,8 @@ def create_app(
     def _acta_card(db, doc_id: str, reporters: int, doc_row=None) -> dict | None:
         """One billboard-style card for an acta: a representative thumbnail (its most-flagged
         casilla), a location label, and a crowd tally (distinct reporters + how many casillas were
-        flagged). Shared by the public billboard (``_hot_actas_payload``) and the
-        ``/browse?review=1`` ("Ver todas") list so both render the identical tile. Pass ``doc_row``
+        flagged). Shared by the public billboard (``_hot_actas_page``) and the
+        ``/buscar?review=1`` list so both render the identical tile. Pass ``doc_row``
         to reuse a row already fetched (the review list already has it) and skip the geo lookup.
         """
         if doc_row is None:
@@ -1273,6 +1370,12 @@ def create_app(
         # Thumbnail = the acta's most-flagged casilla; tally = how many casillas got flagged.
         best = max(range(len(frows)), key=lambda i: counts[fkeys[i]]["strange"])
         flagged = sum(1 for k in fkeys if counts[k]["strange"] > 0)
+        # Graded "extraña" tone (0..1): how far the acta as a whole leans negative (extrañas vs
+        # "se ve bien"). Same signal as the per-crop ring on the acta page, rolled up across all
+        # its casillas, so every card reddens consistently with the strength of the crowd's doubt.
+        s_tot = sum(counts[k]["strange"] for k in fkeys)
+        g_tot = sum(counts[k]["good"] for k in fkeys)
+        flag_level = _flag_level(s_tot, g_tot)
         loc = " · ".join(x for x in (
             doc["department_name"] or doc["department_code"],
             doc["municipality_name"],
@@ -1288,32 +1391,69 @@ def create_app(
             "reporters": reporters,
             "flagged": flagged,
             "n_candidates": len(frows),
+            "flag_level": flag_level,
         }
 
-    def _hot_actas_payload() -> list[dict]:
-        """Most-reported ACTAS for the public billboard — one card per mesa, not per crop.
-
-        Ranks actas by how many distinct people flagged anything in them (``acta_popularity`` —
-        the same crowd signal the ``/browse?review=1`` list uses, available on both the SQLite and
-        Aurora stores), then builds one ``_acta_card`` per top acta. De-anonymized on purpose: the
-        billboard links straight to the acta so people can investigate. Bounded to HOTLIST_SIZE.
-        """
-        pop = _agg_cached("popularity", community.acta_popularity)
-        if not pop:
-            return []
-        top = sorted(pop.items(), key=lambda kv: kv[1], reverse=True)[:HOTLIST_SIZE]
-        out: list[dict] = []
-        with conn() as db:
-            for doc_id, reporters in top:
-                card = _acta_card(db, doc_id, reporters)
-                if card:
-                    out.append(card)
+    def _acta_flag_levels(db, doc_ids: list[str]) -> dict[str, float]:
+        """Acta-level "extraña" tone (0..1) for a set of actas, batched. One vote_fields read for
+        all their candidate casillas (local, indexed) + one ``counts_among`` round-trip, then each
+        acta's strange-vs-"se ve bien" margin is rolled into the same graded signal the billboard
+        card and the acta page use. The caller should pass only actas that have votes — the unvoted
+        tail is 0 and needs no lookup."""
+        if not doc_ids:
+            return {}
+        ph = ",".join("?" for _ in doc_ids)
+        rows = db.execute(
+            f"SELECT document_id, page_number, row_number, section FROM vote_fields "
+            f"WHERE row_type='candidate' AND raw_crop_path IS NOT NULL "
+            f"AND document_id IN ({ph})",
+            doc_ids,
+        ).fetchall()
+        fk_by_doc: dict[str, list[str]] = {}
+        all_fkeys: list[str] = []
+        for r in rows:
+            fk = field_key_of(r["document_id"], r["page_number"], r["row_number"], r["section"])
+            fk_by_doc.setdefault(r["document_id"], []).append(fk)
+            all_fkeys.append(fk)
+        counts = community.counts_among(all_fkeys)
+        out: dict[str, float] = {}
+        for doc_id, fks in fk_by_doc.items():
+            s = sum(counts[k]["strange"] for k in fks)
+            g = sum(counts[k]["good"] for k in fks)
+            out[doc_id] = _flag_level(s, g)
         return out
+
+    def _hot_actas_page(page: int) -> dict:
+        """Paginated "most-reported-as-extraña" billboard for /reportes. Ranks EVERY acta the crowd
+        has flagged by how many distinct people reported it, then builds one ``_acta_card`` per acta
+        on the requested page. Only a page's worth of cards is built (each costs a vote_fields +
+        counts_among round-trip), and the ranked list comes from the cached popularity dict."""
+        pop = _agg_cached("popularity", community.acta_popularity)
+        ranked = sorted(pop.items(), key=lambda kv: kv[1], reverse=True) if pop else []
+        total = len(ranked)
+        pages = max(1, math.ceil(total / REPORTES_PER_PAGE))
+        page = max(1, min(page, pages))
+        window = ranked[(page - 1) * REPORTES_PER_PAGE: page * REPORTES_PER_PAGE]
+        cards: list[dict] = []
+        if window:
+            with conn() as db:
+                for doc_id, reporters in window:
+                    card = _acta_card(db, doc_id, reporters)
+                    if card:
+                        cards.append(card)
+        return {"cards": cards, "page": page, "pages": pages, "total": total}
 
     @app.get("/api/billboard")
     async def api_billboard():
         # Public leaderboard of the most-reported crops (tallies + acta link shown).
         return {"items": _hot_crops_payload()}
+
+    @app.get("/api/total-reviews")
+    async def api_total_reviews():
+        # Live community total for the app-bar counter. Lets an active reviewer on /votar (who
+        # never reloads the page) watch the crowd's number climb. Served straight from the same
+        # 300s aggregate cache as the page render, so polling clients are cheap.
+        return {"total": _total_reviews()}
 
     @app.get("/api/acta-crops")
     async def api_acta_crops(cid: str):
