@@ -48,6 +48,12 @@ primary_region = 'dfw'
 # fed by an SQS event source mapping). It only runs when the queue has messages, so we no
 # longer pay for an always-on worker machine. The web process still *publishes* to SQS.
 [processes]
+  # 1 worker for now — pre-election, traffic is low and a single worker is simplest. For the
+  # election-day ramp, bump to `--workers 2` (~= both vCPUs of shared-cpu-2x; verified to boot
+  # clean and share one OS page cache for the ~730MB results DB, so the second worker costs
+  # little memory but doubles request concurrency). Horizontal scale is the other half, a
+  # one-command op: `fly scale count N --region bog,dfw` — each machine is an identical
+  # read-replica that pulls the DB snapshot from the CDN at boot.
   web = "uvicorn e14detector.asgi:app --host 0.0.0.0 --port 8000 --workers 1"
 
 # Volume holds results.sqlite + DB-sync state — web only. (community.sqlite is gone;
@@ -69,6 +75,15 @@ primary_region = 'dfw'
     type = 'requests'
     hard_limit = 200
     soft_limit = 150
+
+  # Readiness gate: /health returns 200 only once the results DB is present and non-stub, so a
+  # freshly scaled-out machine never takes traffic before its DB snapshot is pulled and warm.
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '4s'
+    grace_period = '180s'
+    method = 'get'
+    path = '/health'
 
 [[vm]]
   size = 'shared-cpu-2x'

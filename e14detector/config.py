@@ -155,6 +155,12 @@ COMMUNITY_DB = os.environ.get("E14_COMMUNITY_DB", str(DEFAULT_OUTPUT_DIR / "comm
 # Per-voter token-bucket rate limit (defeats casual scripted flooding).
 RATE_REFILL_PER_MIN = float(os.environ.get("E14_RATE_REFILL_PER_MIN", "10"))
 RATE_BUCKET = float(os.environ.get("E14_RATE_BUCKET", "20"))
+# Short-TTL cache for public per-crop tallies (counts_among) on the render paths (feed deck,
+# acta page, billboard cards). Keeps a popular acta/feed from making an Aurora (RDS Data API)
+# round-trip per view. Separate from the 45s aggregate cache: tallies tolerate a few seconds of
+# staleness (the vote response is already optimistic), so a small TTL collapses the read QPS to
+# Aurora while staying fresh. 0 disables the cache (always query the store).
+COUNTS_TTL = float(os.environ.get("E14_COUNTS_TTL", "8"))
 # Cloudflare Turnstile (anti-bot). Secret verifies server-side; sitekey is public
 # and rendered into the page. When the secret is empty, verification is skipped
 # (local/dev), so the feature degrades gracefully offline.
