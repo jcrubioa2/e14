@@ -93,11 +93,11 @@
     .tile:hover { transform:translateY(-3px); border-color:var(--line-strong); box-shadow:0 2px 2px rgba(28,26,21,.04), 0 14px 28px -12px rgba(28,26,21,.22); }
     .tile:active { transform:translateY(-1px) scale(.985); }
     .tile:focus-visible { border-color:var(--ink); box-shadow:0 0 0 3px rgba(28,26,21,.12); }
-    /* The thumb is a framed "window" so a loaded-but-blank (white) crop still reads as present:
-       its hairline border + faint paper tint stay visible even when the image is all white. */
+    /* The thumb background matches the ballot paper (white) so a contained crop that doesn't fill
+       the box letterboxes seamlessly — no tinted band or inner border peeking around the image.
+       Loading is told apart from a loaded-blank crop by the shimmer below, not by a frame. */
     .tile .thumb { position:relative; flex:1 1 auto; display:flex; align-items:center; justify-content:center;
-                   min-height:74px; border-radius:9px; overflow:hidden;
-                   background:#FCFBF7; box-shadow:inset 0 0 0 1px var(--line); }
+                   min-height:74px; border-radius:9px; overflow:hidden; background:#fff; }
     .tile img { max-width:100%; max-height:92px; object-fit:contain; pointer-events:none;
                 user-select:none; -webkit-user-drag:none; opacity:0; transition:opacity .25s ease; }
     .tile .thumb.ready img { opacity:1; }
