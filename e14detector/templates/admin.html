@@ -19,11 +19,6 @@
     th { color:var(--muted); font-weight:600; position:sticky; top:0; background:#fff; }
     td.num { text-align:right; font-variant-numeric: tabular-nums; }
     a { color: var(--accent); text-decoration:none; }
-    .tag { display:inline-block; border-radius:999px; padding:1px 8px; font-size:11px; border:1px solid var(--line); }
-    .s-STRANGE { background:#fff1f0; color:var(--bad); border-color:#f1a7a0; }
-    .s-PENDING { background:#ddf4ff; color:var(--accent); border-color:#9ccbf0; }
-    .s-CLEAN { background:#eaf6ec; color:#1a7f37; border-color:#aedcb8; }
-    .s-NONE { color:var(--muted); }
     .muted { color: var(--muted); }
     .pipeline { margin-top:12px; padding:8px 12px; border-radius:8px; font-size:13px; border:1px solid var(--line); }
     .pipeline.ok { background:#eaf6ec; border-color:#aedcb8; }
@@ -35,14 +30,11 @@
 <body>
   <header>
     <h1>Panel de votación &mdash; operador</h1>
-    <div class="muted">Datos privados (conteos + veredictos de IA). No indexado. Casillas con actividad de la comunidad.<br>
-      Modelo en vivo (poll): <b>{{ live_model }}</b> &middot; en cada fila puedes probar la IA en vivo o con otro modelo.</div>
+    <div class="muted">Datos privados (conteos de la comunidad). No indexado. Casillas con actividad de la comunidad.</div>
     <div class="cards">
       <div class="card">campos<b>{{ summary.fields }}</b></div>
       <div class="card">votos totales<b>{{ summary.votes }}</b></div>
-      <div class="card">en revisi&oacute;n<b>{{ summary.pending }}</b></div>
       <div class="card">sospechosas (publicadas)<b>{{ summary.strange }}</b></div>
-      <div class="card">IA: limpias<b>{{ summary.clean }}</b></div>
       <div class="card">apelaciones aceptadas<b>{{ summary.cleared }}</b></div>
     </div>
     {% if pipeline %}
@@ -63,7 +55,7 @@
   <main>
     <table>
       <thead><tr>
-        <th>Acta</th><th>Candidato</th><th>Votos</th><th>IA</th><th>Disp&oacute; a</th>
+        <th>Acta</th><th>Candidato</th><th>Votos</th>
         <th>Public.</th><th>Apel.</th><th>Apel. estado</th><th>Limpiada</th><th>hash</th><th></th>
       </tr></thead>
       <tbody>
@@ -72,24 +64,15 @@
         <td>{{ r.acta }}</td>
         <td>{{ r.candidate }}</td>
         <td class="num">{{ r.votes }}</td>
-        <td><span class="tag s-{{ r.vlm_state }}">{{ r.vlm_state }}</span></td>
-        <td class="num">{{ r.triggered_at_votes or "" }}</td>
         <td>{% if r.published %}s&iacute;{% endif %}</td>
         <td class="num">{{ r.appeals or "" }}</td>
         <td>{% if r.appeal_state != "NONE" %}{{ r.appeal_state }}{% endif %}</td>
         <td>{% if r.appeal_cleared %}s&iacute;{% endif %}</td>
         <td class="muted">{{ r.image_hash }}</td>
-        <td style="white-space:nowrap">
-          <a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a><br>
-          {% set fk = r.field_key|urlencode %}
-          <span class="muted">probar:</span>
-          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&model={{ m|urlencode }}" target="_blank" rel="noopener">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}<br>
-          <span class="muted">aplicar:</span>
-          {% for label, m in review_models %}<a href="/admin/review?key={{ key|urlencode }}&field_key={{ fk }}&prompt=confirm&record=1&model={{ m|urlencode }}" target="_blank" rel="noopener" onclick="return confirm('Aplicar veredicto de {{ label }} a esta casilla?')">{{ label }}</a>{% if not loop.last %} {% endif %}{% endfor %}
-        </td>
+        <td style="white-space:nowrap"><a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a></td>
       </tr>
       {% else %}
-      <tr><td colspan="11" class="muted">Sin actividad de la comunidad todav&iacute;a.</td></tr>
+      <tr><td colspan="9" class="muted">Sin actividad de la comunidad todav&iacute;a.</td></tr>
       {% endfor %}
       </tbody>
     </table>
