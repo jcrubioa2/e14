@@ -87,9 +87,7 @@
       padding:13px 13px 10px; cursor:pointer; box-shadow:var(--shadow); outline:none;
       display:flex; flex-direction:column; gap:7px; min-height:114px;
       transition:transform .14s cubic-bezier(.2,.7,.2,1), border-color .14s, box-shadow .14s, background .14s;
-      animation:rise .5s cubic-bezier(.2,.7,.2,1) both; animation-delay:calc(var(--i,0) * 34ms);
     }
-    @keyframes rise { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
     .tile:hover { transform:translateY(-3px); border-color:var(--line-strong); box-shadow:0 2px 2px rgba(28,26,21,.04), 0 14px 28px -12px rgba(28,26,21,.22); }
     .tile:active { transform:translateY(-1px) scale(.985); }
     .tile:focus-visible { border-color:var(--ink); box-shadow:0 0 0 3px rgba(28,26,21,.12); }
@@ -102,11 +100,14 @@
                 user-select:none; -webkit-user-drag:none; opacity:0; transition:opacity .25s ease; }
     .tile .thumb.ready img { opacity:1; }
 
-    /* Per-image loading state: an animated shimmer fills the window until THIS crop's image loads.
-       That makes "still loading" (moving shimmer) unmistakably different from "loaded & white"
-       (static framed paper). Cleared on img.onload in JS. */
-    .tile .thumb.loading { background:linear-gradient(100deg,#e7e1d3 28%,#f7f4ec 50%,#e7e1d3 72%);
-                           background-size:200% 100%; animation:sh 1.2s infinite linear; }
+    /* Per-tile loading placeholder — IDENTICAL to the initial skeleton (dashed cream shimmer) so the
+       whole load experience is consistent: every tile starts as a skeleton and morphs into the real
+       crop once its own image loads. The thumb goes transparent so the tile's shimmer shows through. */
+    .tile.is-loading { cursor:default; border-style:dashed; box-shadow:none;
+                       background:linear-gradient(100deg,#f4f1ea 30%,#fbfaf6 50%,#f4f1ea 70%);
+                       background-size:200% 100%; animation:sh 1.25s infinite linear; }
+    .tile.is-loading .thumb { background:transparent; }
+    .tile.is-loading .cap { visibility:hidden; }
     .tile .thumb.failed::after { content:"sin imagen"; position:absolute; inset:0; display:flex;
                                  align-items:center; justify-content:center; font-size:9.5px; font-weight:700;
                                  letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); }
@@ -301,6 +302,7 @@
     }
 
     function toggle(tile, cid) {
+      if (tile.classList.contains('is-loading')) return;  // not yet loaded — ignore the tap
       if (marked.has(cid)) { marked.delete(cid); tile.classList.remove('marked'); tile.setAttribute('aria-pressed', 'false'); }
       else { marked.add(cid); tile.classList.add('marked'); tile.setAttribute('aria-pressed', 'true'); }
       updateCount();
@@ -313,21 +315,20 @@
       grid.className = 'grid';
       deck.forEach((it, idx) => {
         const tile = document.createElement('div');
-        tile.className = 'tile';
+        tile.className = 'tile is-loading';
         tile.tabIndex = 0;
-        tile.style.setProperty('--i', idx);
         tile.setAttribute('role', 'button');
         tile.setAttribute('aria-pressed', 'false');
         tile.setAttribute('aria-label', 'Marcar esta casilla como extraña');
-        tile.innerHTML = '<div class="thumb loading"><img alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
+        tile.innerHTML = '<div class="thumb"><img alt="votos escritos a mano" src="' + it.img_url + '"></div>' +
           '<span class="cap" aria-hidden="true">Extraña</span>';
         const thumb = tile.querySelector('.thumb');
         const img = thumb.querySelector('img');
-        const ready = () => { thumb.classList.remove('loading'); thumb.classList.add('ready'); };
+        const ready = () => { tile.classList.remove('is-loading'); thumb.classList.add('ready'); };
         if (img.complete && img.naturalWidth) ready();
         else {
           img.addEventListener('load', ready);
-          img.addEventListener('error', () => { thumb.classList.remove('loading'); thumb.classList.add('failed'); });
+          img.addEventListener('error', () => { tile.classList.remove('is-loading'); thumb.classList.add('failed'); });
         }
         tile.addEventListener('click', () => toggle(tile, it.cid));
         tile.addEventListener('keydown', (e) => {
