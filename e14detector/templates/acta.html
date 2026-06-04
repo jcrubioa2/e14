@@ -56,14 +56,21 @@
 
     main { padding-top:22px; padding-bottom:40px; }
 
-    .how { font-size:14px; color:var(--ink); background:var(--card); border:1px solid var(--line); border-radius:14px;
-           padding:15px 16px; margin:0 0 20px; line-height:1.55; box-shadow:var(--shadow); }
-    .how p { margin:0 0 9px; }
-    .how p b { font-weight:700; }
-    .cta { display:inline-block; margin-top:4px; background:var(--accent); color:var(--paper); padding:11px 18px;
-           border-radius:12px; font-weight:700; font-size:14px; box-shadow:0 6px 16px -6px rgba(22,20,16,.45);
-           transition:background .14s, transform .1s; }
-    .cta:hover { text-decoration:none; background:#000; transform:translateY(-1px); }
+    /* The official-acta link is the page's key transparency anchor: a prominent card-button that
+       sends people to compare these casillas against the original scanned by the electoral authority. */
+    .official-cta { display:flex; align-items:center; gap:14px; background:var(--card);
+           border:1.5px solid var(--line-strong); border-left:4px solid var(--link); border-radius:14px;
+           padding:15px 18px; margin:0 0 22px; box-shadow:var(--shadow); color:var(--ink);
+           transition:border-color .15s, box-shadow .15s, transform .1s; }
+    .official-cta:hover { text-decoration:none; border-color:var(--link); transform:translateY(-1px);
+           box-shadow:0 2px 2px rgba(14,110,100,.05), 0 16px 30px -14px rgba(14,110,100,.30); }
+    .official-ic { flex:0 0 auto; width:42px; height:42px; border-radius:11px; background:rgba(14,110,100,.10);
+           color:var(--link); display:inline-flex; align-items:center; justify-content:center; }
+    .official-ic svg { width:22px; height:22px; display:block; }
+    .official-tx { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:2px; }
+    .official-tx b { font-size:15.5px; font-weight:800; letter-spacing:-.005em; }
+    .official-tx span { font-size:13px; color:var(--ink-soft); line-height:1.45; }
+    .official-arrow { flex:0 0 auto; font-size:18px; font-weight:800; color:var(--link); }
 
     .chip { display:inline-block; border:1px solid var(--line-strong); border-radius:999px; padding:3px 10px;
             font-size:11px; font-weight:600; color:var(--ink-soft); white-space:nowrap; }
@@ -103,16 +110,22 @@
       <div class="acta-meta">
         {% if doc.place_name %}{{ doc.place_name }}<br>{% endif %}
         {% if doc.zone %}zona {{ doc.zone }} &middot; {% endif %}{% if doc.puesto %}puesto {{ doc.puesto }} &middot; {% endif %}{% if doc.mesa %}mesa {{ doc.mesa }} &middot; {% endif %}{{ doc.document_id }}
-        {% if doc.official_lookup_url %}<br><a href="{{ doc.official_lookup_url }}" target="_blank" rel="noopener">Ver el acta oficial en la Registradur&iacute;a &rarr;</a>{% endif %}
       </div>
     </div>
   </header>
   <main>
-    <div class="how">
-      <p>Cada fila es un <b>candidato</b> y la casilla con los <b>votos</b> que recibi&oacute; en esta mesa, escritos a mano. Debajo de cada casilla ves lo que la <b>comunidad</b> ha votado sobre ella.</p>
-      <p>La votaci&oacute;n se hace por <b>mesas an&oacute;nimas</b>: te mostramos las casillas de una mesa al azar y marcas las que se vean alteradas, sin saber de qu&eacute; mesa son.</p>
-      <a class="cta" href="/votar">Ir a revisar una mesa &rarr;</a>
-    </div>
+    {% if doc.official_lookup_url %}
+    <a class="official-cta" href="{{ doc.official_lookup_url }}" target="_blank" rel="noopener">
+      <span class="official-ic" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/></svg>
+      </span>
+      <span class="official-tx">
+        <b>Ver el acta oficial en la Registradur&iacute;a</b>
+        <span>Compara estas casillas con el documento original escaneado por la autoridad electoral.</span>
+      </span>
+      <span class="official-arrow" aria-hidden="true">&rarr;</span>
+    </a>
+    {% endif %}
 
     <table class="rows">
       {% for it in crops %}

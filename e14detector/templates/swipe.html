@@ -33,7 +33,7 @@
       --ink:#1C1A15; --ink-soft:#6E695E; --ink-faint:#9A9488;
       --line:#E6E1D4; --line-strong:#D8D2C2;
       --red:#D93A28; --red-deep:#A82A1B; --red-tint:#FCEDE9; --red-line:#F0B5AB;
-      --green:#2F7D52; --gold:#C28A2B;
+      --green:#2F7D52; --gold:#C28A2B; --legend:#6E2238;  /* deep wine — endless "legendaria" tail */
       --accent:#161410;             /* primary action — ink */
       --link:#0E6E64;               /* sole non-red brand hue */
       --r:15px;
@@ -88,9 +88,10 @@
     .tag .n { font-variant-numeric:tabular-nums; }
     .tag .dot { width:7px; height:7px; border-radius:50%; background:var(--link); box-shadow:0 0 0 3px rgba(14,110,100,.14); }
 
-    /* Reviewer rank: a small chip whose emblem, label and color upgrade at milestones (1, 5, 15,
-       40, 100, 250 mesas). A 2px progress sliver creeps toward the next unlock so the chip visibly
-       "fills" as you review; crossing a threshold pulses the chip + fires a celebratory toast. */
+    /* Reviewer rank: a small chip whose emblem, label and color upgrade at named milestones (1 →
+       1000 mesas), then an endless "Veeduría legendaria I, II, III…" tail so it never caps out. A
+       2px progress sliver creeps toward the next unlock so the chip visibly "fills" as you review;
+       crossing a threshold pulses the chip + fires a celebratory toast. */
     .rank { position:relative; display:inline-flex; align-items:center; gap:7px; background:var(--card);
             border:1px solid var(--line); border-radius:999px; padding:4px 12px 6px 6px; box-shadow:var(--shadow);
             transition:transform .25s cubic-bezier(.2,.7,.3,1); --rank:var(--link); }
@@ -309,15 +310,44 @@
     // rank. Thresholds are spaced so the early ones come quickly (momentum) and later ones reward
     // sustained veeduría.
     const RANKS = [
-      { at: 1,   name: 'Primera mesa',       color: 'var(--link)' },
-      { at: 5,   name: 'En marcha',          color: '#0E8C7E' },
-      { at: 15,  name: 'Veeduría constante', color: 'var(--green)' },
-      { at: 40,  name: 'Guardia del voto',   color: 'var(--gold)' },
-      { at: 100, name: 'Centinela',          color: 'var(--red)' },
-      { at: 250, name: 'Veeduría de élite',  color: 'var(--red-deep)' },
+      { at: 1,    name: 'Primera mesa',       color: 'var(--link)' },
+      { at: 5,    name: 'En marcha',          color: '#0E8C7E' },
+      { at: 15,   name: 'Veeduría constante', color: 'var(--green)' },
+      { at: 40,   name: 'Guardia del voto',   color: 'var(--gold)' },
+      { at: 100,  name: 'Centinela',          color: 'var(--red)' },
+      { at: 250,  name: 'Veeduría de élite',  color: 'var(--red-deep)' },
+      { at: 500,  name: 'Centinela mayor',    color: 'var(--red-deep)' },
+      { at: 1000, name: 'Guardián nacional',  color: 'var(--legend)' },
     ];
-    function rankFor(n) { let r = null; for (const t of RANKS) { if (n >= t.at) r = t; else break; } return r; }
-    function nextRank(n) { for (const t of RANKS) { if (n < t.at) return t; } return null; }
+    // Beyond the last named rank the ladder becomes ENDLESS "grados de honor": a legendary title with
+    // a growing Roman numeral, each grade spaced by a gap that widens as you climb. So there is always
+    // a next level to chase and unlocks keep firing — the most committed veedores never hit a dead cap.
+    const LEGEND_BASE = RANKS[RANKS.length - 1].at;     // 1000 — the last named threshold
+    const LEGEND_NAME = 'Veeduría legendaria';
+    // Mesas to reach legendary grade g (1,2,3,…): gap starts at 500 and grows 250/grade —
+    // I=1500, II=2250, III=3250, IV=4500, …
+    function legendThreshold(g) { return LEGEND_BASE + g * 500 + (g * (g - 1) / 2) * 250; }
+    function legendGrade(n) { let g = 0; while (legendThreshold(g + 1) <= n) g++; return g; }
+    function roman(n) {
+      const M = [[1000,'M'],[900,'CM'],[500,'D'],[400,'CD'],[100,'C'],[90,'XC'],[50,'L'],[40,'XL'],[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
+      let s = ''; for (const [v, sym] of M) while (n >= v) { s += sym; n -= v; } return s;
+    }
+    // Each legendary grade cycles a metallic prestige color, so an endless tail still reads as a
+    // visible upgrade: bronce → plata → oro → platino → vino, then repeats.
+    const LEGEND_CYCLE = ['#9C6B3F', '#8A8F98', '#C28A2B', '#5E6A72', '#6E2238'];
+    function legendRank(g) {
+      return { at: legendThreshold(g), name: LEGEND_NAME + ' ' + roman(g),
+               color: LEGEND_CYCLE[(g - 1) % LEGEND_CYCLE.length] };
+    }
+    function rankFor(n) {
+      const g = n >= LEGEND_BASE ? legendGrade(n) : 0;
+      if (g >= 1) return legendRank(g);
+      let r = null; for (const t of RANKS) { if (n >= t.at) r = t; else break; } return r;
+    }
+    function nextRank(n) {
+      for (const t of RANKS) { if (n < t.at) return t; }
+      return legendRank(legendGrade(n) + 1);            // past every named rank: the next legendary grade
+    }
     function loadReviewed() { try { return parseInt(localStorage.getItem('e14_reviewed') || '0', 10) || 0; } catch (e) { return 0; } }
     function persistReviewed() { try { localStorage.setItem('e14_reviewed', String(reviewed)); } catch (e) {} }
 
