@@ -1,4 +1,4 @@
-"""Dynamic FastAPI report for VLM-confirmed candidate anomalies."""
+"""Dynamic FastAPI report for community-flagged candidate anomalies."""
 from __future__ import annotations
 
 import asyncio
@@ -30,13 +30,8 @@ from .community import (
     verify_turnstile,
     voter_token,
 )
-from .schemas import FieldClassification
 from .vote_queue import make_publisher
-from .vlm.base import VisionReviewer
-from .vlm.factory import build_reviewer
-from .vlm.prompt import VOTE_FIELD_APPEAL_PROMPT, VOTE_FIELD_CONFIRM_PROMPT, VOTE_FIELD_SCREEN_PROMPT
 
-STRANGE_CLASSES = (FieldClassification.SUSPICIOUS_OVERLAP, FieldClassification.DIGIT_SHAPE_ANOMALY)
 # /browse paginates over ACTAS (grouped), not individual crops.
 BROWSE_ACTAS_PER_PAGE = 12
 HOTLIST_SIZE = 8
@@ -553,7 +548,6 @@ def create_app(
     results_db: Path,
     output_dir: Path,
     community_db: Path | None = None,
-    reviewer: VisionReviewer | None = None,
     poll: PollConfig | None = None,
 ) -> FastAPI:
     results_db = Path(results_db)
@@ -676,44 +670,12 @@ def create_app(
     app.state.output_dir = output_dir
     app.state.community = community
     app.state.poll = poll_cfg
-    # Reviewer is built lazily so importing/serving never requires a live key, and
-    # tests can inject a deterministic stub.
-    app.state.reviewer = reviewer
     app.state._bg_tasks: set[asyncio.Task] = set()
-
-    def get_reviewer() -> VisionReviewer:
-        # The live poll path values accuracy over speed and uses a (thinking) model, so
-        # give it a generous output cap rather than the tiny screen cap.
-        if app.state.reviewer is None:
-            app.state.reviewer = build_reviewer(max_tokens=config.LIVE_MAX_TOKENS)
-        return app.state.reviewer
 
     def conn() -> sqlite3.Connection:
         if not results_db.exists():
             raise HTTPException(status_code=500, detail=f"results DB not found: {results_db}")
         return _connect(results_db)
-
-    def _obtain_crop(crop_rel: str) -> tuple[Path, bool]:
-        """A local image path for the VLM: the file on the volume, or — when crops live on
-        the CDN (national deploy) — a temp download from it. Returns (path, is_temp)."""
-        try:
-            return resolve_crop_path(crop_rel, output_dir), False
-        except (FileNotFoundError, ValueError):
-            pass
-        url = crop_cdn_url(crop_rel, config.CDN_BASE_URL)
-        if not url:
-            raise FileNotFoundError(crop_rel)
-        import tempfile
-        import urllib.request
-        fd, tmp = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
-        try:
-            with urllib.request.urlopen(url, timeout=30) as resp, open(tmp, "wb") as out:
-                out.write(resp.read())
-        except Exception:
-            Path(tmp).unlink(missing_ok=True)
-            raise FileNotFoundError(crop_rel)
-        return Path(tmp), True
 
     def cid_for(field_key: str, crop_rel: str, document_id: str) -> str:
         """Anonymized public id for a crop, registered so /c/{cid} can resolve it later.
@@ -743,7 +705,7 @@ def create_app(
 
     @app.get("/admin/poll")
     async def admin_poll(request: Request, key: str = ""):
-        # Operator-only: private vote counts + AI verdicts. Off unless a token is configured.
+        # Operator-only: private vote counts + publishing health. Off unless a token is configured.
         if not config.ADMIN_TOKEN:
             raise HTTPException(status_code=404, detail="not found")
         if key != config.ADMIN_TOKEN:
@@ -770,9 +732,7 @@ def create_app(
         summary = {
             "fields": len(rows),
             "votes": sum(r["votes"] for r in rows),
-            "pending": sum(r["vlm_state"] == "PENDING" for r in rows),
             "strange": sum(r["published"] for r in rows),
-            "clean": sum(r["vlm_state"] == "CLEAN" for r in rows),
             "cleared": sum(r["appeal_cleared"] for r in rows),
         }
         # Pipeline health: what the served DB holds vs what the publisher last shipped.
@@ -790,68 +750,11 @@ def create_app(
             pipeline["pointer_age_min"] = round(age / 60) if age is not None else None
             # Stale if the publisher hasn't flipped the pointer in >30 min (cycles run ~10-14).
             pipeline["pointer_stale"] = age is not None and age > 30 * 60
-        # Models the operator can run on a crop. "" = the live poll model. Each can be run
-        # as a dry preview, or "aplicar" to overwrite the actual verdict (record=1).
-        review_models = [
-            ("Haiku", "anthropic/claude-haiku-4.5"),
-            ("Qwen", "qwen/qwen3-vl-8b-thinking"),
-            ("Gemma", "google/gemma-4-31b-it"),
-        ]
         return templates.TemplateResponse(
             request,
             "admin.html",
-            {"rows": rows, "summary": summary, "key": key, "pipeline": pipeline,
-             "live_model": config.OPENROUTER_MODEL, "review_models": review_models},
+            {"rows": rows, "summary": summary, "key": key, "pipeline": pipeline},
         )
-
-    @app.get("/admin/review")
-    async def admin_review(
-        request: Request, key: str = "", field_key: str = "",
-        prompt: str = "confirm", model: str = "", record: int = 0,
-    ):
-        # Operator-only: run a VLM read on any crop on demand (debugging). Optionally a
-        # different model/prompt than the live poll, and optionally record the verdict.
-        if not config.ADMIN_TOKEN:
-            raise HTTPException(status_code=404, detail="not found")
-        if key != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=403, detail="forbidden")
-        with conn() as db:
-            looked = lookup_candidate_appeal(db, field_key)
-        if not looked:
-            raise HTTPException(status_code=404, detail="unknown field")
-        crop_rel, _ = looked
-        prompt_text = {
-            "confirm": config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT,
-            "appeal": config.APPEAL_PROMPT or VOTE_FIELD_APPEAL_PROMPT,
-            "screen": VOTE_FIELD_SCREEN_PROMPT,
-        }.get(prompt, config.CONFIRM_PROMPT or VOTE_FIELD_CONFIRM_PROMPT)
-        reviewer = (
-            build_reviewer("openrouter", model=model, max_tokens=config.LIVE_MAX_TOKENS)
-            if model else get_reviewer()
-        )
-        local, is_temp = _obtain_crop(crop_rel)
-        try:
-            result = await asyncio.to_thread(
-                reviewer.review_vote_field, [str(local)], {}, prompt_text
-            )
-        finally:
-            if is_temp:
-                local.unlink(missing_ok=True)
-        strange = result.classification in STRANGE_CLASSES
-        recorded = False
-        if record:  # force the poll verdict (e.g. re-review after a model change)
-            community.record_verdict(field_key, strange, community.distinct_votes(field_key), None)
-            recorded = True
-        return {
-            "field_key": field_key,
-            "model": model or config.OPENROUTER_MODEL,
-            "prompt": prompt,
-            "classification": result.classification.value,
-            "confidence": result.confidence,
-            "strange": strange,
-            "recorded": recorded,
-            "raw": result.raw_json,
-        }
 
     @app.get("/robots.txt")
     async def robots():
