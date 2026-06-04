@@ -10,7 +10,14 @@ from PIL import Image
 from e14detector import config
 from e14detector.schemas import DocumentMetadata, FieldClassification, VoteField
 from e14detector.storage import DetectorStore
-from e14detector.webapp import create_app, resolve_crop_path
+from e14detector.webapp import (
+    create_app,
+    doc_muni_index,
+    municipio_report_stats,
+    resolve_crop_path,
+)
+from e14detector.community import CommunityStore, field_key_of
+from e14detector.webapp import load_geo_names
 
 
 def _crop(path: Path) -> Path:
@@ -644,6 +651,108 @@ def test_official_pdf_link_rebuilt_from_hash(tmp_path: Path) -> None:
         "SELECT COUNT(*) FROM documents WHERE official_lookup_url IS NOT NULL"
     ).fetchone()[0] == 0
     con.close()
+
+
+def test_municipio_report_stats_aggregation(tmp_path: Path) -> None:
+    """Mesa-level reported counts roll up per municipio and department."""
+    import sqlite3
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    for doc_id, dep, muni in (
+        ("doc-a", "01", "001"),
+        ("doc-b", "01", "001"),
+        ("doc-c", "05", "001"),
+    ):
+        store.upsert_document(DocumentMetadata(
+            document_id=doc_id, source_path=f"{doc_id}.pdf",
+            department_code=dep, municipality_code=muni,
+        ))
+        store.insert_vote_field(VoteField(
+            document_id=doc_id, page_number=1, row_type="candidate", row_number=1,
+            candidate_name="X", raw_crop_path=str(crop),
+        ))
+    store.commit()
+    store.close()
+
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    idx = doc_muni_index(con)
+    con.close()
+    stats = municipio_report_stats(idx, {"doc-a"}, load_geo_names())
+    m01 = next(m for m in stats["municipios"] if m["dep"] == "01" and m["muni"] == "001")
+    m05 = next(m for m in stats["municipios"] if m["dep"] == "05" and m["muni"] == "001")
+    assert m01["total"] == 2 and m01["reported"] == 1 and m01["pct"] == 50.0
+    assert m05["total"] == 1 and m05["reported"] == 0 and m05["pct"] == 0.0
+    d01 = next(d for d in stats["departments"] if d["dep"] == "01")
+    assert d01["total"] == 2 and d01["reported"] == 1
+
+
+def test_api_reportes_map_national_and_drilldown(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(
+        document_id="doc-x", source_path="doc-x.pdf",
+        department_code="11", municipality_code="001",
+    ))
+    store.insert_vote_field(VoteField(
+        document_id="doc-x", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="Y", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    cs = CommunityStore(community_db)
+    cs.record_flag(field_key_of("doc-x", 1, 1, None), "v1")
+    cs.close()
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            nat = (await client.get("/api/reportes/map")).json()
+            assert nat["view"] == "departments"
+            assert any(d["dep"] == "11" for d in nat["departments"])
+            drill = (await client.get("/api/reportes/map?department=11")).json()
+            assert drill["view"] == "municipios"
+            assert drill["department"] == "11"
+            assert drill["municipios"][0]["reported"] == 1
+            geo = await client.get("/geo/colombia_departamentos.geojson")
+            assert geo.status_code == 200
+            assert geo.headers["content-type"].startswith("application/")
+
+    asyncio.run(run())
+
+
+def test_reportes_includes_map_assets(tmp_path: Path) -> None:
+    db = tmp_path / "results.sqlite"
+    DetectorStore(db).close()
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=tmp_path / "out")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/reportes")).text
+            assert "reportes-map" in html
+            assert "leaflet" in html
+            assert "Mapa por municipio" in html
+
+    asyncio.run(run())
+
+
+def test_colombia_geojson_bundled() -> None:
+    from e14detector.webapp import DEPARTAMENTOS_GEOJSON, MUNICIPIOS_GEOJSON
+
+    assert MUNICIPIOS_GEOJSON.is_file()
+    assert DEPARTAMENTOS_GEOJSON.is_file()
+    data = json.loads(MUNICIPIOS_GEOJSON.read_text(encoding="utf-8"))
+    assert data["features"][0]["properties"]["dep"]
+    assert data["features"][0]["properties"]["muni"]
 
 
 def test_security_headers_and_docs_hidden(tmp_path: Path) -> None:
