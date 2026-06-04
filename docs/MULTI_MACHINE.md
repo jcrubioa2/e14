@@ -118,6 +118,33 @@ source scripts/crop_worker_env.sh    # E14_WORKER_ID, E14_FLEET_WORKERS, workers
 
 Fleet workers run **`pull-db`** and **`pull-fleet`** before each department; the coordinator runs **`fleet-schedule`** every ~2 min.
 
+## Publishing across machines (Legion + Ryzen)
+
+Crop keys are global on Tigris (`crops/<file>`). Each host keeps `review/uploaded_crops.txt`; **`publish-reconcile`** lists the bucket and unions keys so no machine re-uploads the fleet’s work.
+
+```bash
+# Once per machine (or after a big upload burst on another host)
+.venv/bin/e14detector publish-reconcile --output-dir data/detector_national
+
+# National loop (lead) — one supervisor at a time
+nohup bash scripts/publish_supervisor.sh >> logs/publish_loop.log 2>&1 & disown
+
+# Or one department at a time (divide-and-conquer)
+bash scripts/publish_dept_crops.sh 16
+WORKERS=64 bash scripts/publish_dept_crops.sh 19
+
+# Live status (uses bucket cache; does not block on full bucket list)
+bash scripts/publish_status_by_dept.sh --watch
+```
+
+When **all 122,007** actas are in the upload frontier, publish the slim serving DB (may need `--allow-shrink` if the live pointer is an older, larger schema):
+
+```bash
+.venv/bin/e14detector publish-db --output-dir data/detector_national --only-uploaded --allow-shrink
+```
+
+Run **`publish-reconcile` on Legion** after Legion uploads so its manifest matches Tigris. Do not run **`publish-reconcile`** on Ryzen while **`publish-loop`** is appending to the manifest.
+
 ## Manual commands
 
 ```bash
@@ -130,6 +157,7 @@ Fleet workers run **`pull-db`** and **`pull-fleet`** before each department; the
 
 # Publish (merges remote first by default)
 .venv/bin/e14detector publish-crops --output-dir data/detector_national
+.venv/bin/e14detector publish-crops --department 16   # optional: one dept only
 .venv/bin/e14detector publish-db --output-dir data/detector_national --only-uploaded
 ```
 

@@ -110,6 +110,7 @@ def cmd_publish_crops(args: argparse.Namespace) -> int:
         bucket=args.bucket,
         limit=args.limit,
         workers=args.workers,
+        department=args.department,
         dry_run=args.dry_run,
     )
     print(
@@ -346,8 +347,14 @@ def cmd_publish_loop(args: argparse.Namespace) -> int:
     while True:
         started = time.time()
         try:
-            crops = publish_crops(output_dir, bucket=args.bucket, workers=args.workers,
-                                  limit=args.upload_limit, verbose=False)
+            crops = publish_crops(
+                output_dir,
+                bucket=args.bucket,
+                workers=args.workers,
+                limit=args.upload_limit,
+                department=getattr(args, "department", None),
+                verbose=False,
+            )
             # Decoupled cadence: upload crops every tick (cheap delta), but republish the DB
             # only every --db-interval (the gzipped snapshot is the bigger transfer).
             db_note = "db not due"
@@ -589,6 +596,10 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
     publish.add_argument("--limit", type=int, help="cap crops uploaded this run")
     publish.add_argument("--workers", type=int, default=16)
+    publish.add_argument(
+        "--department",
+        help="only upload crops for this department (code, e.g. 16, or name)",
+    )
     publish.add_argument("--dry-run", action="store_true", help="count new crops without uploading")
     publish.set_defaults(func=cmd_publish_crops)
 
@@ -631,6 +642,10 @@ def build_parser() -> argparse.ArgumentParser:
                               help="max crops uploaded per cycle (caps cycle time so the frontier publishes often)")
     publish_loop.add_argument("--interval", type=int, default=60, help="seconds between crop-upload ticks")
     publish_loop.add_argument("--db-interval", type=int, default=300, help="seconds between DB publishes")
+    publish_loop.add_argument(
+        "--department",
+        help="only upload crops for this department (code or name)",
+    )
     publish_loop.add_argument("--once", action="store_true", help="run a single cycle and exit")
     publish_loop.set_defaults(func=cmd_publish_loop)
 
