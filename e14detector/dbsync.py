@@ -800,11 +800,34 @@ def _fetch(url: str, timeout: float) -> bytes:
         return resp.read()
 
 
+def _read_lock_via_cdn(base: str, timeout: float) -> dict:
+    """Stdlib read of ``db/lock.json`` through the public CDN (the reader image has no boto3).
+    Best-effort: any failure returns ``{}`` (treated as unlocked) so a flaky read never freezes
+    legitimate updates."""
+    sep = "&" if "?" in LOCK_KEY else "?"
+    url = f"{base}/{LOCK_KEY}"
+    if base.startswith("http"):
+        url += f"{sep}t={int(time.time())}"
+    try:
+        d = json.loads(_fetch(url, timeout))
+        return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def refresh_db_once(cdn_base: str, dest_db: Path, *, timeout: float = 60.0) -> str | None:
     """Pull a newer snapshot if the pointer changed; atomic-swap it in.
 
     Returns the new sha256 if it installed one, else None. Raises only on unexpected I/O
     so the caller can log; partial work is cleaned up and never touches the served file.
+
+    Reader-side lock enforcement: ``db/lock.json`` is otherwise only honored by current-code
+    *publishers*, so a stale/old publisher can flip the pointer past it (it happened — a legacy
+    publisher overwrote a locked, reconciliation-stamped pointer with an n_docs-less fat DB). The
+    reader is current code and decides what is actually SERVED, so it enforces the lock too: while
+    locked at N docs, it refuses to adopt a pointer that regresses (n_docs missing or < N), keeping
+    the good DB live regardless of what a rogue publisher writes. Fails open on an unreadable lock
+    (no worse than before); unlocking, or a grow-past-N publish with the lock updated, passes.
     """
     base = cdn_base.rstrip("/")
     dest_db = Path(dest_db)
@@ -818,6 +841,16 @@ def refresh_db_once(cdn_base: str, dest_db: Path, *, timeout: float = 60.0) -> s
     marker = _marker(dest_db)
     if dest_db.exists() and marker.exists() and marker.read_text().strip() == want:
         return None  # already serving this snapshot
+
+    # Lock guard: never let a locked round regress to a smaller/unknown-size published DB.
+    lock = _read_lock_via_cdn(base, timeout)
+    if lock.get("locked") and dest_db.exists():
+        locked_n = lock.get("n_docs")
+        new_n = pointer.get("n_docs")
+        if isinstance(locked_n, int) and (not isinstance(new_n, int) or new_n < locked_n):
+            print(f"refresh-db: REFUSING pointer {want[:12]} (n_docs={new_n}) — DB locked at "
+                  f"{locked_n}; keeping the served snapshot (stale/rogue publisher?)", flush=True)
+            return None
 
     dest_db.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(dest_db.parent), suffix=".incoming")

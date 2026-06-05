@@ -129,6 +129,35 @@ def test_refresh_rejects_corrupt_snapshot_and_keeps_served_file(tmp_path: Path) 
     assert not list(dest.parent.glob("*.incoming"))  # temp cleaned up
 
 
+def test_refresh_db_reader_side_lock_rejects_regressing_pointer(tmp_path: Path) -> None:
+    """Reader-side lock enforcement: while db/lock.json is locked at N, the reader refuses to adopt
+    a pointer that regresses (n_docs missing or < N) — protecting the served DB even when a
+    stale/rogue publisher (old code) flips the pointer past the publisher-side lock."""
+    src = tmp_path / "src" / "results.sqlite"
+    _make_db(src, 5)
+    cdn = tmp_path / "cdn"
+    digest = _publish_to_dir(src, cdn)  # pointer here has no n_docs (like the legacy publisher)
+    dest = tmp_path / "served" / "results.sqlite"
+    # First pull (unlocked) installs the good snapshot.
+    assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) == digest
+
+    # Lock the round at 5 docs.
+    (cdn / dbsync.LOCK_KEY).write_text(json.dumps({"locked": True, "n_docs": 5}))
+    # A rogue publish: new snapshot with NO n_docs (legacy publisher signature), pointer flipped.
+    _make_db(src, 1)  # different content -> different sha
+    rogue = _publish_to_dir(src, cdn)
+    assert rogue != digest
+    # Reader refuses it (locked, new pointer has no n_docs) and keeps the good snapshot.
+    assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) is None
+    con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 5  # unchanged
+    con.close()
+
+    # Unlocking lets the reader adopt the new pointer again (escape hatch).
+    (cdn / dbsync.LOCK_KEY).write_text(json.dumps({"locked": False}))
+    assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) == rogue
+
+
 def test_publish_db_only_uploaded_publishes_the_frontier(tmp_path: Path) -> None:
     """--only-uploaded drops actas whose crops aren't all in the manifest."""
     out = tmp_path / "out"
