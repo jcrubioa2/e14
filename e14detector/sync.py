@@ -24,6 +24,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import config  # noqa: F401 — importing triggers config._load_dotenv() so boto3 sees the
+#                       Tigris creds from .env when sync hits the bucket (stamp/backup/restore/run)
+
 # The canonical, non-increasing order of the count-model chain. Kept here (not imported from
 # webapp, which pulls FastAPI) so the CLI stays light.
 CHAIN_ORDER = [
