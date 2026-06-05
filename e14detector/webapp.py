@@ -580,17 +580,41 @@ def lookup_candidate_appeal(conn: sqlite3.Connection, field_key: str) -> tuple[s
     return row_["raw_crop_path"], bool(row_["algo_flagged"])
 
 
+_CF_NETS = []
+for _c in config.CF_IP_RANGES:
+    try:
+        _CF_NETS.append(ipaddress.ip_network(_c))
+    except ValueError:
+        pass
+
+
+def _ip_in_cloudflare(ip: str) -> bool:
+    """True if ``ip`` is within Cloudflare's published edge ranges."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _CF_NETS)
+
+
 def _client_ip(request: Request) -> str:
-    """Real client IP, from the edge-trusted header (``config.TRUSTED_IP_HEADER`` — Fly sets
-    ``Fly-Client-IP``, Cloudflare ``cf-connecting-ip``). The edge overwrites any client value,
-    so this can't be spoofed. We deliberately do NOT trust the first ``X-Forwarded-For`` entry:
-    it's whatever the client sent (the real IP is appended after it), so trusting it would let an
-    attacker mint a new identity + rate bucket per request and defeat dedup + rate limiting.
-    Fallbacks (only when the trusted header is absent — local/dev): the LAST XFF hop (closest
-    trusted proxy), then the socket peer."""
-    trusted = request.headers.get(config.TRUSTED_IP_HEADER)
-    if trusted:
-        return trusted.strip()
+    """Real client IP — un-spoofable, and correct whether or not Cloudflare is in front.
+
+    ``Fly-Client-IP`` is set by Fly's edge to whoever opened the connection, and a client cannot
+    forge it. If that connector is a Cloudflare IP, the request came through Cloudflare and the real
+    visitor is in ``cf-connecting-ip`` — which we trust ONLY in that case, so a direct-to-Fly
+    attacker can't forge ``cf-connecting-ip`` (their Fly-Client-IP wouldn't be a Cloudflare IP).
+    Otherwise (direct to Fly, or mid-DNS-propagation) Fly-Client-IP IS the real client. We never
+    trust the first ``X-Forwarded-For`` hop (attacker-controlled); the XFF/peer fallbacks are only
+    for local/dev where no Fly header exists."""
+    fly = request.headers.get("fly-client-ip")
+    if fly:
+        fly = fly.strip()
+        if _ip_in_cloudflare(fly):
+            cf = request.headers.get("cf-connecting-ip")
+            if cf:
+                return cf.strip()
+        return fly
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
         return fwd.split(",")[-1].strip()

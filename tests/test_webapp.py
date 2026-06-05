@@ -757,6 +757,20 @@ def test_client_ip_trusts_edge_header_not_spoofable_xff() -> None:
     assert _client_ip(_fake_request(client=("203.0.113.7", 0))) == "203.0.113.7"
 
 
+def test_client_ip_uses_cf_connecting_ip_only_behind_cloudflare() -> None:
+    """When Fly-Client-IP is a Cloudflare edge IP, the real visitor comes from cf-connecting-ip;
+    when it isn't (direct-to-Fly), cf-connecting-ip is ignored so it can't be forged."""
+    from e14detector.webapp import _client_ip
+
+    # Through Cloudflare: Fly saw a CF IP connect -> trust cf-connecting-ip (the real visitor).
+    via_cf = _fake_request({"fly-client-ip": "104.16.0.1", "cf-connecting-ip": "5.5.5.5"})
+    assert _client_ip(via_cf) == "5.5.5.5"
+    # Direct to Fly with a FORGED cf-connecting-ip: Fly-Client-IP isn't a CF IP -> ignore the
+    # forgery and use the un-spoofable Fly-Client-IP.
+    forged = _fake_request({"fly-client-ip": "9.9.9.9", "cf-connecting-ip": "5.5.5.5"})
+    assert _client_ip(forged) == "9.9.9.9"
+
+
 def test_voter_ip_collapses_ipv6_to_64() -> None:
     """One IPv6 /64 allocation = one identity (else a single allocation mints billions)."""
     from e14detector.webapp import _voter_ip

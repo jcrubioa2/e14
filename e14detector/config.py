@@ -187,12 +187,20 @@ ADMIN_TOKEN = os.environ.get("E14_ADMIN_TOKEN", "")
 # visitor's session. Empty => not enforced (local dev / tests). A request with NO Origin (a
 # non-browser client) is left to the rate-limit / Turnstile controls, not blocked here.
 ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("E14_ALLOWED_ORIGINS", "").split(",") if o.strip()]
-# Header carrying the REAL client IP, set by the edge proxy (Fly sets ``Fly-Client-IP``;
-# behind Cloudflare use ``cf-connecting-ip``). The edge overwrites any client-supplied value,
-# so it cannot be forged — unlike ``X-Forwarded-For``, whose first hop is attacker-controlled.
-# The per-IP voter identity + rate limiter key on THIS, never on a raw XFF first entry.
-# Lowercased for case-insensitive header lookup.
-TRUSTED_IP_HEADER = os.environ.get("E14_TRUSTED_IP_HEADER", "fly-client-ip").strip().lower()
+# Real client IP resolution (see webapp._client_ip). Fly sets the un-spoofable ``Fly-Client-IP``
+# to whoever connected to Fly's edge. When Cloudflare proxies us, that connector is Cloudflare, so
+# the real visitor is in ``cf-connecting-ip`` — but we only trust that header when Fly-Client-IP is
+# actually a Cloudflare IP (else a direct-to-Fly attacker could forge cf-connecting-ip). These are
+# Cloudflare's published ranges (https://www.cloudflare.com/ips-v4|v6 — refresh rarely); override
+# with E14_CF_IP_RANGES (comma-separated CIDRs) if they change. Empty/none => never trust CF header.
+_CF_DEFAULT_RANGES = (
+    "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,"
+    "108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,"
+    "162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,"
+    "2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,"
+    "2a06:98c0::/29,2c0f:f248::/32"
+)
+CF_IP_RANGES = [c.strip() for c in os.environ.get("E14_CF_IP_RANGES", _CF_DEFAULT_RANGES).split(",") if c.strip()]
 # Minimum distinct voters before a crop/acta surfaces on the PUBLIC "most reported" billboard
 # / ranking. With IPv6 collapsed to a /64 in the voter identity, distinct voters ~= distinct
 # networks, so this is a cheap anti-manufacture floor (one attacker can't make a crop "hot"
