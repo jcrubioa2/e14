@@ -531,10 +531,39 @@ def test_transparencia_renders_chain_from_pointer(tmp_path: Path, monkeypatch) -
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             r = await client.get("/transparencia")
             assert r.status_code == 200
-            assert "Total nacional" in r.text and "cadena de conteos" in r.text.lower()
-            assert "88_001_001_01_001" in r.text  # the backlog mesa is listed
+            # Public funnel labels (plain language), not the technical chain.
+            assert "Mesas escaneadas" in r.text
+            assert "Mesas disponibles en nuestro sistema" in r.text
+            assert "Mesas instaladas en el país" in r.text
+            assert "88_001_001_01_001" in r.text  # the pending mesa is listed (pendientes > 0)
 
     asyncio.run(run())
+
+
+def test_build_public_counts_is_a_friendly_funnel() -> None:
+    """The public projection is a 4-step funnel with plain labels (no internal frontier/jargon),
+    surfaces escrutadas as 'escaneadas', and highlights the served step as the final one."""
+    from e14detector.webapp import build_public_counts
+
+    recon = {"total_global": 122020, "mesas_escrutadas": 122020, "mesas_informadas": 122016}
+    pub = build_public_counts(recon, served_total=122016)
+    keys = [s["key"] for s in pub["funnel"]]
+    assert keys == ["pais", "escaneadas", "acta", "sistema"]
+    assert pub["funnel"][-1]["highlight"] is True  # "disponibles en nuestro sistema" is final
+    assert pub["funnel"][1]["label"] == "Mesas escaneadas"  # not "escrutadas"
+    assert pub["served_label"] == "122.016"
+    assert pub["cobertura_label"] == "100,00"  # served / informadas
+    assert pub["sin_acta"] == 4       # escaneadas − acta publicada (registraduría's)
+    assert pub["pendientes"] == 0     # acta publicada − served (ours; caught up)
+    # No technical fields leak into the public projection.
+    assert "rows" not in pub and "served_eq_published" not in pub
+
+
+def test_build_public_counts_handles_missing_data() -> None:
+    from e14detector.webapp import build_public_counts
+    pub = build_public_counts(None, served_total=5)
+    assert pub["has_data"] is False
+    assert pub["funnel"][0]["value_label"] == "—"
 
 
 def test_build_count_chain_orders_and_derives() -> None:

@@ -53,27 +53,37 @@
     main { padding-top:22px; padding-bottom:48px; }
     h2 { font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:22px; margin:30px 0 6px; }
 
-    .kpis { display:flex; flex-wrap:wrap; gap:12px; margin:14px 0 8px; }
-    .kpi { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
-           padding:14px 18px; box-shadow:var(--shadow); min-width:150px; }
-    .kpi .lab { font-size:12px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.06em; }
-    .kpi .val { font-family:"Fraunces", Georgia, serif; font-size:30px; font-weight:600; margin-top:4px; }
-    .kpi.good .val { color:var(--green); }
+    /* Hero: the single number that matters most to a citizen — what they can open here. */
+    .hero { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+            box-shadow:var(--shadow); padding:24px 26px; margin:18px 0 8px; display:flex;
+            flex-wrap:wrap; align-items:baseline; gap:6px 18px; }
+    .hero .big { font-family:"Fraunces", Georgia, serif; font-size:52px; font-weight:600;
+                 line-height:1; color:var(--green); letter-spacing:-.02em; }
+    .hero .big-lab { font-size:16px; color:var(--ink); font-weight:600; }
+    .hero .cob { margin-left:auto; text-align:right; }
+    .hero .cob b { font-family:"Fraunces", Georgia, serif; font-size:30px; color:var(--ink); }
+    .hero .cob span { display:block; font-size:12px; color:var(--ink-soft); }
 
-    table.chain { width:100%; border-collapse:collapse; background:var(--card);
-                  border:1px solid var(--line); border-radius:var(--r); overflow:hidden; box-shadow:var(--shadow); }
-    table.chain th, table.chain td { padding:11px 14px; border-bottom:1px solid var(--line); text-align:left; }
-    table.chain th { font-size:12px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.05em; }
-    table.chain td.num { text-align:right; font-variant-numeric:tabular-nums; font-weight:700; }
-    table.chain td.src { color:var(--ink-faint); font-size:12.5px; }
-    table.chain tr.bad td { background:var(--red-tint); color:var(--red-deep); }
-    .st-ok { color:var(--green); } .st-bad { color:var(--red-deep); font-weight:700; } .st-na { color:var(--ink-faint); }
+    /* Funnel: país -> escaneadas -> acta publicada -> disponibles aquí. */
+    .funnel { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:12px; margin-top:6px; }
+    .step { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+            padding:16px 18px; box-shadow:var(--shadow); position:relative; }
+    .step.is-final { border-color:#bfe0cb; background:linear-gradient(180deg,#F4FBF6,#FFFFFF); }
+    .step .num { font-family:"Fraunces", Georgia, serif; font-size:34px; font-weight:600; line-height:1;
+                 font-variant-numeric:tabular-nums; }
+    .step.is-final .num { color:var(--green); }
+    .step .lab { font-weight:700; font-size:14.5px; margin-top:8px; }
+    .step .sub { color:var(--ink-soft); font-size:12.5px; margin-top:5px; line-height:1.45; }
+    .step .arrow { position:absolute; right:-10px; top:50%; transform:translateY(-50%);
+                   color:var(--ink-faint); font-size:18px; z-index:1; }
+    @media (max-width:760px){ .step .arrow{ display:none; } }
 
     .backlog { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
                padding:6px 0; box-shadow:var(--shadow); max-height:320px; overflow:auto; }
     .backlog table { width:100%; border-collapse:collapse; font-size:13px; }
     .backlog th, .backlog td { padding:7px 14px; border-bottom:1px solid var(--line); text-align:left; }
     .note { background:var(--paper-2); border:1px solid var(--line); border-radius:var(--r); padding:14px 18px; margin-top:12px; font-size:14px; line-height:1.55; color:var(--ink-soft); }
+    .note b { color:var(--ink); }
   </style>
 </head>
 <body>
@@ -89,45 +99,56 @@
   </header>
 
   <main>
-    {% if chain.has_reconciliation %}
-    <div class="kpis">
-      <div class="kpi good"><div class="lab">Cobertura</div><div class="val">{% if chain.cobertura_label is not none %}{{ chain.cobertura_label }}%{% else %}&mdash;{% endif %}</div></div>
-      <div class="kpi"><div class="lab">Faltan por servir (ingesta)</div><div class="val">{% if chain.backlog_ingesta_label is not none %}{{ chain.backlog_ingesta_label }}{% else %}&mdash;{% endif %}</div></div>
-      <div class="kpi"><div class="lab">Sin reportar aún</div><div class="val">{% if chain.backlog_reporte_label is not none %}{{ chain.backlog_reporte_label }}{% else %}&mdash;{% endif %}</div></div>
-      <div class="kpi"><div class="lab">Servida = publicada</div><div class="val">{{ 'Sí' if chain.served_eq_published else 'NO' }}</div></div>
+    {% if public.has_data %}
+    <div class="hero">
+      <div>
+        <div class="big">{{ public.served_label }}</div>
+        <div class="big-lab">mesas disponibles para consultar en nuestro sistema</div>
+      </div>
+      {% if public.cobertura_label is not none %}
+      <div class="cob">
+        <b>{{ public.cobertura_label }}%</b>
+        <span>de las actas con foto publicada</span>
+      </div>
+      {% endif %}
     </div>
 
-    <h2>La cadena de conteos</h2>
-    <table class="chain">
-      <thead><tr><th>Conteo</th><th class="num">Actas</th><th>De dónde sale</th><th>Estado</th></tr></thead>
-      <tbody>
-        {% for r in chain.rows %}
-        <tr class="{{ 'bad' if r.status == 'bad' }}">
-          <td>{{ r.label }}</td>
-          <td class="num">{{ r.count_label }}</td>
-          <td class="src">{{ r.source }}</td>
-          <td>{% if r.status == 'ok' %}<span class="st-ok">✓</span>{% elif r.status == 'bad' %}<span class="st-bad">⚠</span>{% else %}<span class="st-na">—</span>{% endif %}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    <p class="muted" style="margin-top:8px;">
-      <b>Cobertura</b> = actas servidas ÷ mesas informadas. <b>Backlog de ingesta</b> = mesas que la
-      Registraduría ya informó pero que aún no servimos. <b>Sin reportar</b> = mesas del total nacional
-      que la Registraduría todavía no ha informado.
-      {%- if chain.universe_fetched_at %} Universo actualizado: {{ chain.universe_fetched_at }}.{% endif %}
-    </p>
+    <h2>De todo el país a tu pantalla</h2>
+    <div class="funnel">
+      {% for s in public.funnel %}
+      <div class="step {{ 'is-final' if s.highlight }}">
+        <div class="num">{{ s.value_label }}</div>
+        <div class="lab">{{ s.label }}</div>
+        <div class="sub">{{ s.sub }}</div>
+        {% if not loop.last %}<div class="arrow">&rarr;</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
 
-    {% if backlog %}
-    <h2>Qué mesas faltan, y por qué</h2>
-    <p class="muted" style="margin-bottom:8px;">
-      {% if chain.missing_count %}{{ chain.missing_count }}{% else %}{{ backlog|length }}{% endif %}
-      mesa(s) informadas que aún no servimos (mostrando {{ backlog|length }}). En general son mesas
-      del exterior o reportadas muy recientemente; las incorporamos de forma incremental.
-    </p>
-    <div class="backlog">
+    {% if public.sin_acta or public.pendientes %}
+    <h2>Por qué algunas mesas todavía no están</h2>
+    <div class="note">
+      {% if public.sin_acta %}
+      <p style="margin:0 0 8px;"><b>{{ public.sin_acta }}</b> mesa(s) ya fueron escaneadas, pero la
+        Registraduría <b>aún no publica la foto de su acta E-14</b>. Hasta que la publique, no hay
+        imagen que mostrar &mdash; no depende de nosotros.</p>
+      {% endif %}
+      {% if public.pendientes %}
+      <p style="margin:0;"><b>{{ public.pendientes }}</b> acta(s) ya publicadas que todavía estamos
+        incorporando a nuestro sistema. Las añadimos de forma continua.</p>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="note">
+      Ya tienes acceso a <b>todas</b> las mesas cuya acta (foto E-14) ha publicado la Registraduría.
+      Las pocas que faltan a nivel nacional son mesas que la propia Registraduría aún no ha publicado.
+    </div>
+    {% endif %}
+
+    {% if backlog and public.pendientes %}
+    <div class="backlog" style="margin-top:12px;">
       <table>
-        <thead><tr><th>Clave de mesa</th><th>Depto</th><th>Mun.</th><th>Zona</th><th>Puesto</th><th>Mesa</th></tr></thead>
+        <thead><tr><th>Mesa</th><th>Depto</th><th>Mun.</th><th>Zona</th><th>Puesto</th><th>Mesa #</th></tr></thead>
         <tbody>
           {% for b in backlog %}
           <tr><td>{{ b.key }}</td><td>{{ b.dep }}</td><td>{{ b.muni }}</td><td>{{ b.zona }}</td><td>{{ b.puesto }}</td><td>{{ b.mesa }}</td></tr>
@@ -137,21 +158,26 @@
     </div>
     {% endif %}
 
-    {% if chain.content %}
-    <h2>Integridad de contenido</h2>
+    {% if public.content %}
+    <h2>Cuidamos que la foto no cambie</h2>
     <div class="note">
-      Además de tener el acta, comprobamos que el recorte que mostramos siga coincidiendo con el PDF
-      oficial vigente. La Registraduría a veces vuelve a emitir el PDF de una mesa bajo el mismo
-      enlace: en la última verificación, <b>{{ chain.content.content_changed }} de {{ chain.content.checked }}</b>
-      actas ({{ chain.content.changed_pct }}%) habían sido re-emitidas. Es <b>re-emisión del documento,
-      no evidencia de edición del conteo</b>; lo seguimos vigilando.
+      No basta con tener el acta: comprobamos que la imagen que te mostramos siga coincidiendo con
+      la que publica la Registraduría. A veces ellos vuelven a publicar la foto de una mesa bajo el
+      mismo enlace &mdash; en la última revisión, <b>{{ public.content.content_changed }} de
+      {{ public.content.checked }}</b> ({{ public.content.changed_pct }}%) habían cambiado de imagen.
+      Es <b>una nueva versión del documento, no evidencia de que se haya alterado el conteo</b>; lo
+      seguimos vigilando.
     </div>
     {% endif %}
 
+    <p class="muted" style="margin-top:16px;">
+      ¿Buscas una mesa en particular? Ve al <a href="/buscar">buscador</a>.
+      {%- if public.universe_fetched_at %} Cifras actualizadas: {{ public.universe_fetched_at }}.{% endif %}
+    </p>
+
     {% else %}
     <div class="note">
-      Aún estamos preparando el bloque de reconciliación de conteos. Vuelve pronto; mientras tanto,
-      en nuestra base de datos pública hay actas que puedes revisar en
+      Estamos preparando estas cifras. Vuelve pronto; mientras tanto, puedes revisar las actas en
       <a href="/buscar">el buscador</a>.
     </div>
     {% endif %}

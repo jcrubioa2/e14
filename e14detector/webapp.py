@@ -617,6 +617,50 @@ def build_count_chain(recon: dict | None, served_total: int) -> dict:
     }
 
 
+def build_public_counts(recon: dict | None, served_total: int) -> dict:
+    """The PUBLIC projection of the count model — for citizens, not operators.
+
+    The admin chain (build_count_chain) exposes every internal frontier (downloaded, crops,
+    published, inversion flags, source columns). The public doesn't need any of that: it needs a
+    plain four-step funnel from "the whole country" to "what you can actually open here", in
+    everyday Spanish. Same source numbers, friendly labels, no jargon. ``mesas_escrutadas`` is
+    surfaced as "escaneadas" (the wording the public understands), and the final, highlighted step
+    is what the platform genuinely makes accessible (the served count).
+    """
+    recon = recon or {}
+    tg = recon.get("total_global")
+    esc = recon.get("mesas_escrutadas")
+    inf = recon.get("mesas_informadas")
+
+    def lab(n):
+        return _es_thousands(n) if isinstance(n, int) else "—"
+
+    funnel = [
+        {"key": "pais", "label": "Mesas instaladas en el país", "value_label": lab(tg),
+         "sub": "El total nacional, según la Registraduría."},
+        {"key": "escaneadas", "label": "Mesas escaneadas", "value_label": lab(esc),
+         "sub": "Mesas cuyo resultado ya procesó la Registraduría."},
+        {"key": "acta", "label": "Mesas con su acta (foto) publicada", "value_label": lab(inf),
+         "sub": "La Registraduría ya publicó la imagen del formulario E-14."},
+        {"key": "sistema", "label": "Mesas disponibles en nuestro sistema", "value_label": lab(served_total),
+         "sub": "Listas para consultar, revisar y comparar aquí.", "highlight": True},
+    ]
+    cobertura = round(served_total * 100 / inf, 2) if isinstance(inf, int) and inf else None
+    return {
+        "served_label": lab(served_total),
+        "cobertura_label": (f"{cobertura:.2f}".replace(".", ",") if cobertura is not None else None),
+        "funnel": funnel,
+        # Plain-language gaps: mesas escaneadas cuya acta aún no publica la Registraduría, and
+        # actas publicadas que todavía no incorporamos (our pending ingest — 0 when caught up).
+        "sin_acta": (max(0, esc - inf) if isinstance(esc, int) and isinstance(inf, int) else None),
+        "pendientes": (max(0, inf - served_total) if isinstance(inf, int) else None),
+        "missing_count": recon.get("missing_count"),
+        "content": recon.get("content"),
+        "universe_fetched_at": recon.get("universe_fetched_at"),
+        "has_data": bool(recon) and inf is not None,
+    }
+
+
 def stalled_publisher_msg(
     age_secs: int | None, stale_after: int, served_pct: float | None, complete_pct: float
 ) -> str | None:
@@ -1485,8 +1529,9 @@ def create_app(
         recon = _pointer_reconciliation()
         with conn() as db:
             served_total = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        chain = build_count_chain(recon, served_total)
-        # Parse the missing-key sample into a readable backlog list (mesas informed but not served).
+        public = build_public_counts(recon, served_total)
+        # Parse the missing-key sample into a readable list (only shown when we have a real ingest
+        # backlog — mesas with a published acta we haven't incorporated yet).
         backlog = []
         for k in ((recon or {}).get("missing_keys_sample") or []):
             parts = str(k).split("_")
@@ -1497,7 +1542,7 @@ def create_app(
             request,
             "transparencia.html",
             {
-                "chain": chain,
+                "public": public,
                 "backlog": backlog,
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
