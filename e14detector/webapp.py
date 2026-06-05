@@ -429,6 +429,81 @@ def parse_field_key(field_key: str) -> tuple[str, int, int, str] | None:
         return None
 
 
+def _candidate_display_name(candidate_name: str | None, candidate_number: int | None) -> str:
+    name = (candidate_name or "").strip()
+    if name:
+        return name
+    if candidate_number is not None:
+        return f"Candidato {candidate_number}"
+    return "Sin nombre"
+
+
+def reports_by_candidate(
+    db: sqlite3.Connection, field_keys: list[str], *, chunk_size: int = 400
+) -> list[dict[str, Any]]:
+    """Group distinct flagged crops by candidate; each crop counts once in the stats.
+
+    ``field_keys`` should be the distinct keys from ``flags`` (see
+    ``CommunityStore.distinct_flagged_field_keys``). Multiple voters on the same crop
+    do not increase its count.
+    """
+    parsed: list[tuple[str, str, int, int, str]] = []
+    seen: set[str] = set()
+    for fk in field_keys:
+        if fk in seen:
+            continue
+        seen.add(fk)
+        parts = parse_field_key(fk)
+        if parts is None:
+            continue
+        doc, page, row, section = parts
+        parsed.append((fk, doc, page, row, section))
+    if not parsed:
+        return []
+
+    counts: collections.Counter[str] = collections.Counter()
+    for i in range(0, len(parsed), chunk_size):
+        batch = parsed[i : i + chunk_size]
+        # Read-only results connection (query_only) — use a UNION subquery, not temp tables.
+        union_sql = " UNION ALL ".join(
+            "SELECT ? AS fk, ? AS doc, ? AS page, ? AS row, ? AS sec" for _ in batch
+        )
+        params: list[Any] = []
+        for fk, doc, page, row, section in batch:
+            params.extend([fk, doc, page, row, section])
+        rows = db.execute(
+            f"""
+            SELECT l.fk, vf.candidate_name, vf.candidate_number
+            FROM ({union_sql}) AS l
+            JOIN vote_fields vf
+              ON vf.document_id = l.doc
+             AND vf.page_number = l.page
+             AND vf.row_number = l.row
+             AND COALESCE(vf.section, '') = l.sec
+             AND vf.row_type = 'candidate'
+            """,
+            params,
+        ).fetchall()
+        matched = {r["fk"] for r in rows}
+        for r in rows:
+            label = _candidate_display_name(r["candidate_name"], r["candidate_number"])
+            counts[label] += 1
+        for fk, *_ in batch:
+            if fk not in matched:
+                counts["Sin nombre"] += 1
+
+    total = sum(counts.values())
+    out = [
+        {
+            "name": name,
+            "reports": n,
+            "pct": round(100.0 * n / total, 1) if total else 0.0,
+        }
+        for name, n in counts.most_common()
+    ]
+    return out
+
+
 GEO_DIR = Path(__file__).resolve().parent / "geo"
 MUNICIPIOS_GEOJSON = GEO_DIR / "colombia_municipios.geojson"
 DEPARTAMENTOS_GEOJSON = GEO_DIR / "colombia_departamentos.geojson"
@@ -964,67 +1039,68 @@ def create_app(
             "alerts_on": alerts.configured(),
         }
 
-    def _votes_backend_ok() -> bool:
-        # Cheap liveness probe (no row-by-row overview): an empty counts_among round-trips to
-        # the votes backend and returns fast. Any error = backend down.
-        try:
-            community.counts_among([])
-            return True
-        except Exception as exc:  # noqa: BLE001
-            alerts.notify("votes-backend", f"votes backend probe failed: {exc}")
-            return False
-
     @app.get("/admin/poll")
     async def admin_poll(request: Request, key: str = ""):
-        # Operator-only: DB/publishing management + health. Off unless a token is configured.
+        # Operator-only: private vote counts + publishing health. Off unless a token is configured.
         if not config.ADMIN_TOKEN:
             raise HTTPException(status_code=404, detail="not found")
         if key != config.ADMIN_TOKEN:
             raise HTTPException(status_code=403, detail="forbidden")
-        votes_ok = await asyncio.to_thread(_votes_backend_ok)
+        # Tolerate a votes-backend outage: render the board (with a FAIL tile) instead of 500ing,
+        # so the operator can still see *that* Aurora is down rather than a blank error page.
+        try:
+            rows = community.admin_overview()
+            votes_ok = True
+        except Exception as exc:  # noqa: BLE001
+            rows = []
+            votes_ok = False
+            alerts.notify("votes-backend", f"admin_overview failed (votes backend down?): {exc}")
+        with conn() as db:
+            for r in rows:
+                parsed = parse_field_key(r["field_key"])
+                if not parsed:
+                    continue
+                doc_id, page, row, section = parsed
+                meta = db.execute(
+                    "SELECT d.department_name, d.municipality_name, d.mesa, vf.candidate_name "
+                    "FROM documents d LEFT JOIN vote_fields vf ON vf.document_id=d.document_id "
+                    "AND vf.page_number=? AND vf.row_number=? AND COALESCE(vf.section,'')=? "
+                    "AND vf.row_type='candidate' WHERE d.document_id=? LIMIT 1",
+                    (page, row, section, doc_id),
+                ).fetchone()
+                r["document_id"] = doc_id
+                r["acta"] = " · ".join(x for x in (
+                    meta["department_name"], meta["municipality_name"],
+                    f"mesa {meta['mesa']}" if meta and meta["mesa"] else None) if meta and x) if meta else doc_id
+                r["candidate"] = (meta["candidate_name"] if meta else None) or f"fila {row}"
+        summary = {
+            "fields": len(rows),
+            "votes": sum(r["votes"] for r in rows),
+            "strange": sum(r["published"] for r in rows),
+            "cleared": sum(r["appeal_cleared"] for r in rows),
+        }
         # Pipeline health: what the served DB holds vs what the publisher last shipped.
         # A large pointer age, or a served count far below the published frontier, means
         # the publisher stalled or the reader isn't swapping (the stub-DB incident class).
         with conn() as db:
             pipeline = compute_sync_progress(db)
-        from .dbsync import pointer_status, read_db_lock
+        from .dbsync import pointer_status
         ptr = pointer_status(config.CDN_BASE_URL) if config.CDN_BASE_URL else None
         if ptr:
             age = ptr.get("age_secs")
             pipeline["pointer_sha"] = ptr["sha"]
             pipeline["pointer_raw_mb"] = round(ptr["raw_size"] / 1e6) if ptr.get("raw_size") else None
             pipeline["pointer_gz_mb"] = round(ptr["gz_size"] / 1e6, 1) if ptr.get("gz_size") else None
-            pipeline["pointer_n_docs"] = ptr.get("n_docs") or None
             pipeline["pointer_age_min"] = round(age / 60) if age is not None else None
             # Stale if the publisher hasn't flipped the pointer in >30 min (cycles run ~10-14).
             pipeline["pointer_stale"] = age is not None and age > 30 * 60
-        # Off the event loop: _admin_health and the lock read do blocking network probes.
+        # Off the event loop: _admin_health does a blocking SQS GetQueueAttributes probe.
         health = await asyncio.to_thread(_admin_health, votes_ok, pipeline)
-        lock = await asyncio.to_thread(read_db_lock)
         return templates.TemplateResponse(
             request,
             "admin.html",
-            {"key": key, "pipeline": pipeline, "health": health, "lock": lock},
+            {"rows": rows, "summary": summary, "key": key, "pipeline": pipeline, "health": health},
         )
-
-    @app.post("/admin/db-lock")
-    async def admin_db_lock(key: str = "", locked: str = ""):
-        # Toggle the publish lock (freezes the served DB so no publisher can overwrite it).
-        # POST with query params (?key=...&locked=on|off) — no form body, so no multipart dep.
-        if not config.ADMIN_TOKEN:
-            raise HTTPException(status_code=404, detail="not found")
-        if key != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=403, detail="forbidden")
-        from .dbsync import set_db_lock
-        want = locked.strip().lower() in ("1", "true", "on", "yes", "lock")
-        n_docs = None
-        if config.CDN_BASE_URL:
-            from .dbsync import pointer_status
-            ptr = await asyncio.to_thread(pointer_status, config.CDN_BASE_URL)
-            n_docs = (ptr or {}).get("n_docs") or None
-        lock = await asyncio.to_thread(
-            set_db_lock, want, reason="admin console toggle", n_docs=n_docs, by="admin")
-        return JSONResponse({"ok": True, "lock": lock})
 
     @app.get("/robots.txt")
     async def robots():
@@ -1255,6 +1331,13 @@ def create_app(
         pages = max(1, math.ceil(len(_agg_cached("popularity", community.acta_popularity)) / REPORTES_PER_PAGE))
         page = max(1, min(page, pages))
         board = _agg_cached(f"hot_actas_p{page}", lambda: _hot_actas_page(page))
+
+        def _candidate_stats() -> list[dict[str, Any]]:
+            keys = community.distinct_flagged_field_keys()
+            with conn() as db:
+                return reports_by_candidate(db, keys)
+
+        candidate_stats = _agg_cached("candidate_stats", _candidate_stats)
         canon = config.SITE_URL + "/reportes" + (f"?page={board['page']}" if board["page"] > 1 else "")
         return templates.TemplateResponse(
             request,
@@ -1264,6 +1347,7 @@ def create_app(
                 "page": board["page"],
                 "pages": board["pages"],
                 "total": board["total"],
+                "candidate_stats": candidate_stats,
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
                 "active": "reportes",

@@ -261,6 +261,10 @@ class PgCommunityStore:
         )
         return {r["field_key"] for r in rows}
 
+    def distinct_flagged_field_keys(self) -> list[str]:
+        rows = self._rows("SELECT DISTINCT field_key FROM flags ORDER BY field_key")
+        return [r["field_key"] for r in rows]
+
     def acta_popularity(self) -> dict[str, int]:
         # Distinct voters per acta. The document id is the field_key minus its last
         # 3 ':'-parts (page:row:section) -> mirrors community.py's rsplit(":", 3)[0].

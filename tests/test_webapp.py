@@ -58,25 +58,25 @@ def test_browse_cascading_dropdowns(tmp_path: Path) -> None:
     async def run() -> None:
         # No department: municipality select is disabled, no municipio options (the
         # "code name" label only appears in the dropdown, not the acta cards).
-        html = await get("/buscar")
+        html = await get("/browse")
         assert 'name="municipality" data-level="1" disabled' in html
         assert "001 MEDELLIN" not in html
 
         # Pick ANTIOQUIA: its municipio options appear; VALLE's CALI is gone; zona disabled.
-        html = await get("/buscar?department=01")
+        html = await get("/browse?department=01")
         assert "001 MEDELLIN" in html and "088 BELLO" in html and "CALI" not in html
         assert 'name="zone" data-level="2" disabled' in html
 
         # Pick Medellin: zona drop-down is now enabled (populated).
-        html = await get("/buscar?department=01&municipality=001")
+        html = await get("/browse?department=01&municipality=001")
         assert 'name="zone" data-level="2" disabled' not in html
 
         # Full drill-down narrows to the one acta.
-        html = await get("/buscar?department=01&municipality=001&zone=001&puesto=01")
+        html = await get("/browse?department=01&municipality=001&zone=001&puesto=01")
         assert "/acta/doc-a" in html and "/acta/doc-b" not in html
 
         # A child filter without its parent is ignored (not 500).
-        html = await get("/buscar?municipality=001")
+        html = await get("/browse?municipality=001")
         assert "/acta/doc-a" in html and "/acta/doc-c" in html
 
         # The AJAX places endpoint returns the next level's options (no full reload).
@@ -90,9 +90,7 @@ def test_browse_cascading_dropdowns(tmp_path: Path) -> None:
 
 
 def test_browse_shows_national_sync_progress(tmp_path: Path, monkeypatch) -> None:
-    """The shared app bar shows national-load progress (pct) while the rollout is incomplete.
-    (The old /browse synced/total/ETA panel was retired when /browse split into /buscar+/reportes;
-    the compact app-bar label is what remains, and it renders on every page incl. /buscar.)"""
+    """The public /browse page shows rollout progress: synced/total, %, and an ETA."""
     monkeypatch.setattr(config, "NATIONAL_TOTAL_ACTAS", 100)
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
@@ -117,9 +115,12 @@ def test_browse_shows_national_sync_progress(tmp_path: Path, monkeypatch) -> Non
     async def run() -> None:
         transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            html = (await client.get("/buscar")).text
-            assert "Cargando las actas a nivel nacional" in html
-            assert "2.0%" in html  # 2 of 100 actas synced -> pct rounded to one decimal
+            html = (await client.get("/browse")).text
+            assert "2 de 100 actas" in html
+            assert "2.0%" in html
+            assert "Cargando las actas" in html
+            assert "Tiempo restante estimado" in html
+            assert "actualizaci" in html  # "Última actualización ..."
 
     asyncio.run(run())
 
@@ -250,9 +251,8 @@ def test_retired_verdict_routes_gone_and_crop_traversal_blocked(tmp_path: Path) 
             assert (await client.get("/api/flagged")).status_code == 404
             assert (await client.get("/panel")).status_code == 404
             assert (await client.get("/doc/doc-candidate")).status_code == 404
-            # / still redirects to the public crowd-voting feed (307 temporary, not 308 —
-            # the landing default moved to /votar and must stay re-checkable).
-            assert (await client.get("/")).status_code == 307
+            # / still redirects to the public crowd-voting browser.
+            assert (await client.get("/")).status_code == 308
 
             crop_path = os.path.relpath(candidate_crop, Path.cwd())
             assert resolve_crop_path(crop_path, output_dir) == candidate_crop.resolve()
@@ -411,9 +411,7 @@ def test_vote_batch_records_strange_and_good(tmp_path: Path) -> None:
 
 
 def test_browse_shows_billboard(tmp_path: Path) -> None:
-    """A reported acta shows on the community billboard (one card per mesa), linking to it.
-    The billboard moved with the /browse split: the global "most reported" board is /reportes,
-    and the "Ver todas" (review=1) list is /buscar?review=1 — both render the same tile."""
+    """A reported acta shows on /browse's community billboard (one card per mesa), linking to it."""
     from e14detector.community import CommunityStore, field_key_of
 
     output_dir = tmp_path / "out"
@@ -441,14 +439,14 @@ def test_browse_shows_billboard(tmp_path: Path) -> None:
         app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            html = (await client.get("/reportes")).text
+            html = (await client.get("/browse")).text
             assert "Actas m" in html  # "Actas más reportadas por la comunidad"
             assert "reportaron" in html  # the per-acta tally line
             assert "/acta/doc-hot" in html
             assert "VALLE" in html and "CALI" in html
 
             # "Ver todas" (review=1) renders the SAME billboard tile: thumb + loc + tally.
-            review_html = (await client.get("/buscar?review=1")).text
+            review_html = (await client.get("/browse?review=1")).text
             assert '"board-list"' in review_html and "board-thumb" in review_html
             assert "reportaron" in review_html
             assert "/acta/doc-hot" in review_html
@@ -477,7 +475,7 @@ def _drop_n_candidates(db: Path) -> None:
 
 def test_ensure_n_candidates_backfills_and_browse_works(tmp_path: Path) -> None:
     """A served snapshot missing the precomputed n_candidates column is backfilled at load
-    (ensure_n_candidates) so /buscar stays on the fast path and never 500s (prod incident)."""
+    (ensure_n_candidates) so /browse stays on the fast path and never 500s (prod incident)."""
     import sqlite3
 
     from e14detector.webapp import ensure_n_candidates
@@ -511,10 +509,10 @@ def test_ensure_n_candidates_backfills_and_browse_works(tmp_path: Path) -> None:
     assert ensure_n_candidates(db) is True  # second call is a no-op, still True
 
     async def run() -> None:
-        # create_app calls ensure_n_candidates itself; /buscar uses the fast n_candidates column.
+        # create_app calls ensure_n_candidates itself; /browse uses the fast n_candidates column.
         transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            r = await client.get("/buscar")
+            r = await client.get("/browse")
             assert r.status_code == 200
             html = r.text
             assert "/acta/doc-has" in html and "/acta/doc-none" not in html
@@ -525,7 +523,7 @@ def test_ensure_n_candidates_backfills_and_browse_works(tmp_path: Path) -> None:
 
 def test_ensure_n_candidates_boot_recovers_missing_column(tmp_path: Path) -> None:
     """Even without calling ensure_n_candidates by hand, building the app on a column-less DB
-    recovers it (the create_app boot hook) — /buscar responds 200, not 500."""
+    recovers it (the create_app boot hook) — /browse responds 200, not 500."""
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     crop = _crop(output_dir / "crops" / "c.png")
@@ -542,13 +540,13 @@ def test_ensure_n_candidates_boot_recovers_missing_column(tmp_path: Path) -> Non
     async def run() -> None:
         transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            assert (await client.get("/buscar")).status_code == 200
+            assert (await client.get("/browse")).status_code == 200
 
     asyncio.run(run())
 
 
 def test_geo_names_resolved_at_render_without_touching_db(tmp_path: Path) -> None:
-    """A snapshot carrying only DIVIPOLA codes (names NULL) renders human names on /buscar,
+    """A snapshot carrying only DIVIPOLA codes (names NULL) renders human names on /browse,
     resolved from the in-memory dictionary at render time — the DB is NOT mutated (stays
     codes-only, no per-row name duplication)."""
     import sqlite3
@@ -587,7 +585,7 @@ def test_geo_names_resolved_at_render_without_touching_db(tmp_path: Path) -> Non
         # create_app uses the bundled real dictionary, which maps 01->ANTIOQUIA, 001->MEDELLIN.
         transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            html = (await client.get("/buscar")).text
+            html = (await client.get("/browse")).text
             assert "ANTIOQUIA" in html and "MEDELLIN" in html
 
     asyncio.run(run())
@@ -651,6 +649,76 @@ def test_official_pdf_link_rebuilt_from_hash(tmp_path: Path) -> None:
         "SELECT COUNT(*) FROM documents WHERE official_lookup_url IS NOT NULL"
     ).fetchone()[0] == 0
     con.close()
+
+
+def test_reports_by_candidate_counts_distinct_crops(tmp_path: Path) -> None:
+    """Each flagged crop counts once; multiple voters on the same crop do not stack."""
+    import sqlite3
+
+    from e14detector.community import field_key_of
+    from e14detector.webapp import reports_by_candidate
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc", source_path="doc.pdf"))
+    for row, name in ((1, "Petro"), (2, "Gallo")):
+        store.insert_vote_field(VoteField(
+            document_id="doc", page_number=1, row_type="candidate", row_number=row,
+            candidate_name=name, raw_crop_path=str(crop),
+        ))
+    store.commit()
+    store.close()
+
+    fk_petro = field_key_of("doc", 1, 1, None)
+    fk_gallo = field_key_of("doc", 1, 2, None)
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    stats = reports_by_candidate(con, [fk_petro, fk_petro, fk_gallo])
+    con.close()
+    by_name = {s["name"]: s["reports"] for s in stats}
+    assert by_name == {"Petro": 1, "Gallo": 1}
+
+
+def test_reportes_shows_candidate_stats(tmp_path: Path) -> None:
+    """The /reportes Estadísticas block lists per-candidate distinct crop reports."""
+    from e14detector.community import CommunityStore, field_key_of
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc", source_path="doc.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="Petro", raw_crop_path=str(crop),
+    ))
+    store.insert_vote_field(VoteField(
+        document_id="doc", page_number=1, row_type="candidate", row_number=2,
+        candidate_name="Gallo", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    cs = CommunityStore(community_db)
+    fk = field_key_of("doc", 1, 1, None)
+    cs.record_flag(fk, "voter-a")
+    cs.record_flag(fk, "voter-b")
+    cs.record_flag(field_key_of("doc", 1, 2, None), "voter-a")
+    cs.close()
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/reportes")).text
+            assert "Estad" in html and "Petro" in html and "Gallo" in html
+            assert "cuenta como un solo reporte" in html
+            assert "1 reporte" in html
+
+    asyncio.run(run())
 
 
 def test_municipio_report_stats_aggregation(tmp_path: Path) -> None:

@@ -451,6 +451,18 @@ class CommunityStore:
             ).fetchall()
         return {r["field_key"] for r in rows}
 
+    def distinct_flagged_field_keys(self) -> list[str]:
+        """Every crop that received at least one 'se ve extraña' report (one row per crop).
+
+        Multiple voters on the same crop still yield a single key — used for per-candidate
+        report statistics where each crop counts once regardless of crowd size.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT field_key FROM flags ORDER BY field_key"
+            ).fetchall()
+        return [r["field_key"] for r in rows]
+
     def acta_popularity(self) -> dict[str, int]:
         """Distinct voters who flagged anything in each acta (for the hotlist ranking)."""
         voters: dict[str, set] = {}
