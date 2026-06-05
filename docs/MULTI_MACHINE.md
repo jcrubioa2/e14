@@ -1,5 +1,10 @@
 # Multi-machine crop coordination
 
+> **Publishing from each machine is now unified under [`e14 sync`](SYNC.md).** The fleet
+> coordination (department queue, worker bootstrap) is still detector-CLI specific and described
+> here, but every machine should publish via `e14 sync run`, which enforces the count-model rules
+> so the fleet can't desync the served counts.
+
 Three (or more) PCs can crop in parallel without duplicating work, as long as they share the **published** coordination DB on Fly Tigris and follow a simple split + sync loop.
 
 ## How coordination works

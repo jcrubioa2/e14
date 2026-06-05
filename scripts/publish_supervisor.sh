@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# SUPERSEDED by `e14 sync run` (see docs/SYNC.md) — the unified publisher loop with the
+# count-model rules baked in (lock-aware, frontier-only, shrink-guard, chain-stamp, verify-first).
+# This wrapper still works, but new runs should use:  e14 sync run --output-dir <OUT>
+#
 # Supervises the crop/DB publish loop so the public site keeps growing unattended.
 #
 # The loop itself is crash-proof per-cycle (try/except), but if the process is ever

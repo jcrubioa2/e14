@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SUPERSEDED by `e14 sync run --department <code>` (see docs/SYNC.md). Still works for a quick
+# per-department crop push, but the unified tool also publishes the frontier DB + stamps the chain.
+#
 # Upload remaining candidate crops for one department (Ryzen/Legion divide-and-conquer).
 #
 #   bash scripts/publish_dept_crops.sh 16

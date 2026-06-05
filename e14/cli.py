@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -93,6 +94,46 @@ def cmd_refresh_universe(args) -> int:
     print(f"  total_global      = {snap['total_global']:,}")
     print(f"  mesas_informadas  = {informadas:,}  (backlog de reporte: {backlog_reporte:,})")
     print(f"  fetched_at        = {snap['fetched_at']}")
+    return 0
+
+
+def _sync_out(args) -> Path:
+    return Path(getattr(args, "output_dir", None) or "data/detector")
+
+
+def cmd_sync_status(args) -> int:
+    from e14detector.sync import do_status
+    return do_status(_sync_out(args), cdn_base=args.cdn_base)
+
+
+def cmd_sync_verify(args) -> int:
+    from e14detector.sync import do_verify
+    return do_verify(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+                     check_crops=args.check_crops, check_content=args.check_content)
+
+
+def cmd_sync_restore(args) -> int:
+    from e14detector.sync import do_restore
+    return do_restore(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base, prefix=args.prefix)
+
+
+def cmd_sync_run(args) -> int:
+    from e14detector.sync import do_run
+    return do_run(
+        _sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+        refresh_universe=not args.no_universe, workers=args.workers,
+        upload_limit=args.upload_limit, interval=args.interval, db_interval=args.db_interval,
+        once=args.once, department=args.department, allow_locked=args.allow_locked,
+        allow_shrink=args.allow_shrink,
+    )
+
+
+def cmd_sync_fleet(args) -> int:
+    # Multi-machine orchestration still lives in the detector CLI (fleet-init/status/schedule/
+    # complete/pull-fleet/publish-fleet). Point operators there rather than duplicate it.
+    print("e14 sync fleet: la orquestación multi-máquina vive en el CLI del detector.")
+    print("  python -m e14detector.cli fleet-init | fleet-status | fleet-schedule | fleet-complete")
+    print("  (pull-fleet / publish-fleet para fusionar/publicar la cola)")
     return 0
 
 
@@ -375,6 +416,52 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("stats", help="show manifest status summary")
     sp.set_defaults(func=cmd_stats)
+
+    # --- Unified sync (consolidation; consistency rules baked in) ---------------------------
+    sync = sub.add_parser(
+        "sync",
+        help="unified incremental sync — one tool with the count-model rules baked in "
+             "(lock-aware, frontier-only, shrink-guard, chain-stamp, verify-first)")
+    sync_sub = sync.add_subparsers(dest="sync_cmd", required=True)
+
+    def _sync_common(p):
+        p.add_argument("--output-dir", default="data/detector")
+        p.add_argument("--bucket", help="object-store bucket (default: $BUCKET_NAME)")
+        p.add_argument("--cdn-base", default=os.environ.get("E14_CDN_BASE_URL", "") or None,
+                       help="published CDN base URL (default: $E14_CDN_BASE_URL)")
+
+    sp = sync_sub.add_parser("status", help="print the count chain + cobertura + backlogs")
+    _sync_common(sp)
+    sp.set_defaults(func=cmd_sync_status)
+
+    sp = sync_sub.add_parser("verify", help="assert the invariant chain (nonzero exit on inversion)")
+    _sync_common(sp)
+    sp.add_argument("--check-crops", action="store_true",
+                    help="also confirm every served crop exists in the bucket (full sweep)")
+    sp.add_argument("--check-content", action="store_true",
+                    help="also flag served crops whose source PDF drifted (content integrity)")
+    sp.set_defaults(func=cmd_sync_verify)
+
+    sp = sync_sub.add_parser("restore", help="resume on a fresh machine (reconcile manifest + pull DB)")
+    _sync_common(sp)
+    sp.add_argument("--prefix", default="crops/", help="object key prefix to list")
+    sp.set_defaults(func=cmd_sync_restore)
+
+    sp = sync_sub.add_parser("run", help="the one safe publisher loop (universe + crops + frontier DB)")
+    _sync_common(sp)
+    sp.add_argument("--once", action="store_true", help="run a single cycle and exit (then verify)")
+    sp.add_argument("--no-universe", action="store_true", help="skip the universe-snapshot refresh")
+    sp.add_argument("--workers", type=int, default=32, help="crop upload concurrency")
+    sp.add_argument("--upload-limit", type=int, default=12000, help="max crops uploaded per cycle")
+    sp.add_argument("--interval", type=int, default=60, help="seconds between crop-upload ticks")
+    sp.add_argument("--db-interval", type=int, default=300, help="seconds between DB publishes")
+    sp.add_argument("--department", help="only upload crops for this department (code or name)")
+    sp.add_argument("--allow-locked", action="store_true", help="publish even over a locked round")
+    sp.add_argument("--allow-shrink", action="store_true", help="override the shrink-guard")
+    sp.set_defaults(func=cmd_sync_run)
+
+    sp = sync_sub.add_parser("fleet", help="multi-machine orchestration (points to the detector CLI)")
+    sp.set_defaults(func=cmd_sync_fleet)
 
     sp = sub.add_parser("dictionary",
                         help="build human-readable DIVIPOL dictionary + per-acta index")

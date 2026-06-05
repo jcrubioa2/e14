@@ -461,6 +461,7 @@ def test_publish_db_stamps_reconciliation_chain(tmp_path: Path, monkeypatch) -> 
     (informadas − served) with a sample of which informed mesas aren't served yet."""
     from e14 import universe
 
+    monkeypatch.chdir(tmp_path)  # isolate from the repo's real data/manifest.db
     out = tmp_path / "out"
     # Serve 3 mesas; the universe knows 4 informed mesas (1 is behind) out of 6 total_global.
     served = [("01", "001", "001", "01", "001"), ("01", "001", "001", "01", "002"),
@@ -501,6 +502,7 @@ def test_publish_db_force_pointer_restamps_unchanged_db(tmp_path: Path, monkeypa
     force_pointer the pointer is re-stamped with a fresh reconciliation block — no re-upload."""
     from e14 import universe
 
+    monkeypatch.chdir(tmp_path)  # isolate from the repo's real data/manifest.db
     out = tmp_path / "out"
     served = [("01", "001", "001", "01", "001"), ("01", "001", "001", "01", "002")]
     _make_geo_db(out / "results" / "results.sqlite", served)

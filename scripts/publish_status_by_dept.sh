@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SUPERSEDED for the national view by `e14 sync status` (see docs/SYNC.md). Kept for the
+# per-department breakdown, which the unified status doesn't yet render.
 # Per-department progress: universe vs local DB vs Tigris published DB vs CDN upload frontier.
 #
 #   bash scripts/publish_status_by_dept.sh              # once
