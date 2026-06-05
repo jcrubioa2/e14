@@ -294,6 +294,57 @@ def test_publish_db_refuses_when_acta_count_drops(tmp_path: Path) -> None:
     assert info is not None and info.get("guarded") is True  # 40 < 0.5*100
 
 
+def test_publish_db_refuses_when_locked(tmp_path: Path) -> None:
+    """A locked db/lock.json freezes the served DB: publish refuses unless allow_locked."""
+    out = tmp_path / "out"
+    _make_db(out / "results" / "results.sqlite", 3)
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects = {dbsync.LOCK_KEY: json.dumps({"locked": True, "reason": "done"}).encode()}
+
+        def get_object(self, Bucket, Key):  # noqa: N803
+            if Key not in self.objects:
+                raise KeyError(Key)
+            return {"Body": type("B", (), {"read": lambda s: self.objects[Key]})()}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _FakeS3()
+    info = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    assert info is not None and info.get("locked") is True
+    assert dbsync.POINTER_KEY not in s3.objects  # pointer never flipped
+
+    # allow_locked overrides the lock and publishes normally.
+    info2 = dbsync.publish_db(out, bucket="b", client=s3, allow_locked=True, allow_shrink=True, verbose=False)
+    assert info2 is not None and not info2.get("locked")
+    assert dbsync.POINTER_KEY in s3.objects
+
+
+def test_set_and_read_db_lock_round_trip(tmp_path: Path) -> None:
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+        def get_object(self, Bucket, Key):  # noqa: N803
+            if Key not in self.objects:
+                raise KeyError(Key)
+            return {"Body": type("B", (), {"read": lambda s: self.objects[Key]})()}
+
+    s3 = _FakeS3()
+    assert dbsync.read_db_lock(client=s3, bucket="b") == {"locked": False}  # absent -> unlocked
+    dbsync.set_db_lock(True, reason="100%", n_docs=122007, client=s3, bucket="b")
+    got = dbsync.read_db_lock(client=s3, bucket="b")
+    assert got["locked"] is True and got["n_docs"] == 122007
+
+
 def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) -> None:
     src_dir = tmp_path / "out"
     _make_db(src_dir / "results" / "results.sqlite", 2)

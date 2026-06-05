@@ -29,6 +29,12 @@ from pathlib import Path
 
 DB_PREFIX = "db"
 POINTER_KEY = f"{DB_PREFIX}/latest.json"
+# Publish lock: a small bucket object that, when present and locked, makes every
+# (current-code) publisher refuse to flip the live pointer. Set it once the served DB is
+# "done" (e.g. 100% of actas) so a stray publish-loop or a partial run can't overwrite it;
+# only an admin toggle (or E14_DB_ALLOW_LOCKED=1) lifts it. The bucket is the shared source
+# of truth, so the lock holds across machines.
+LOCK_KEY = f"{DB_PREFIX}/lock.json"
 
 
 def _sha256(path: Path) -> str:
@@ -185,6 +191,43 @@ def _prune_to_uploaded(work_db: Path, uploaded: set[str]) -> tuple[int, int]:
         con.close()
 
 
+def _resolve_bucket(bucket: str | None) -> str | None:
+    return bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
+
+
+def read_db_lock(*, client=None, bucket: str | None = None) -> dict:
+    """Return the publish lock object (``{"locked": bool, ...}``). Best-effort: a missing
+    object or any read error reads as unlocked so a flaky bucket never blocks publishing."""
+    bucket = _resolve_bucket(bucket)
+    if not bucket:
+        return {"locked": False}
+    if client is None:
+        client = _s3_client()
+    try:
+        d = json.loads(client.get_object(Bucket=bucket, Key=LOCK_KEY)["Body"].read())
+        return d if isinstance(d, dict) else {"locked": False}
+    except Exception:
+        return {"locked": False}
+
+
+def set_db_lock(locked: bool, *, reason: str = "", n_docs: int | None = None, by: str = "",
+                client=None, bucket: str | None = None) -> dict:
+    """Write the publish lock object. ``locked=False`` records an explicit unlock (kept, not
+    deleted, so the admin board can show who/when). Returns the stored body."""
+    bucket = _resolve_bucket(bucket)
+    if not bucket:
+        raise ValueError("no bucket: set BUCKET_NAME or pass bucket")
+    if client is None:
+        client = _s3_client()
+    body = {"locked": bool(locked), "reason": reason, "n_docs": n_docs,
+            "by": by, "ts": int(time.time())}
+    client.put_object(
+        Bucket=bucket, Key=LOCK_KEY, Body=json.dumps(body).encode(),
+        ContentType="application/json", CacheControl="no-store, max-age=0",
+    )
+    return body
+
+
 def publish_db(
     output_dir: Path,
     *,
@@ -193,6 +236,7 @@ def publish_db(
     only_uploaded: bool = False,
     manifest: Path | None = None,
     allow_shrink: bool = False,
+    allow_locked: bool = False,
     verbose: bool = True,
 ) -> dict | None:
     """Snapshot the local results DB and publish it + the pointer to the bucket.
@@ -209,6 +253,9 @@ def publish_db(
     byte-size guard would false-trip on it. Legacy pointers written before ``n_docs`` existed
     fall back to the old byte heuristic (which fires at most once: the gated publish writes
     ``n_docs``, after which the guard is permanently count-based).
+
+    Lock: if the bucket carries a locked ``db/lock.json`` (see ``set_db_lock``), publishing is
+    refused unless ``allow_locked``. Used to freeze the served DB once it is complete.
     """
     src = Path(output_dir) / "results" / "results.sqlite"
     if not src.exists():
@@ -218,6 +265,19 @@ def publish_db(
         raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
     if client is None:
         client = _s3_client()
+
+    # Publish lock: once the served DB is marked done, refuse to overwrite it. Checked before
+    # the (expensive) slim build so a locked publisher exits fast. Admin toggle / allow_locked
+    # / E14_DB_ALLOW_LOCKED=1 override.
+    if not allow_locked and os.environ.get("E14_DB_ALLOW_LOCKED", "").lower() not in ("1", "true", "yes"):
+        lock = read_db_lock(client=client, bucket=bucket)
+        if lock.get("locked"):
+            msg = (f"publish-db: REFUSING — the live DB is LOCKED"
+                   f"{' (' + lock['reason'] + ')' if lock.get('reason') else ''}. "
+                   f"Unlock from the admin console (or pass allow_locked / E14_DB_ALLOW_LOCKED=1).")
+            if verbose:
+                print(msg, flush=True)
+            return {"locked": True, "lock": lock}
 
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "snapshot.sqlite"
