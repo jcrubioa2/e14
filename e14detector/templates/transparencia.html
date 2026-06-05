@@ -115,7 +115,7 @@
       {% if public.cobertura_label is not none %}
       <div class="cob">
         <b>{{ public.cobertura_label }}%</b>
-        <span>de las actas con foto publicada</span>
+        <span>de las actas con PDF publicado</span>
       </div>
       {% endif %}
     </div>
@@ -150,7 +150,7 @@
     </div>
     {% else %}
     <div class="note">
-      Ya tienes acceso a <b>todas</b> las mesas cuya acta (foto E-14) ha publicado la Registraduría.
+      Ya tienes acceso a <b>todas</b> las mesas cuyo PDF del acta E-14 ha publicado la Registraduría.
       Las pocas que faltan a nivel nacional son mesas que la propia Registraduría aún no ha publicado.
     </div>
     {% endif %}
@@ -169,12 +169,12 @@
     {% endif %}
 
     {% if public.content %}
-    <h2>Cuidamos que la foto no cambie</h2>
+    <h2>Cuidamos que el PDF no cambie</h2>
     <div class="note">
-      No basta con tener el acta: comprobamos que la imagen que te mostramos siga coincidiendo con
-      la que publica la Registraduría. A veces ellos vuelven a publicar la foto de una mesa bajo el
+      No basta con tener el acta: comprobamos que el PDF que te mostramos siga coincidiendo con
+      el que publica la Registraduría. A veces ellos vuelven a publicar el PDF de una mesa bajo el
       mismo enlace &mdash; en la última revisión, <b>{{ public.content.content_changed }} de
-      {{ public.content.checked }}</b> ({{ public.content.changed_pct }}%) habían cambiado de imagen.
+      {{ public.content.checked }}</b> ({{ public.content.changed_pct }}%) habían cambiado de PDF.
       Es <b>una nueva versión del documento, no evidencia de que se haya alterado el conteo</b>; lo
       seguimos vigilando.
     </div>
