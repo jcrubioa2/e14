@@ -27,6 +27,9 @@ def cmd_process(args: argparse.Namespace) -> int:
         force=args.force,
         workers=args.workers,
         crop_only=args.crop_only,
+        depto=args.depto,
+        dept_from=args.dept_from,
+        dept_to=args.dept_to,
     )
     print(
         f"done={totals['done']} skipped={totals['skipped']} "
@@ -107,12 +110,28 @@ def cmd_publish_crops(args: argparse.Namespace) -> int:
         bucket=args.bucket,
         limit=args.limit,
         workers=args.workers,
+        department=args.department,
         dry_run=args.dry_run,
     )
     print(
         f"uploaded={totals['uploaded']} skipped={totals['skipped']} failed={totals['failed']}"
     )
     return 1 if totals["failed"] else 0
+
+
+def cmd_pull_db(args: argparse.Namespace) -> int:
+    from .dbsync import pull_db
+
+    info = pull_db(Path(args.output_dir), bucket=args.bucket, verbose=True)
+    if info is None:
+        print("pull-db: nothing to merge (no live pointer yet)")
+        return 0
+    print(
+        f"pull-db: merged remote@{info.get('sha256', '?')} "
+        f"(+{info['docs_added']} actas, +{info['fields_added']} fields, "
+        f"{info['docs_total']:,} total)"
+    )
+    return 0
 
 
 def cmd_publish_db(args: argparse.Namespace) -> int:
@@ -129,6 +148,175 @@ def cmd_publish_db(args: argparse.Namespace) -> int:
         print(f"published db: GUARDED — refused to shrink the live DB (use --allow-shrink to override)")
         return 1
     print(f"published db: {info['key']} ({info['size']/1e6:.1f} MB, sha={info['sha256'][:12]})")
+    return 0
+
+
+def _fleet_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    output_dir = Path(args.output_dir)
+    universe = Path(args.universe) if getattr(args, "universe", None) else Path("data/mesa_universe.csv")
+    results_db = output_dir / "results" / "results.sqlite"
+    queue_path = output_dir / "fleet" / "queue.json"
+    return output_dir, universe, results_db
+
+
+def cmd_fleet_init(args: argparse.Namespace) -> int:
+    import os
+
+    from .fleet import default_queue_path, new_queue, save_queue
+
+    output_dir, universe, results_db = _fleet_paths(args)
+    if not universe.is_file():
+        print(f"fleet-init: missing {universe} (run: make universe)", file=sys.stderr)
+        return 1
+    workers = [w.strip() for w in (args.workers or os.environ.get("E14_FLEET_WORKERS", "")).split(",") if w.strip()]
+    queue = new_queue(universe, results_db=results_db if results_db.is_file() else None, workers=workers)
+    path = default_queue_path(output_dir)
+    save_queue(path, queue)
+    print(f"fleet-init: {len(queue['departments'])} departments -> {path}")
+    return 0
+
+
+def cmd_fleet_status(args: argparse.Namespace) -> int:
+    from .fleet import default_queue_path, format_status, load_queue, refresh_progress
+
+    output_dir, _, results_db = _fleet_paths(args)
+    path = default_queue_path(output_dir)
+    if not path.is_file():
+        print("fleet-status: no queue (run fleet-init)", file=sys.stderr)
+        return 1
+    queue = load_queue(path)
+    refresh_progress(queue, results_db=results_db if results_db.is_file() else None)
+    print(format_status(queue))
+    return 0
+
+
+def cmd_fleet_schedule(args: argparse.Namespace) -> int:
+    import os
+
+    from .dbsync import pull_db
+    from .fleet import (
+        default_queue_path,
+        format_status,
+        load_queue,
+        new_queue,
+        refresh_progress,
+        save_queue,
+        schedule_assignments,
+    )
+    from .fleetsync import pull_fleet, publish_fleet
+
+    output_dir, universe, results_db = _fleet_paths(args)
+    if args.pull_db:
+        pull_db(output_dir, bucket=args.bucket, verbose=not args.quiet)
+    if args.pull_fleet:
+        pull_fleet(output_dir, bucket=args.bucket, verbose=not args.quiet)
+    path = default_queue_path(output_dir)
+    if not path.is_file():
+        if not universe.is_file():
+            print("fleet-schedule: run fleet-init first", file=sys.stderr)
+            return 1
+        workers_pre = [w.strip() for w in (args.workers or os.environ.get("E14_FLEET_WORKERS", "")).split(",") if w.strip()]
+        queue = new_queue(
+            universe,
+            results_db=results_db if results_db.is_file() else None,
+            workers=workers_pre,
+        )
+        save_queue(path, queue)
+    else:
+        queue = load_queue(path)
+    refresh_progress(queue, results_db=results_db if results_db.is_file() else None)
+    workers = [w.strip() for w in (args.workers or os.environ.get("E14_FLEET_WORKERS", "")).split(",") if w.strip()]
+    if not workers:
+        print("fleet-schedule: set --workers or E14_FLEET_WORKERS", file=sys.stderr)
+        return 1
+    coord = args.coordinator or os.environ.get("E14_FLEET_COORDINATOR")
+    assigned = schedule_assignments(queue, workers, coordinator_id=coord)
+    save_queue(path, queue)
+    if args.publish:
+        try:
+            publish_fleet(output_dir, bucket=args.bucket, verbose=not args.quiet)
+        except ValueError as exc:
+            if not args.quiet:
+                print(f"fleet-schedule: publish-fleet skipped ({exc})", flush=True)
+    if not args.quiet:
+        for wid, dep in assigned:
+            print(f"fleet-schedule: {wid} -> dept {dep}")
+        if not assigned:
+            print("fleet-schedule: no new assignments (all workers busy or queue empty)")
+        print(format_status(queue))
+    return 0
+
+
+def cmd_fleet_current(args: argparse.Namespace) -> int:
+    import os
+
+    from .fleet import current_assignment, default_queue_path, load_queue, refresh_progress
+
+    output_dir, _, results_db = _fleet_paths(args)
+    worker = args.worker or os.environ.get("E14_WORKER_ID") or os.environ.get("HOSTNAME", "")
+    if not worker:
+        print("fleet-current: pass --worker or E14_WORKER_ID", file=sys.stderr)
+        return 1
+    path = default_queue_path(output_dir)
+    if not path.is_file():
+        return 0
+    queue = load_queue(path)
+    refresh_progress(queue, results_db=results_db if results_db.is_file() else None)
+    depto = current_assignment(queue, worker)
+    if depto:
+        print(depto)
+    return 0
+
+
+def cmd_fleet_complete(args: argparse.Namespace) -> int:
+    import os
+
+    from .fleet import default_queue_path, finish_department, load_queue, save_queue
+    from .fleetsync import publish_fleet
+
+    output_dir, _, results_db = _fleet_paths(args)
+    worker = args.worker or os.environ.get("E14_WORKER_ID", "")
+    path = default_queue_path(output_dir)
+    if not path.is_file():
+        print("fleet-complete: no queue", file=sys.stderr)
+        return 1
+    queue = load_queue(path)
+    depto = args.depto
+    if not depto:
+        print("fleet-complete: --depto required", file=sys.stderr)
+        return 1
+    status = finish_department(
+        queue,
+        depto,
+        results_db=results_db if results_db.is_file() else None,
+        worker_id=worker or None,
+    )
+    save_queue(path, queue)
+    if args.publish:
+        publish_fleet(output_dir, bucket=args.bucket, verbose=True)
+    dep = str(depto).zfill(2)
+    print(f"fleet-complete: dept {dep} -> {status}")
+    return 0
+
+
+def cmd_pull_fleet(args: argparse.Namespace) -> int:
+    from .fleetsync import pull_fleet
+
+    info = pull_fleet(Path(args.output_dir), bucket=args.bucket, verbose=True)
+    if info is None:
+        print("pull-fleet: nothing to merge")
+        return 0
+    print(f"pull-fleet: ok ({info.get('sha256', '?')})")
+    return 0
+
+
+def cmd_publish_fleet(args: argparse.Namespace) -> int:
+    from .fleetsync import publish_fleet
+
+    info = publish_fleet(Path(args.output_dir), bucket=args.bucket, verbose=True)
+    if info is None:
+        return 1
+    print(f"publish-fleet: ok (sha={info.get('sha256', '?')[:12]})")
     return 0
 
 
@@ -159,8 +347,14 @@ def cmd_publish_loop(args: argparse.Namespace) -> int:
     while True:
         started = time.time()
         try:
-            crops = publish_crops(output_dir, bucket=args.bucket, workers=args.workers,
-                                  limit=args.upload_limit, verbose=False)
+            crops = publish_crops(
+                output_dir,
+                bucket=args.bucket,
+                workers=args.workers,
+                limit=args.upload_limit,
+                department=getattr(args, "department", None),
+                verbose=False,
+            )
             # Decoupled cadence: upload crops every tick (cheap delta), but republish the DB
             # only every --db-interval (the gzipped snapshot is the bigger transfer).
             db_note = "db not due"
@@ -296,7 +490,73 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip CV analysis; only render+crop (fast national first pass, Gemma is the analyzer)",
     )
+    process.add_argument("--depto", help="only process this department code (e.g. 16)")
+    process.add_argument("--dept-from", help="inclusive start of department code range (e.g. 17)")
+    process.add_argument("--dept-to", help="inclusive end of department code range (e.g. 33)")
     process.set_defaults(func=cmd_process)
+
+    pull_db_cmd = sub.add_parser(
+        "pull-db",
+        help="download the live published results DB from Tigris/CDN and merge into local (multi-PC sync)",
+    )
+    pull_db_cmd.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    pull_db_cmd.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    pull_db_cmd.set_defaults(func=cmd_pull_db)
+
+    fleet_init = sub.add_parser("fleet-init", help="build department queue from mesa_universe.csv + local DB progress")
+    fleet_init.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    fleet_init.add_argument("--universe", default="data/mesa_universe.csv")
+    fleet_init.add_argument("--workers", help="comma-separated worker ids (or E14_FLEET_WORKERS)")
+    fleet_init.set_defaults(func=cmd_fleet_init)
+
+    fleet_status = sub.add_parser("fleet-status", help="show fleet queue and worker assignments")
+    fleet_status.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    fleet_status.add_argument("--universe", default="data/mesa_universe.csv")
+    fleet_status.set_defaults(func=cmd_fleet_status)
+
+    fleet_sched = sub.add_parser(
+        "fleet-schedule",
+        help="assign next department per idle worker (run on coordinator; publishes queue)",
+    )
+    fleet_sched.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    fleet_sched.add_argument("--universe", default="data/mesa_universe.csv")
+    fleet_sched.add_argument("--workers", help="comma-separated worker ids (or E14_FLEET_WORKERS)")
+    fleet_sched.add_argument("--coordinator", help="coordinator worker id (E14_FLEET_COORDINATOR)")
+    fleet_sched.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    fleet_sched.add_argument("--pull-db", action="store_true", default=True)
+    fleet_sched.add_argument("--no-pull-db", action="store_false", dest="pull_db")
+    fleet_sched.add_argument("--pull-fleet", action="store_true", default=True)
+    fleet_sched.add_argument("--no-pull-fleet", action="store_false", dest="pull_fleet")
+    fleet_sched.add_argument("--publish", action="store_true", default=True)
+    fleet_sched.add_argument("--no-publish", action="store_false", dest="publish")
+    fleet_sched.add_argument("-q", "--quiet", action="store_true")
+    fleet_sched.set_defaults(func=cmd_fleet_schedule)
+
+    fleet_cur = sub.add_parser("fleet-current", help="print assigned department code for this worker (stdout)")
+    fleet_cur.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    fleet_cur.add_argument("--universe", default="data/mesa_universe.csv")
+    fleet_cur.add_argument("--worker", help="worker id (default: E14_WORKER_ID)")
+    fleet_cur.set_defaults(func=cmd_fleet_current)
+
+    fleet_done = sub.add_parser("fleet-complete", help="mark a department done in the fleet queue")
+    fleet_done.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    fleet_done.add_argument("--universe", default="data/mesa_universe.csv")
+    fleet_done.add_argument("--depto", required=True)
+    fleet_done.add_argument("--worker", help="worker id (default: E14_WORKER_ID)")
+    fleet_done.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
+    fleet_done.add_argument("--publish", action="store_true", default=True)
+    fleet_done.add_argument("--no-publish", action="store_false", dest="publish")
+    fleet_done.set_defaults(func=cmd_fleet_complete)
+
+    pull_fleet_cmd = sub.add_parser("pull-fleet", help="merge live fleet queue from Tigris into local")
+    pull_fleet_cmd.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    pull_fleet_cmd.add_argument("--bucket")
+    pull_fleet_cmd.set_defaults(func=cmd_pull_fleet)
+
+    pub_fleet = sub.add_parser("publish-fleet", help="publish local fleet queue to Tigris")
+    pub_fleet.add_argument("--output-dir", default=str(config.DEFAULT_OUTPUT_DIR))
+    pub_fleet.add_argument("--bucket")
+    pub_fleet.set_defaults(func=cmd_publish_fleet)
 
     process_one = sub.add_parser("process-one", help="process a single PDF (fast iteration) and optionally refresh its audit page")
     process_one.add_argument("--pdf", required=True)
@@ -336,6 +596,10 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--bucket", help="bucket name (default: $BUCKET_NAME)")
     publish.add_argument("--limit", type=int, help="cap crops uploaded this run")
     publish.add_argument("--workers", type=int, default=16)
+    publish.add_argument(
+        "--department",
+        help="only upload crops for this department (code, e.g. 16, or name)",
+    )
     publish.add_argument("--dry-run", action="store_true", help="count new crops without uploading")
     publish.set_defaults(func=cmd_publish_crops)
 
@@ -378,6 +642,10 @@ def build_parser() -> argparse.ArgumentParser:
                               help="max crops uploaded per cycle (caps cycle time so the frontier publishes often)")
     publish_loop.add_argument("--interval", type=int, default=60, help="seconds between crop-upload ticks")
     publish_loop.add_argument("--db-interval", type=int, default=300, help="seconds between DB publishes")
+    publish_loop.add_argument(
+        "--department",
+        help="only upload crops for this department (code or name)",
+    )
     publish_loop.add_argument("--once", action="store_true", help="run a single cycle and exit")
     publish_loop.set_defaults(func=cmd_publish_loop)
 
