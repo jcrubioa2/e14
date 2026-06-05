@@ -1224,6 +1224,7 @@ def create_app(
             "Allow: /votar\n"
             "Allow: /reportes\n"
             "Allow: /buscar\n"
+            "Allow: /transparencia\n"
             "Allow: /acta/\n"
             "Disallow: /admin\n"
             "Disallow: /api/\n"
@@ -1244,6 +1245,7 @@ def create_app(
             f"{config.SITE_URL}/reportes",
             f"{config.SITE_URL}/buscar",
             f"{config.SITE_URL}/buscar?review=1",
+            f"{config.SITE_URL}/transparencia",
         ]
         for d in deps:
             code = d["department_code"] or d["department_name"]
@@ -1468,6 +1470,42 @@ def create_app(
                 "meta_description": (
                     "Las mesas donde más gente ha marcado casillas como extrañas en las actas "
                     "E-14 de las elecciones de Colombia 2026. Reportes de la veeduría ciudadana."
+                ),
+            },
+        )
+
+    @app.get("/transparencia")
+    async def transparencia(request: Request):
+        # Public, read-only count reconciliation: the SAME chain the admin board renders, so any
+        # citizen can verify our counts independently (no token). Reuses the pointer reconciliation
+        # block + the app's own served count; asserts published == served.
+        recon = _pointer_reconciliation()
+        with conn() as db:
+            served_total = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        chain = build_count_chain(recon, served_total)
+        # Parse the missing-key sample into a readable backlog list (mesas informed but not served).
+        backlog = []
+        for k in ((recon or {}).get("missing_keys_sample") or []):
+            parts = str(k).split("_")
+            dep, muni, zona, puesto, mesa = (parts + [""] * 5)[:5]
+            backlog.append({"key": k, "dep": dep, "muni": muni, "zona": zona,
+                            "puesto": puesto, "mesa": mesa})
+        return templates.TemplateResponse(
+            request,
+            "transparencia.html",
+            {
+                "chain": chain,
+                "backlog": backlog,
+                "progress": _progress_ctx(),
+                "total_reviews": _total_reviews(),
+                "active": "",
+                "site_url": config.SITE_URL,
+                "canonical": config.SITE_URL + "/transparencia",
+                "page_title": "Transparencia — conteo de actas E-14 | Veeduría ciudadana 2026",
+                "meta_description": (
+                    "Cómo cuadran nuestros conteos de actas E-14 con la Registraduría: total "
+                    "nacional, mesas informadas, actas servidas y publicadas, cobertura y "
+                    "qué mesas faltan. Veeduría ciudadana, elecciones Colombia 2026."
                 ),
             },
         )

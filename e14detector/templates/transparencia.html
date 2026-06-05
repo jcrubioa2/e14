@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <meta name="description" content="{{ meta_description }}">
+  <link rel="canonical" href="{{ canonical }}">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="es_CO">
+  <meta property="og:site_name" content="Veeduría ciudadana E-14 2026">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ meta_description }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta name="twitter:card" content="summary">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      --paper:#FBFAF6; --paper-2:#F2EFE6; --card:#FFFFFF;
+      --ink:#1C1A15; --ink-soft:#6E695E; --ink-faint:#9A9488;
+      --line:#E6E1D4; --line-strong:#D8D2C2;
+      --red:#D93A28; --red-deep:#A82A1B; --red-tint:#FCEDE9; --red-line:#F0B5AB;
+      --green:#2F7D52; --link:#0E6E64; --r:15px;
+      --shadow:0 1px 1px rgba(28,26,21,.03), 0 6px 20px -8px rgba(28,26,21,.14);
+    }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html, body { margin:0; }
+    body {
+      font-family:"Hanken Grotesk", system-ui, sans-serif; color:var(--ink);
+      background-color:var(--paper);
+      background-image:
+        radial-gradient(120% 70% at 100% -8%, rgba(217,58,40,.05), transparent 55%),
+        radial-gradient(circle at 1px 1px, rgba(28,26,21,.045) 1px, transparent 0);
+      background-size:auto, 22px 22px; background-attachment:fixed, fixed;
+      -webkit-font-smoothing:antialiased;
+    }
+    a { color:var(--link); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .muted { color:var(--ink-faint); font-size:13px; }
+    header { border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.66), rgba(255,255,255,0)); }
+    header .wrap, main { max-width:1080px; margin:0 auto; padding:0 22px; }
+    header .wrap { padding-top:26px; padding-bottom:24px; }
+    .eyebrow { display:flex; align-items:center; gap:9px; font-size:11.5px; font-weight:700;
+               letter-spacing:.16em; text-transform:uppercase; color:var(--red-deep); }
+    .eyebrow .tick { width:7px; height:7px; border-radius:2px; background:var(--red); transform:rotate(45deg); }
+    h1 { margin:11px 0 0; font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:38px;
+         line-height:1.04; letter-spacing:-.015em; max-width:20ch; }
+    h1 em { font-style:italic; color:var(--red-deep); }
+    .lede { margin:14px 0 0; color:var(--ink-soft); font-size:15.5px; line-height:1.55; max-width:66ch; }
+    main { padding-top:22px; padding-bottom:48px; }
+    h2 { font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:22px; margin:30px 0 6px; }
+
+    .kpis { display:flex; flex-wrap:wrap; gap:12px; margin:14px 0 8px; }
+    .kpi { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+           padding:14px 18px; box-shadow:var(--shadow); min-width:150px; }
+    .kpi .lab { font-size:12px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.06em; }
+    .kpi .val { font-family:"Fraunces", Georgia, serif; font-size:30px; font-weight:600; margin-top:4px; }
+    .kpi.good .val { color:var(--green); }
+
+    table.chain { width:100%; border-collapse:collapse; background:var(--card);
+                  border:1px solid var(--line); border-radius:var(--r); overflow:hidden; box-shadow:var(--shadow); }
+    table.chain th, table.chain td { padding:11px 14px; border-bottom:1px solid var(--line); text-align:left; }
+    table.chain th { font-size:12px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.05em; }
+    table.chain td.num { text-align:right; font-variant-numeric:tabular-nums; font-weight:700; }
+    table.chain td.src { color:var(--ink-faint); font-size:12.5px; }
+    table.chain tr.bad td { background:var(--red-tint); color:var(--red-deep); }
+    .st-ok { color:var(--green); } .st-bad { color:var(--red-deep); font-weight:700; } .st-na { color:var(--ink-faint); }
+
+    .backlog { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+               padding:6px 0; box-shadow:var(--shadow); max-height:320px; overflow:auto; }
+    .backlog table { width:100%; border-collapse:collapse; font-size:13px; }
+    .backlog th, .backlog td { padding:7px 14px; border-bottom:1px solid var(--line); text-align:left; }
+    .note { background:var(--paper-2); border:1px solid var(--line); border-radius:var(--r); padding:14px 18px; margin-top:12px; font-size:14px; line-height:1.55; color:var(--ink-soft); }
+  </style>
+</head>
+<body>
+  {% include "_appbar.html" %}
+  <header>
+    <div class="wrap">
+      <div class="eyebrow"><span class="tick"></span> Veeduría ciudadana · E-14</div>
+      <h1>Cómo cuadran <em>nuestros conteos</em></h1>
+      <p class="lede">Una sola cadena, de lo que reporta la Registraduría a lo que ve el público.
+        Debe ser <b>no creciente</b> de arriba a abajo, y <b>las actas en nuestra base de datos
+        deben ser exactamente las publicadas</b>. Aquí está, en abierto, para que cualquiera lo verifique.</p>
+    </div>
+  </header>
+
+  <main>
+    {% if chain.has_reconciliation %}
+    <div class="kpis">
+      <div class="kpi good"><div class="lab">Cobertura</div><div class="val">{% if chain.cobertura_label is not none %}{{ chain.cobertura_label }}%{% else %}&mdash;{% endif %}</div></div>
+      <div class="kpi"><div class="lab">Faltan por servir (ingesta)</div><div class="val">{% if chain.backlog_ingesta_label is not none %}{{ chain.backlog_ingesta_label }}{% else %}&mdash;{% endif %}</div></div>
+      <div class="kpi"><div class="lab">Sin reportar aún</div><div class="val">{% if chain.backlog_reporte_label is not none %}{{ chain.backlog_reporte_label }}{% else %}&mdash;{% endif %}</div></div>
+      <div class="kpi"><div class="lab">Servida = publicada</div><div class="val">{{ 'Sí' if chain.served_eq_published else 'NO' }}</div></div>
+    </div>
+
+    <h2>La cadena de conteos</h2>
+    <table class="chain">
+      <thead><tr><th>Conteo</th><th class="num">Actas</th><th>De dónde sale</th><th>Estado</th></tr></thead>
+      <tbody>
+        {% for r in chain.rows %}
+        <tr class="{{ 'bad' if r.status == 'bad' }}">
+          <td>{{ r.label }}</td>
+          <td class="num">{{ r.count_label }}</td>
+          <td class="src">{{ r.source }}</td>
+          <td>{% if r.status == 'ok' %}<span class="st-ok">✓</span>{% elif r.status == 'bad' %}<span class="st-bad">⚠</span>{% else %}<span class="st-na">—</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted" style="margin-top:8px;">
+      <b>Cobertura</b> = actas servidas ÷ mesas informadas. <b>Backlog de ingesta</b> = mesas que la
+      Registraduría ya informó pero que aún no servimos. <b>Sin reportar</b> = mesas del total nacional
+      que la Registraduría todavía no ha informado.
+      {%- if chain.universe_fetched_at %} Universo actualizado: {{ chain.universe_fetched_at }}.{% endif %}
+    </p>
+
+    {% if backlog %}
+    <h2>Qué mesas faltan, y por qué</h2>
+    <p class="muted" style="margin-bottom:8px;">
+      {% if chain.missing_count %}{{ chain.missing_count }}{% else %}{{ backlog|length }}{% endif %}
+      mesa(s) informadas que aún no servimos (mostrando {{ backlog|length }}). En general son mesas
+      del exterior o reportadas muy recientemente; las incorporamos de forma incremental.
+    </p>
+    <div class="backlog">
+      <table>
+        <thead><tr><th>Clave de mesa</th><th>Depto</th><th>Mun.</th><th>Zona</th><th>Puesto</th><th>Mesa</th></tr></thead>
+        <tbody>
+          {% for b in backlog %}
+          <tr><td>{{ b.key }}</td><td>{{ b.dep }}</td><td>{{ b.muni }}</td><td>{{ b.zona }}</td><td>{{ b.puesto }}</td><td>{{ b.mesa }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if chain.content %}
+    <h2>Integridad de contenido</h2>
+    <div class="note">
+      Además de tener el acta, comprobamos que el recorte que mostramos siga coincidiendo con el PDF
+      oficial vigente. La Registraduría a veces vuelve a emitir el PDF de una mesa bajo el mismo
+      enlace: en la última verificación, <b>{{ chain.content.content_changed }} de {{ chain.content.checked }}</b>
+      actas ({{ chain.content.changed_pct }}%) habían sido re-emitidas. Es <b>re-emisión del documento,
+      no evidencia de edición del conteo</b>; lo seguimos vigilando.
+    </div>
+    {% endif %}
+
+    {% else %}
+    <div class="note">
+      Aún estamos preparando el bloque de reconciliación de conteos. Vuelve pronto; mientras tanto,
+      en nuestra base de datos pública hay actas que puedes revisar en
+      <a href="/buscar">el buscador</a>.
+    </div>
+    {% endif %}
+  </main>
+
+  {% include "_footer.html" %}
+</body>
+</html>

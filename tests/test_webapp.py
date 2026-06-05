@@ -485,6 +485,58 @@ def test_compute_sync_progress_separates_browsable_from_total(tmp_path: Path) ->
     assert prog["synced"] == 1  # headline derives from browsable, not the row total
 
 
+def test_transparencia_renders_without_pointer(tmp_path: Path) -> None:
+    """The public page renders even with no reconciliation pointer (shows the 'preparando' note)."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf"))
+    store.insert_vote_field(VoteField(document_id="doc1", page_number=1, row_type="candidate",
+                                      row_number=1, candidate_name="A", raw_crop_path=str(crop)))
+    store.commit(); store.close()
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/transparencia")
+            assert r.status_code == 200
+            assert "Cómo cuadran" in r.text  # header renders
+
+    asyncio.run(run())
+
+
+def test_transparencia_renders_chain_from_pointer(tmp_path: Path, monkeypatch) -> None:
+    """With a reconciliation pointer, the public page renders the chain + cobertura + backlog."""
+    from e14detector import config, dbsync
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf"))
+    store.insert_vote_field(VoteField(document_id="doc1", page_number=1, row_type="candidate",
+                                      row_number=1, candidate_name="A", raw_crop_path=str(crop)))
+    store.commit(); store.close()
+
+    monkeypatch.setattr(config, "CDN_BASE_URL", "http://cdn.example")
+    recon = {"total_global": 100, "mesas_informadas": 100, "sqlite_served": 1,
+             "backlog_ingesta": 99, "backlog_reporte": 0, "missing_count": 99,
+             "missing_keys_sample": ["88_001_001_01_001"]}
+    monkeypatch.setattr(dbsync, "pointer_status",
+                        lambda *a, **k: {"reconciliation": recon, "n_docs": 1})
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/transparencia")
+            assert r.status_code == 200
+            assert "Total nacional" in r.text and "cadena de conteos" in r.text.lower()
+            assert "88_001_001_01_001" in r.text  # the backlog mesa is listed
+
+    asyncio.run(run())
+
+
 def test_build_count_chain_orders_and_derives() -> None:
     """The chain renders non-increasing top→bottom, computes cobertura + both backlogs, and
     confirms published==served — the single reconciliation the admin/public pages render."""
