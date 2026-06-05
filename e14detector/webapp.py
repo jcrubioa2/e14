@@ -635,15 +635,21 @@ def build_public_counts(recon: dict | None, served_total: int) -> dict:
     def lab(n):
         return _es_thousands(n) if isinstance(n, int) else "—"
 
+    # Each step carries a narrative connector so the four numbers read as one sentence top-to-bottom
+    # ("En todo el país… de ellas… y de esas… todas, aquí"), rather than a technical pipeline.
     funnel = [
-        {"key": "pais", "label": "Mesas instaladas en el país", "value_label": lab(tg),
+        {"key": "pais", "connector": "En todo el país hay",
+         "label": "Mesas instaladas en el país", "value_label": lab(tg),
          "sub": "El total nacional, según la Registraduría."},
-        {"key": "escaneadas", "label": "Mesas escaneadas", "value_label": lab(esc),
+        {"key": "escaneadas", "connector": "De ellas, ya fueron escaneadas",
+         "label": "Mesas escaneadas", "value_label": lab(esc),
          "sub": "Mesas cuyo resultado ya procesó la Registraduría."},
-        {"key": "acta", "label": "Mesas con su acta (PDF) publicada", "value_label": lab(inf),
+        {"key": "acta", "connector": "Y de esas, ya tienen su acta publicada",
+         "label": "Mesas con su acta (PDF) publicada", "value_label": lab(inf),
          "sub": "La Registraduría ya publicó el PDF del formulario E-14."},
-        {"key": "sistema", "label": "Mesas disponibles en nuestro sistema", "value_label": lab(served_total),
-         "sub": "Listas para consultar, revisar y comparar aquí.", "highlight": True},
+        {"key": "sistema", "connector": "Todas, disponibles para ti aquí",
+         "label": "Mesas disponibles en nuestro sistema", "value_label": lab(served_total),
+         "sub": "Listas para consultar, revisar y comparar.", "highlight": True},
     ]
     cobertura = round(served_total * 100 / inf, 2) if isinstance(inf, int) and inf else None
     return {

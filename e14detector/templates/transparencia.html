@@ -64,19 +64,26 @@
     .hero .cob b { font-family:"Fraunces", Georgia, serif; font-size:30px; color:var(--ink); }
     .hero .cob span { display:block; font-size:12px; color:var(--ink-soft); }
 
-    /* Funnel: país -> escaneadas -> acta publicada -> disponibles aquí. */
-    .funnel { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:12px; margin-top:6px; }
-    .step { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
-            padding:16px 18px; box-shadow:var(--shadow); position:relative; }
-    .step.is-final { border-color:#bfe0cb; background:linear-gradient(180deg,#F4FBF6,#FFFFFF); }
-    .step .num { font-family:"Fraunces", Georgia, serif; font-size:34px; font-weight:600; line-height:1;
-                 font-variant-numeric:tabular-nums; }
-    .step.is-final .num { color:var(--green); }
-    .step .lab { font-weight:700; font-size:14.5px; margin-top:8px; }
-    .step .sub { color:var(--ink-soft); font-size:12.5px; margin-top:5px; line-height:1.45; }
-    .step .arrow { position:absolute; right:-10px; top:50%; transform:translateY(-50%);
-                   color:var(--ink-faint); font-size:18px; z-index:1; }
-    @media (max-width:760px){ .step .arrow{ display:none; } }
+    /* Journey: a vertical timeline that reads as one sentence, país -> tu pantalla. */
+    .journey { margin:10px 0 4px; }
+    .jstep { display:flex; gap:16px; padding-bottom:24px; }
+    .jstep:last-child { padding-bottom:0; }
+    .jmark { position:relative; flex:0 0 18px; }
+    .jdot { width:14px; height:14px; border-radius:50%; margin:7px auto 0; background:#cbd2c9;
+            box-shadow:0 0 0 3px var(--paper), 0 0 0 4px var(--line); }
+    .jstep.is-final .jdot { width:18px; height:18px; background:var(--green);
+            box-shadow:0 0 0 3px var(--paper), 0 0 0 4px #bfe0cb; }
+    .jstep:not(:last-child) .jmark::after { content:""; position:absolute; left:50%;
+            transform:translateX(-50%); top:22px; bottom:-24px; width:2px; background:var(--line); }
+    .jbody { flex:1; min-width:0; padding-bottom:2px; }
+    .jconnector { font-size:13px; color:var(--ink-soft); }
+    .jnum { font-family:"Fraunces", Georgia, serif; font-size:34px; font-weight:600; line-height:1.05;
+            font-variant-numeric:tabular-nums; letter-spacing:-.01em; }
+    .jstep.is-final .jnum { color:var(--green); }
+    .jlabel { font-weight:700; font-size:15px; margin-top:1px; }
+    .jsub { color:var(--ink-faint); font-size:13px; margin-top:4px; line-height:1.45; }
+    .jstep.is-final .jbody { background:linear-gradient(180deg,#F4FBF6,#FFFFFF);
+            border:1px solid #bfe0cb; border-radius:var(--r); padding:12px 16px; margin-top:-6px; }
 
     .backlog { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
                padding:6px 0; box-shadow:var(--shadow); max-height:320px; overflow:auto; }
@@ -113,14 +120,17 @@
       {% endif %}
     </div>
 
-    <h2>De todo el país a tu pantalla</h2>
-    <div class="funnel">
+    <h2>El recorrido de un acta: del país a tu pantalla</h2>
+    <div class="journey">
       {% for s in public.funnel %}
-      <div class="step {{ 'is-final' if s.highlight }}">
-        <div class="num">{{ s.value_label }}</div>
-        <div class="lab">{{ s.label }}</div>
-        <div class="sub">{{ s.sub }}</div>
-        {% if not loop.last %}<div class="arrow">&rarr;</div>{% endif %}
+      <div class="jstep {{ 'is-final' if s.highlight }}">
+        <div class="jmark"><div class="jdot"></div></div>
+        <div class="jbody">
+          <div class="jconnector">{{ s.connector }}</div>
+          <div class="jnum">{{ s.value_label }}</div>
+          <div class="jlabel">{{ s.label }}</div>
+          <div class="jsub">{{ s.sub }}</div>
+        </div>
       </div>
       {% endfor %}
     </div>
