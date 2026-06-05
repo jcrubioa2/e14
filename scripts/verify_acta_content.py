@@ -109,8 +109,40 @@ def select_keys(args, manifest: dict[str, dict],
     sys.exit("pick a selector: --report / --sample N / --dep DD / --keys ... / --all")
 
 
+def _pixel_frac(old_pdf: Path, new_pdf: Path, dpi: int = 110) -> float | None:
+    """Max over pages of the fraction of pixels that changed >15/255 (old vs new render).
+
+    This is the signal that separates a benign re-wrap / faint contrast tweak from a heavy
+    re-scan or real mark change. Returns None if either PDF can't be rendered.
+    """
+    try:
+        import fitz  # PyMuPDF
+        from PIL import Image, ImageChops
+    except Exception:
+        return None
+    try:
+        do, dn = fitz.open(old_pdf), fitz.open(new_pdf)
+    except Exception:
+        return None
+    worst = 0.0
+    try:
+        for i in range(min(do.page_count, dn.page_count)):
+            def gray(d, j):
+                pm = d[j].get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+                return Image.frombytes("L", [pm.width, pm.height], pm.samples)
+            a, b = gray(do, i), gray(dn, i)
+            if a.size != b.size:
+                b = b.resize(a.size)
+            h = ImageChops.difference(a, b).histogram()
+            n = sum(h) or 1
+            worst = max(worst, sum(h[16:]) / n)
+    finally:
+        do.close(); dn.close()
+    return worst
+
+
 def _pack_changed(rec: ActaRecord, scratch: Path, save_dir: Path,
-                  sha_old: str, sha_now: str) -> None:
+                  sha_old: str, sha_now: str, pix_frac) -> None:
     """Put the original (on-disk) and freshly fetched PDF side by side for easy diff.
 
     Layout: <save_dir>/<key>/{old.pdf,new.pdf,INFO.txt}. data/actas is only read.
@@ -127,11 +159,13 @@ def _pack_changed(rec: ActaRecord, scratch: Path, save_dir: Path,
     (dest / "INFO.txt").write_text(
         f"key={rec.key}\nurl={rec.pdf_url()}\n"
         f"sha_old={sha_old}\nsha_now={sha_now}\n"
+        f"pix_frac={'' if pix_frac is None else round(pix_frac, 4)}\n"
         f"old_present={original.exists()}\n", encoding="utf-8")
 
 
 def verify_one(key: str, universe: dict[str, ActaRecord], manifest: dict[str, dict],
-               session: CdnSession, scratch: Path, save_dir: Path | None) -> dict:
+               session: CdnSession, scratch: Path, save_dir: Path | None,
+               save_min_frac: float) -> dict:
     rec = universe.get(key)
     if rec is None:
         return {"key": key, "verdict": ERROR, "reason": "not in current universe"}
@@ -145,7 +179,8 @@ def verify_one(key: str, universe: dict[str, ActaRecord], manifest: dict[str, di
         "key": key, "pointer_old": pointer_old, "pointer_now": pointer_now,
         "pointer_changed": str(bool(pointer_old) and pointer_old != pointer_now).lower(),
         "sha_old": (base or {}).get("sha256", ""), "sha_now": fresh_sha or "",
-        "http_status": prov.get("http_status", ""), "reason": prov.get("reason", ""),
+        "pix_frac": "", "http_status": prov.get("http_status", ""),
+        "reason": prov.get("reason", ""),
     }
     if prov.get("status") != "done" or not fresh_sha:
         row["verdict"] = ERROR
@@ -155,8 +190,12 @@ def verify_one(key: str, universe: dict[str, ActaRecord], manifest: dict[str, di
         row["verdict"] = MATCH
     else:
         row["verdict"] = CONTENT_CHANGED
-        if save_dir is not None:
-            _pack_changed(rec, scratch, save_dir, row["sha_old"], fresh_sha)
+        rel = f"{rec.rel_dir()}/{rec.filename('delegados')}"
+        frac = _pixel_frac(ACTAS_ROOT / rel, scratch / rel)
+        row["pix_frac"] = "" if frac is None else round(frac, 4)
+        # pack only the ones that differ a lot in pixels (None = couldn't render -> keep)
+        if save_dir is not None and (frac is None or frac >= save_min_frac):
+            _pack_changed(rec, scratch, save_dir, row["sha_old"], fresh_sha, frac)
     # keep scratch tiny (important for an --all overnight sweep): drop the fetched file
     fresh_path = scratch / f"{rec.rel_dir()}/{rec.filename('delegados')}"
     try:
@@ -182,17 +221,26 @@ def main() -> int:
                     help="throwaway download dir (auto-removed); never data/actas")
     ap.add_argument("--keep-scratch", action="store_true", help="don't delete downloaded PDFs")
     ap.add_argument("--save-changed", type=Path, default=None,
-                    help="pack <dir>/<key>/{old.pdf,new.pdf} for each content_changed mesa. "
-                         "Must NOT already exist (refuses to write into an existing folder).")
+                    help="pack <dir>/<key>/{old.pdf,new.pdf} for content_changed mesas. "
+                         "Refuses an existing folder unless --overwrite.")
+    ap.add_argument("--save-min-pixfrac", type=float, default=0.0,
+                    help="only pack mesas whose max per-page changed-pixel fraction is >= this "
+                         "(0=all; e.g. 0.20 keeps only the ones that differ a lot). pix_frac is "
+                         "still recorded in the report for every changed mesa regardless.")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="allow --save-changed to replace an existing folder")
     args = ap.parse_args()
 
     save_dir = None
     if args.save_changed is not None:
         save_dir = args.save_changed
         if save_dir.exists():
-            sys.exit(f"--save-changed dir already exists, refusing to write into it: {save_dir}")
+            if not args.overwrite:
+                sys.exit(f"--save-changed dir already exists (use --overwrite): {save_dir}")
+            shutil.rmtree(save_dir)
         save_dir.mkdir(parents=True)
-        print(f"changed actas will be packed -> {save_dir}/<key>/{{old,new}}.pdf")
+        print(f"packing changed actas (pix_frac >= {args.save_min_pixfrac}) "
+              f"-> {save_dir}/<key>/{{old,new}}.pdf")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -220,7 +268,8 @@ def main() -> int:
     counts: Counter = Counter()
     try:
         with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-            futs = {ex.submit(verify_one, k, universe, manifest, session, scratch, save_dir): k
+            futs = {ex.submit(verify_one, k, universe, manifest, session, scratch,
+                              save_dir, args.save_min_pixfrac): k
                     for k in keys}
             for i, fut in enumerate(as_completed(futs), 1):
                 row = fut.result()
@@ -229,7 +278,7 @@ def main() -> int:
                 if row["verdict"] == CONTENT_CHANGED:
                     print(f"  !! CONTENT_CHANGED {row['key']}  "
                           f"{row['sha_old'][:12]} -> {row['sha_now'][:12]}  "
-                          f"(pointer_changed={row['pointer_changed']})")
+                          f"pix_frac={row.get('pix_frac', '')}")
                 if i % 200 == 0:
                     print(f"  ... {i}/{len(keys)}")
     finally:
@@ -237,12 +286,18 @@ def main() -> int:
             shutil.rmtree(scratch, ignore_errors=True)
 
     report = REPORT_DIR / f"content_verify_{ts}.csv"
-    cols = ["key", "verdict", "pointer_changed", "pointer_old", "pointer_now",
+    cols = ["key", "verdict", "pix_frac", "pointer_changed", "pointer_old", "pointer_now",
             "sha_old", "sha_now", "http_status", "reason"]
+
+    def _frac(r):  # sort changed rows by biggest pixel difference first
+        try:
+            return -float(r.get("pix_frac") or 0)
+        except (TypeError, ValueError):
+            return 0.0
     with report.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
-        for row in sorted(rows, key=lambda r: (r["verdict"] != CONTENT_CHANGED, r["key"])):
+        for row in sorted(rows, key=lambda r: (r["verdict"] != CONTENT_CHANGED, _frac(r), r["key"])):
             w.writerow(row)
 
     print(f"\nverdicts ({len(rows)} verified):")
