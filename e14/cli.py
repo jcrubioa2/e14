@@ -165,6 +165,11 @@ def cmd_sync_backup(args) -> int:
     return do_backup(_sync_out(args), dest=Path(args.dest), bucket=args.bucket, cdn_base=args.cdn_base)
 
 
+def cmd_sync_stamp_pointer(args) -> int:
+    from e14detector.sync import do_stamp_pointer
+    return do_stamp_pointer(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base)
+
+
 def cmd_sync_fleet(args) -> int:
     # Multi-machine orchestration still lives in the detector CLI (fleet-init/status/schedule/
     # complete/pull-fleet/publish-fleet). Point operators there rather than duplicate it.
@@ -505,6 +510,13 @@ def build_parser() -> argparse.ArgumentParser:
     _sync_common(sp)
     sp.add_argument("--dest", required=True, help="destination directory for the DR copy")
     sp.set_defaults(func=cmd_sync_backup)
+
+    sp = sync_sub.add_parser(
+        "stamp-pointer",
+        help="add/refresh the reconciliation block on the LIVE pointer without rebuilding the DB "
+             "(safe one-off for a frozen/locked round)")
+    _sync_common(sp)
+    sp.set_defaults(func=cmd_sync_stamp_pointer)
 
     sp = sync_sub.add_parser("fleet", help="multi-machine orchestration (points to the detector CLI)")
     sp.set_defaults(func=cmd_sync_fleet)

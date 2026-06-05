@@ -76,6 +76,55 @@ def test_content_summary_none_when_no_reports(tmp_path: Path) -> None:
     assert contentcheck.content_note(tmp_path / "nope") is None
 
 
+def test_stamp_pointer_patches_live_pointer_without_rebuild(tmp_path: Path, monkeypatch) -> None:
+    """stamp-pointer adds the reconciliation block to the live pointer, preserving n_docs/sha and
+    never rebuilding the snapshot (safe for a locked round whose local DB may be stale)."""
+    import json as _json
+
+    from e14 import universe
+    from e14detector import dbsync, sync
+
+    monkeypatch.chdir(tmp_path)
+    # A "live" snapshot DB the download step will hand back (2 served mesas).
+    live_db = tmp_path / "live.sqlite"
+    con = sqlite3.connect(live_db)
+    con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT, "
+                "department_code TEXT, municipality_code TEXT, zone TEXT, puesto TEXT, mesa TEXT)")
+    for m in ("001", "002"):
+        con.execute("INSERT INTO documents VALUES (?,?,?,?,?,?,?)",
+                    (f"d{m}", "x", "01", "001", "001", "01", m))
+    con.commit(); con.close()
+    # Universe snapshot: 4 informed, total_global 6, escrutadas 5 -> backlog ingesta = 4-2 = 2.
+    snap = tmp_path / "universe_snapshot.json"
+    snap.write_text(_json.dumps({"total_global": 6, "mesas_escrutadas": 5, "mesas_informadas": 4,
+                    "fetched_at": "2026-06-05T00:00:00+00:00",
+                    "keys": [f"01_001_001_01_{m}" for m in ("001", "002", "003", "004")]}))
+    monkeypatch.setattr(universe, "SNAPSHOT_PATH", snap)
+
+    stored: dict[str, bytes] = {}
+
+    class _Client:
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            stored[Key] = Body
+
+    live_pointer = {"key": "db/results-abc.sqlite.gz", "sha256": "a" * 64, "size": 100,
+                    "raw_size": 200, "n_docs": 2}
+    monkeypatch.setattr(dbsync, "_s3_client", lambda: _Client())
+    monkeypatch.setattr(dbsync, "fetch_published_pointer", lambda **kw: dict(live_pointer))
+    monkeypatch.setattr(dbsync, "_download_snapshot_file",
+                        lambda pointer, dest, **kw: __import__("shutil").copy(live_db, dest))
+
+    rc = sync.do_stamp_pointer(tmp_path / "out", bucket="e14-crops", cdn_base="http://cdn")
+    assert rc == 0
+    patched = _json.loads(stored[dbsync.POINTER_KEY])
+    assert patched["n_docs"] == 2 and patched["sha256"] == "a" * 64  # preserved, not rebuilt
+    recon = patched["reconciliation"]
+    assert recon["total_global"] == 6 and recon["mesas_escrutadas"] == 5
+    assert recon["mesas_informadas"] == 4 and recon["sqlite_served"] == 2
+    assert recon["backlog_ingesta"] == 2 and recon["backlog_reporte"] == 2
+    assert recon["missing_count"] == 2  # 003 + 004 informed but not served
+
+
 def test_verify_chain_passes_on_consistent_counts() -> None:
     recon = {"total_global": 122020, "mesas_informadas": 122020, "downloaded": 122010,
              "crops_uploaded": 122007, "sqlite_served": 122007, "backlog_ingesta": 13}

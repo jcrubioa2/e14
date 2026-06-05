@@ -213,6 +213,50 @@ def do_restore(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
     return 0
 
 
+def do_stamp_pointer(output_dir: Path, *, bucket: str | None, cdn_base: str | None) -> int:
+    """Safely add/refresh the reconciliation block on the LIVE pointer WITHOUT rebuilding the DB.
+
+    For a frozen/locked round whose snapshot is unchanged: ``publish-db --force-pointer`` would
+    rebuild from the local DB (dangerous if it's stale), so instead this downloads the *live*
+    snapshot read-only to compute the served-key diff, then merges the reconciliation block into
+    the existing ``db/latest.json`` and re-uploads it — preserving key/sha/size/n_docs exactly, so
+    the served count can never regress. The only mutation is adding the reconciliation block.
+    """
+    import json
+    import tempfile
+
+    from .dbsync import (
+        POINTER_KEY, _download_snapshot_file, _resolve_bucket, _s3_client,
+        compute_reconciliation, fetch_published_pointer,
+    )
+
+    bucket = _resolve_bucket(bucket)
+    if not bucket:
+        print("stamp-pointer: no bucket (set BUCKET_NAME or pass --bucket)")
+        return 1
+    client = _s3_client()
+    pointer = fetch_published_pointer(bucket=bucket, client=client)
+    if pointer is None:
+        print("stamp-pointer: no hay puntero publicado")
+        return 1
+    n_docs = pointer.get("n_docs")
+    with tempfile.TemporaryDirectory() as td:
+        snap = Path(td) / "live.sqlite"
+        _download_snapshot_file(pointer, snap, cdn_base=cdn_base or None, bucket=bucket,
+                                client=client, timeout=600)
+        recon = compute_reconciliation(snap, n_docs=int(n_docs or 0), output_dir=Path(output_dir))
+    pointer["reconciliation"] = recon
+    pointer["ts"] = int(time.time())
+    client.put_object(Bucket=bucket, Key=POINTER_KEY,
+                      Body=json.dumps(pointer).encode(),
+                      ContentType="application/json", CacheControl="no-store, max-age=0")
+    print(f"stamp-pointer: reconciliación estampada en {POINTER_KEY} "
+          f"(n_docs preservado={n_docs}, total_global={recon.get('total_global', '—')}, "
+          f"informadas={recon.get('mesas_informadas', '—')}, "
+          f"ingesta={recon.get('backlog_ingesta', '—')}, reporte={recon.get('backlog_reporte', '—')})")
+    return 0
+
+
 def do_backup(output_dir: Path, *, dest: Path, bucket: str | None, cdn_base: str | None) -> int:
     """Write one off-Tigris DR copy of the live published snapshot (R1 is the permanent record)."""
     from .dbsync import backup_published_db
