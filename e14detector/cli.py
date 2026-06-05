@@ -155,7 +155,6 @@ def _fleet_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     output_dir = Path(args.output_dir)
     universe = Path(args.universe) if getattr(args, "universe", None) else Path("data/mesa_universe.csv")
     results_db = output_dir / "results" / "results.sqlite"
-    queue_path = output_dir / "fleet" / "queue.json"
     return output_dir, universe, results_db
 
 

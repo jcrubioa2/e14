@@ -261,20 +261,14 @@ def publish_db(
     if not src.exists():
         raise FileNotFoundError(f"results DB not found: {src}")
     bucket = bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
-    if os.environ.get("E14_DB_MERGE_BEFORE_PUBLISH", "1").lower() not in ("0", "false", "no"):
-        try:
-            pull_db(output_dir, bucket=bucket, verbose=verbose)
-        except Exception as exc:
-            if verbose:
-                print(f"publish-db: pull/merge skipped ({type(exc).__name__}: {exc})", flush=True)
     if not bucket:
         raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
     if client is None:
         client = _s3_client()
 
-    # Publish lock: once the served DB is marked done, refuse to overwrite it. Checked before
-    # the (expensive) slim build so a locked publisher exits fast. Admin toggle / allow_locked
-    # / E14_DB_ALLOW_LOCKED=1 override.
+    # Publish lock: once the served DB is marked done, refuse to overwrite it. Checked first
+    # (before any pull/merge or the expensive slim build) so a locked publisher exits fast.
+    # Admin toggle / allow_locked / E14_DB_ALLOW_LOCKED=1 override.
     if not allow_locked and os.environ.get("E14_DB_ALLOW_LOCKED", "").lower() not in ("1", "true", "yes"):
         lock = read_db_lock(client=client, bucket=bucket)
         if lock.get("locked"):
@@ -284,6 +278,13 @@ def publish_db(
             if verbose:
                 print(msg, flush=True)
             return {"locked": True, "lock": lock}
+
+    # Auto-merge before publish is OPT-IN (default OFF). Explicit `pull-db` /
+    # `fleet-schedule --pull-db` own merging; a silently-skipped auto-merge is what let a
+    # partial DB get published, so when it IS enabled a failure aborts the publish (no
+    # swallowing) rather than shipping a possibly-incomplete snapshot.
+    if os.environ.get("E14_DB_MERGE_BEFORE_PUBLISH", "").lower() in ("1", "true", "yes"):
+        pull_db(output_dir, bucket=bucket, client=client, verbose=verbose)
 
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "snapshot.sqlite"
@@ -373,16 +374,25 @@ def publish_db(
 
 # --- multi-writer merge (local crop machines) --------------------------------
 
-def _vote_field_columns(con: sqlite3.Connection, *, table_alias: str = "") -> str:
-    """Comma-separated vote_fields columns for INSERT…SELECT (excludes AUTOINCREMENT id)."""
-    if table_alias:
-        pragma = f"PRAGMA {table_alias}.table_info(vote_fields)"
-    else:
-        pragma = "PRAGMA table_info(vote_fields)"
-    cols = [r[1] for r in con.execute(pragma) if r[1] != "id"]
-    if table_alias:
-        return ", ".join(f"{table_alias}.{c}" for c in cols)
-    return ", ".join(cols)
+def _table_columns(con: sqlite3.Connection, table: str, *, alias: str = "") -> list[str]:
+    """Bare column names of ``table`` (excludes AUTOINCREMENT ``id``), preserving table order.
+
+    ``alias`` reads an attached DB (e.g. ``remote``) via ``PRAGMA <alias>.table_info(<table>)``.
+    """
+    pragma = f"PRAGMA {alias}.table_info({table})" if alias else f"PRAGMA table_info({table})"
+    return [r[1] for r in con.execute(pragma) if r[1] != "id"]
+
+
+def _shared_columns(con: sqlite3.Connection, table: str) -> list[str]:
+    """Columns present in BOTH ``main.<table>`` and the attached ``remote.<table>``.
+
+    Merging on the intersection (not ``SELECT *`` / the local column list) is what lets a
+    *fat* local writer DB ingest a *slim* published serving snapshot — and vice versa —
+    without an ``OperationalError: no such column`` or a positional column misalignment.
+    Local column order is preserved so INSERT and SELECT lists line up.
+    """
+    remote_cols = set(_table_columns(con, table, alias="remote"))
+    return [c for c in _table_columns(con, table) if c in remote_cols]
 
 
 def merge_results_db(local_db: Path, remote_db: Path, *, verbose: bool = True) -> dict:
@@ -410,19 +420,26 @@ def merge_results_db(local_db: Path, remote_db: Path, *, verbose: bool = True) -
                 "WHERE document_id NOT IN (SELECT document_id FROM main.documents)"
             )
         }
-        con.execute("INSERT OR IGNORE INTO main.documents SELECT * FROM remote.documents")
+        # Explicit shared-column list (never SELECT *): local and remote may differ in shape
+        # (fat writer DB vs slim serving snapshot), so a positional copy would misalign.
+        doc_cols = _shared_columns(con, "documents")
+        doc_list = ", ".join(doc_cols)
+        con.execute(
+            f"INSERT OR IGNORE INTO main.documents ({doc_list}) "
+            f"SELECT {doc_list} FROM remote.documents"
+        )
         docs_added = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0] - docs_before
-        main_cols = _vote_field_columns(con)
-        # Unqualified SELECT cols: SQLite attached DB rejects ``remote.col`` in SELECT
-        # (but unqualified names resolve against remote.vote_fields).
-        select_cols = _vote_field_columns(con)
+        # vote_fields: same intersection rule. Unqualified SELECT names resolve against
+        # remote.vote_fields per the FROM clause.
+        vf_cols = _shared_columns(con, "vote_fields")
+        vf_list = ", ".join(vf_cols)
         fields_added = 0
-        if pending and select_cols:
+        if pending and vf_cols:
             before_vf = con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0]
             placeholders = ", ".join("?" for _ in pending)
             con.execute(
-                f"INSERT INTO main.vote_fields ({main_cols}) "
-                f"SELECT {select_cols} FROM remote.vote_fields "
+                f"INSERT INTO main.vote_fields ({vf_list}) "
+                f"SELECT {vf_list} FROM remote.vote_fields "
                 f"WHERE document_id IN ({placeholders})",
                 tuple(pending),
             )

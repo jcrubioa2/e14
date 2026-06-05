@@ -156,6 +156,7 @@ def publish_fleet(
         Key=POINTER_KEY,
         Body=json.dumps(meta, separators=(",", ":")).encode(),
         ContentType="application/json",
+        CacheControl="no-store, max-age=0",
     )
     if verbose:
         print(f"publish-fleet: {key} ({len(raw)/1024:.1f} KB, sha={digest[:12]})", flush=True)
