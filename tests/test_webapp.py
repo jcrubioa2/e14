@@ -771,6 +771,31 @@ def test_client_ip_uses_cf_connecting_ip_only_behind_cloudflare() -> None:
     assert _client_ip(forged) == "9.9.9.9"
 
 
+def test_edge_guard_blocks_direct_origin_when_secret_set(tmp_path: Path, monkeypatch) -> None:
+    """With E14_EDGE_SECRET set, POST /api/* must carry the Cloudflare-injected X-Edge-Auth header;
+    without it the request is rejected (so attackers can't bypass Cloudflare via the Fly origin).
+    GET/health are never gated, and an empty secret is fail-open (covered by every other test)."""
+    from e14detector import config as _config
+
+    monkeypatch.setattr(_config, "EDGE_SECRET", "topsecret")
+    output_dir, db = _one_crop_db(tmp_path)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "c.sqlite")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            blocked = await client.post("/api/vote", json={"cid": "x", "value": "good"})
+            assert blocked.status_code == 403 and blocked.json()["error"] == "forbidden"
+            # With the edge header it passes the guard (then fails later for another reason, not 'forbidden').
+            passed = await client.post("/api/vote", json={"cid": "x", "value": "good"},
+                                       headers={"x-edge-auth": "topsecret"})
+            assert not (passed.status_code == 403 and passed.json().get("error") == "forbidden")
+            # GET endpoints (incl. Fly's /health check) are never gated.
+            assert (await client.get("/health")).status_code in (200, 503)
+
+    asyncio.run(run())
+
+
 def test_voter_ip_collapses_ipv6_to_64() -> None:
     """One IPv6 /64 allocation = one identity (else a single allocation mints billions)."""
     from e14detector.webapp import _voter_ip

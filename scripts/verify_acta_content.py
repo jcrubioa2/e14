@@ -22,8 +22,12 @@ Selectors (choose what to verify; full re-crawl is heavy ~122k PDFs):
         # random 500 mesas -> statistical confidence that no content-only swaps are happening
     .venv/bin/python scripts/verify_acta_content.py --dep 16
         # every mesa in a department
-    .venv/bin/python scripts/verify_acta_content.py --all
-        # full re-verification (hours)
+    .venv/bin/python scripts/verify_acta_content.py --all --save-changed data/changed_full
+        # full overnight re-verification; packs old.pdf+new.pdf per changed mesa for diffing
+
+--save-changed <dir> writes <dir>/<key>/{old.pdf,new.pdf,INFO.txt} for every content_changed
+mesa (old = our frozen data/actas copy, new = current server bytes). It refuses to write into
+an existing folder. data/actas is read-only throughout.
 """
 from __future__ import annotations
 
@@ -51,6 +55,7 @@ from e14.util import RateLimiter  # noqa: E402
 
 DATA = ROOT / "data"
 MANIFEST_DB = DATA / "manifest.db"
+ACTAS_ROOT = DATA / "actas"          # original baseline PDFs (read-only here)
 REPORT_DIR = DATA / "reports"
 DEFAULT_SCRATCH = DATA / "_verify_tmp"
 
@@ -104,8 +109,29 @@ def select_keys(args, manifest: dict[str, dict],
     sys.exit("pick a selector: --report / --sample N / --dep DD / --keys ... / --all")
 
 
+def _pack_changed(rec: ActaRecord, scratch: Path, save_dir: Path,
+                  sha_old: str, sha_now: str) -> None:
+    """Put the original (on-disk) and freshly fetched PDF side by side for easy diff.
+
+    Layout: <save_dir>/<key>/{old.pdf,new.pdf,INFO.txt}. data/actas is only read.
+    """
+    rel = f"{rec.rel_dir()}/{rec.filename('delegados')}"
+    fresh = scratch / rel                 # download_one just wrote this
+    original = ACTAS_ROOT / rel           # our frozen Jun-1 copy
+    dest = save_dir / rec.key
+    dest.mkdir(parents=True, exist_ok=True)
+    if fresh.exists():
+        shutil.copy2(fresh, dest / "new.pdf")
+    if original.exists():
+        shutil.copy2(original, dest / "old.pdf")
+    (dest / "INFO.txt").write_text(
+        f"key={rec.key}\nurl={rec.pdf_url()}\n"
+        f"sha_old={sha_old}\nsha_now={sha_now}\n"
+        f"old_present={original.exists()}\n", encoding="utf-8")
+
+
 def verify_one(key: str, universe: dict[str, ActaRecord], manifest: dict[str, dict],
-               session: CdnSession, scratch: Path) -> dict:
+               session: CdnSession, scratch: Path, save_dir: Path | None) -> dict:
     rec = universe.get(key)
     if rec is None:
         return {"key": key, "verdict": ERROR, "reason": "not in current universe"}
@@ -129,6 +155,14 @@ def verify_one(key: str, universe: dict[str, ActaRecord], manifest: dict[str, di
         row["verdict"] = MATCH
     else:
         row["verdict"] = CONTENT_CHANGED
+        if save_dir is not None:
+            _pack_changed(rec, scratch, save_dir, row["sha_old"], fresh_sha)
+    # keep scratch tiny (important for an --all overnight sweep): drop the fetched file
+    fresh_path = scratch / f"{rec.rel_dir()}/{rec.filename('delegados')}"
+    try:
+        fresh_path.unlink()
+    except OSError:
+        pass
     return row
 
 
@@ -147,7 +181,18 @@ def main() -> int:
     ap.add_argument("--scratch", type=Path, default=DEFAULT_SCRATCH,
                     help="throwaway download dir (auto-removed); never data/actas")
     ap.add_argument("--keep-scratch", action="store_true", help="don't delete downloaded PDFs")
+    ap.add_argument("--save-changed", type=Path, default=None,
+                    help="pack <dir>/<key>/{old.pdf,new.pdf} for each content_changed mesa. "
+                         "Must NOT already exist (refuses to write into an existing folder).")
     args = ap.parse_args()
+
+    save_dir = None
+    if args.save_changed is not None:
+        save_dir = args.save_changed
+        if save_dir.exists():
+            sys.exit(f"--save-changed dir already exists, refusing to write into it: {save_dir}")
+        save_dir.mkdir(parents=True)
+        print(f"changed actas will be packed -> {save_dir}/<key>/{{old,new}}.pdf")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -175,7 +220,7 @@ def main() -> int:
     counts: Counter = Counter()
     try:
         with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-            futs = {ex.submit(verify_one, k, universe, manifest, session, scratch): k
+            futs = {ex.submit(verify_one, k, universe, manifest, session, scratch, save_dir): k
                     for k in keys}
             for i, fut in enumerate(as_completed(futs), 1):
                 row = fut.result()
