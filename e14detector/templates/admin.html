@@ -33,18 +33,22 @@
     .tile.bad { border-left-color:var(--bad); background:#fdeceb; }
     .errlist { margin-top:8px; font-size:12px; color:var(--bad); }
     .errlist div { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .lockpanel { border:1px solid var(--line); border-radius:10px; padding:16px; }
+    .lockpanel.locked { background:#eaf6ec; border-color:#aedcb8; }
+    .lockpanel.unlocked { background:#fff8e6; border-color:#e6c34a; }
+    .lockhead { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
+    .lockstate { font-size:18px; font-weight:600; }
+    .btn { border:1px solid var(--line); border-radius:8px; padding:9px 16px; font-size:14px; font-weight:600; cursor:pointer; background:#fff; color:var(--ink); }
+    .btn.danger { background:var(--bad); border-color:var(--bad); color:#fff; }
+    .btn.warn { background:#b88200; border-color:#b88200; color:#fff; }
+    .btn:disabled { opacity:.6; cursor:default; }
+    .dbmeta { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
   </style>
 </head>
 <body>
   <header>
     <h1>Panel de votación &mdash; operador</h1>
-    <div class="muted">Datos privados (conteos de la comunidad). No indexado. Casillas con actividad de la comunidad.</div>
-    <div class="cards">
-      <div class="card">campos<b>{{ summary.fields }}</b></div>
-      <div class="card">votos totales<b>{{ summary.votes }}</b></div>
-      <div class="card">sospechosas (publicadas)<b>{{ summary.strange }}</b></div>
-      <div class="card">apelaciones aceptadas<b>{{ summary.cleared }}</b></div>
-    </div>
+    <div class="muted">Gestión de la base de datos servida y estado de publicación. No indexado.</div>
     {% if pipeline %}
     <div class="pipeline {{ 'warn' if pipeline.pointer_stale and not pipeline.complete else 'ok' }}">
       <span class="dot"></span>
@@ -82,29 +86,51 @@
     {% endif %}
   </header>
   <main>
-    <table>
-      <thead><tr>
-        <th>Acta</th><th>Candidato</th><th>Votos</th>
-        <th>Public.</th><th>Apel.</th><th>Apel. estado</th><th>Limpiada</th><th>hash</th><th></th>
-      </tr></thead>
-      <tbody>
-      {% for r in rows %}
-      <tr>
-        <td>{{ r.acta }}</td>
-        <td>{{ r.candidate }}</td>
-        <td class="num">{{ r.votes }}</td>
-        <td>{% if r.published %}s&iacute;{% endif %}</td>
-        <td class="num">{{ r.appeals or "" }}</td>
-        <td>{% if r.appeal_state != "NONE" %}{{ r.appeal_state }}{% endif %}</td>
-        <td>{% if r.appeal_cleared %}s&iacute;{% endif %}</td>
-        <td class="muted">{{ r.image_hash }}</td>
-        <td style="white-space:nowrap"><a href="/acta/{{ r.document_id }}" target="_blank" rel="noopener">ver</a></td>
-      </tr>
-      {% else %}
-      <tr><td colspan="9" class="muted">Sin actividad de la comunidad todav&iacute;a.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
+    <section class="lockpanel {{ 'locked' if lock and lock.locked else 'unlocked' }}">
+      <div class="lockhead">
+        <div>
+          <div class="lockstate">
+            {% if lock and lock.locked %}🔒 Base de datos BLOQUEADA{% else %}🔓 Base de datos editable{% endif %}
+          </div>
+          <div class="muted">
+            {% if lock and lock.locked %}
+              Ninguna publicación puede sobrescribir la DB servida mientras esté bloqueada.
+              {%- if lock.reason %} &middot; {{ lock.reason }}{% endif %}
+              {%- if lock.n_docs %} &middot; {{ lock.n_docs }} actas{% endif %}
+            {% else %}
+              Las publicaciones pueden reemplazar la DB servida. Bloquéala cuando esté completa.
+            {% endif %}
+          </div>
+        </div>
+        <div class="lockactions">
+          {% if lock and lock.locked %}
+            <button class="btn warn" data-locked="off">Desbloquear</button>
+          {% else %}
+            <button class="btn danger" data-locked="on">Bloquear (congelar DB)</button>
+          {% endif %}
+        </div>
+      </div>
+      <div class="dbmeta">
+        <div class="card">actas publicadas<b>{% if pipeline and pipeline.pointer_n_docs %}{{ pipeline.pointer_n_docs }}{% else %}&mdash;{% endif %}</b></div>
+        <div class="card">tamaño publicado<b>{% if pipeline and pipeline.pointer_raw_mb %}{{ pipeline.pointer_raw_mb }} MB{% else %}&mdash;{% endif %}</b></div>
+        <div class="card">sha<b>{% if pipeline and pipeline.pointer_sha %}{{ pipeline.pointer_sha }}{% else %}&mdash;{% endif %}</b></div>
+        <div class="card">última publicación<b>{% if pipeline and pipeline.pointer_age_min is not none %}hace {{ pipeline.pointer_age_min }} min{% else %}&mdash;{% endif %}</b></div>
+      </div>
+    </section>
   </main>
+  <script>
+    const KEY = {{ key|tojson }};
+    document.querySelectorAll('.lockactions .btn').forEach(b => b.addEventListener('click', async () => {
+      const want = b.getAttribute('data-locked');
+      if (want === 'off' && !confirm('¿Desbloquear la base de datos? Las publicaciones podrán sobrescribir la DB servida.')) return;
+      if (want === 'on' && !confirm('¿Bloquear la base de datos? Ninguna publicación podrá sobrescribirla hasta desbloquear aquí.')) return;
+      b.disabled = true; b.textContent = '…';
+      try {
+        const r = await fetch(`/admin/db-lock?key=${encodeURIComponent(KEY)}&locked=${want}`, { method: 'POST' });
+        if (!r.ok) throw new Error(await r.text());
+        location.reload();
+      } catch (e) { alert('Error: ' + e.message); b.disabled = false; location.reload(); }
+    }));
+  </script>
 </body>
 </html>

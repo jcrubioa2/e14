@@ -884,68 +884,67 @@ def create_app(
             "alerts_on": alerts.configured(),
         }
 
+    def _votes_backend_ok() -> bool:
+        # Cheap liveness probe (no row-by-row overview): an empty counts_among round-trips to
+        # the votes backend and returns fast. Any error = backend down.
+        try:
+            community.counts_among([])
+            return True
+        except Exception as exc:  # noqa: BLE001
+            alerts.notify("votes-backend", f"votes backend probe failed: {exc}")
+            return False
+
     @app.get("/admin/poll")
     async def admin_poll(request: Request, key: str = ""):
-        # Operator-only: private vote counts + publishing health. Off unless a token is configured.
+        # Operator-only: DB/publishing management + health. Off unless a token is configured.
         if not config.ADMIN_TOKEN:
             raise HTTPException(status_code=404, detail="not found")
         if key != config.ADMIN_TOKEN:
             raise HTTPException(status_code=403, detail="forbidden")
-        # Tolerate a votes-backend outage: render the board (with a FAIL tile) instead of 500ing,
-        # so the operator can still see *that* Aurora is down rather than a blank error page.
-        try:
-            rows = community.admin_overview()
-            votes_ok = True
-        except Exception as exc:  # noqa: BLE001
-            rows = []
-            votes_ok = False
-            alerts.notify("votes-backend", f"admin_overview failed (votes backend down?): {exc}")
-        with conn() as db:
-            for r in rows:
-                parsed = parse_field_key(r["field_key"])
-                if not parsed:
-                    continue
-                doc_id, page, row, section = parsed
-                meta = db.execute(
-                    "SELECT d.department_name, d.municipality_name, d.mesa, vf.candidate_name "
-                    "FROM documents d LEFT JOIN vote_fields vf ON vf.document_id=d.document_id "
-                    "AND vf.page_number=? AND vf.row_number=? AND COALESCE(vf.section,'')=? "
-                    "AND vf.row_type='candidate' WHERE d.document_id=? LIMIT 1",
-                    (page, row, section, doc_id),
-                ).fetchone()
-                r["document_id"] = doc_id
-                r["acta"] = " · ".join(x for x in (
-                    meta["department_name"], meta["municipality_name"],
-                    f"mesa {meta['mesa']}" if meta and meta["mesa"] else None) if meta and x) if meta else doc_id
-                r["candidate"] = (meta["candidate_name"] if meta else None) or f"fila {row}"
-        summary = {
-            "fields": len(rows),
-            "votes": sum(r["votes"] for r in rows),
-            "strange": sum(r["published"] for r in rows),
-            "cleared": sum(r["appeal_cleared"] for r in rows),
-        }
+        votes_ok = await asyncio.to_thread(_votes_backend_ok)
         # Pipeline health: what the served DB holds vs what the publisher last shipped.
         # A large pointer age, or a served count far below the published frontier, means
         # the publisher stalled or the reader isn't swapping (the stub-DB incident class).
         with conn() as db:
             pipeline = compute_sync_progress(db)
-        from .dbsync import pointer_status
+        from .dbsync import pointer_status, read_db_lock
         ptr = pointer_status(config.CDN_BASE_URL) if config.CDN_BASE_URL else None
         if ptr:
             age = ptr.get("age_secs")
             pipeline["pointer_sha"] = ptr["sha"]
             pipeline["pointer_raw_mb"] = round(ptr["raw_size"] / 1e6) if ptr.get("raw_size") else None
             pipeline["pointer_gz_mb"] = round(ptr["gz_size"] / 1e6, 1) if ptr.get("gz_size") else None
+            pipeline["pointer_n_docs"] = ptr.get("n_docs") or None
             pipeline["pointer_age_min"] = round(age / 60) if age is not None else None
             # Stale if the publisher hasn't flipped the pointer in >30 min (cycles run ~10-14).
             pipeline["pointer_stale"] = age is not None and age > 30 * 60
-        # Off the event loop: _admin_health does a blocking SQS GetQueueAttributes probe.
+        # Off the event loop: _admin_health and the lock read do blocking network probes.
         health = await asyncio.to_thread(_admin_health, votes_ok, pipeline)
+        lock = await asyncio.to_thread(read_db_lock)
         return templates.TemplateResponse(
             request,
             "admin.html",
-            {"rows": rows, "summary": summary, "key": key, "pipeline": pipeline, "health": health},
+            {"key": key, "pipeline": pipeline, "health": health, "lock": lock},
         )
+
+    @app.post("/admin/db-lock")
+    async def admin_db_lock(key: str = "", locked: str = ""):
+        # Toggle the publish lock (freezes the served DB so no publisher can overwrite it).
+        # POST with query params (?key=...&locked=on|off) — no form body, so no multipart dep.
+        if not config.ADMIN_TOKEN:
+            raise HTTPException(status_code=404, detail="not found")
+        if key != config.ADMIN_TOKEN:
+            raise HTTPException(status_code=403, detail="forbidden")
+        from .dbsync import set_db_lock
+        want = locked.strip().lower() in ("1", "true", "on", "yes", "lock")
+        n_docs = None
+        if config.CDN_BASE_URL:
+            from .dbsync import pointer_status
+            ptr = await asyncio.to_thread(pointer_status, config.CDN_BASE_URL)
+            n_docs = (ptr or {}).get("n_docs") or None
+        lock = await asyncio.to_thread(
+            set_db_lock, want, reason="admin console toggle", n_docs=n_docs, by="admin")
+        return JSONResponse({"ok": True, "lock": lock})
 
     @app.get("/robots.txt")
     async def robots():
