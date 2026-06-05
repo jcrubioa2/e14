@@ -856,15 +856,15 @@ def create_app(
         """Baseline hardening headers on every response. Deliberately NO restrictive
         ``default-src`` CSP (would break the inline JS/Turnstile widget); only frame-ancestors
         (anti-clickjacking) plus the cheap, universally-safe headers."""
-        # Edge guard: when E14_EDGE_SECRET is set, mutating API calls must carry the secret header
-        # that Cloudflare injects (a Transform Rule) — so an attacker can't bypass Cloudflare's edge
-        # protections by hitting the Fly origin directly. Fail-OPEN when the secret is unset (lets us
-        # deploy this before the Cloudflare rule exists). Only POST /api/* is gated; GET pages and
-        # /health (Fly's own internal check) are never affected.
-        if (config.EDGE_SECRET and request.method == "POST"
-                and request.url.path.startswith("/api/")
-                and not hmac.compare_digest(request.headers.get("x-edge-auth", ""), config.EDGE_SECRET)):
-            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+        # Edge-bypass guard: when E14_REQUIRE_CF is on, a mutating API call is only accepted if it
+        # reached Fly THROUGH Cloudflare — i.e. the un-spoofable Fly-Client-IP is a Cloudflare IP.
+        # This blocks an attacker who hits the Fly origin directly to skip Cloudflare's edge
+        # protections. Fail-OPEN when off. Only POST /api/* is gated; GET pages and /health (Fly's
+        # own internal check, which does NOT come via Cloudflare) are never affected.
+        if config.REQUIRE_CF_ORIGIN and request.method == "POST" and request.url.path.startswith("/api/"):
+            _fly = request.headers.get("fly-client-ip", "")
+            if not (_fly and _ip_in_cloudflare(_fly)):
+                return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
         try:
             resp = await call_next(request)
         except Exception as exc:  # noqa: BLE001 — record + page, then let the 500 propagate

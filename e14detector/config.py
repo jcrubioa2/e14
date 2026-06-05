@@ -201,11 +201,13 @@ _CF_DEFAULT_RANGES = (
     "2a06:98c0::/29,2c0f:f248::/32"
 )
 CF_IP_RANGES = [c.strip() for c in os.environ.get("E14_CF_IP_RANGES", _CF_DEFAULT_RANGES).split(",") if c.strip()]
-# Edge-bypass guard: a shared secret Cloudflare injects as the ``X-Edge-Auth`` request header (via a
-# Transform Rule). When set, POST /api/* requests lacking it are rejected (403) — forcing all vote
-# traffic through Cloudflare's edge instead of letting an attacker hit the Fly origin directly. Empty
-# => not enforced (fail-open), so the app can ship before the Cloudflare rule exists.
-EDGE_SECRET = os.environ.get("E14_EDGE_SECRET", "")
+# Edge-bypass guard (Cloudflare's "only allow Cloudflare IPs at your origin", done in-app since Fly
+# has no origin firewall): when on, POST /api/* is rejected unless the connection reached Fly FROM a
+# Cloudflare IP (the un-spoofable Fly-Client-IP is within CF_IP_RANGES). Forces all vote traffic
+# through Cloudflare's edge — an attacker hitting the Fly origin directly is blocked. Off by default
+# (fail-open); enable with E14_REQUIRE_CF=1 once the domain is served through Cloudflare. /health and
+# GET pages are never gated. Needs CF_IP_RANGES current (override via E14_CF_IP_RANGES if CF changes).
+REQUIRE_CF_ORIGIN = os.environ.get("E14_REQUIRE_CF", "").lower() in ("1", "true", "yes")
 # Minimum distinct voters before a crop/acta surfaces on the PUBLIC "most reported" billboard
 # / ranking. With IPv6 collapsed to a /64 in the voter identity, distinct voters ~= distinct
 # networks, so this is a cheap anti-manufacture floor (one attacker can't make a crop "hot"
