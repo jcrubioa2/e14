@@ -463,15 +463,29 @@ def _es_duration(secs: float) -> str:
     return f"~{mins} min"
 
 
-def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
+def compute_sync_progress(
+    conn: sqlite3.Connection,
+    now: datetime | None = None,
+    *,
+    national_total: int | None = None,
+) -> dict:
     """Public rollout status, derived purely from the served results DB.
 
-    Counts browsable actas (those with at least one candidate crop) against the full
-    national universe, and estimates remaining time from the processing-timestamp span.
-    Reads the total at call time so it can be overridden per-deployment / in tests.
+    Counts browsable actas (those with at least one candidate crop) against the full national
+    universe (``mesas_informadas`` from the count-model reconciliation, passed in as
+    ``national_total``), and estimates remaining time from the processing-timestamp span.
+
+    The denominator is no longer a hardcoded constant (the old ``NATIONAL_TOTAL_ACTAS=121913``
+    matched nothing and manufactured a fake 100%). When ``national_total`` is unknown we fall
+    back to the served count itself so the bar reads an honest "complete" rather than capping
+    against a wrong number — and flag it via ``total_known=False``.
     """
     now = now or datetime.now(timezone.utc)
-    total = max(1, config.NATIONAL_TOTAL_ACTAS)
+    # Optional env override stays supported, but there is NO baked-in default any more.
+    if national_total is None:
+        env_total = os.environ.get("E14_NATIONAL_TOTAL")
+        national_total = int(env_total) if env_total and env_total.isdigit() else None
+    total_known = bool(national_total and national_total > 0)
     # A browsable acta is one with >=1 candidate crop — exactly documents.n_candidates>0 (the
     # precomputed column). Count it off the 122k-row documents table via idx_doc_browse instead of
     # a COUNT(DISTINCT) + JOIN scan over the 1.5M-row vote_fields table (which dominated /browse).
@@ -482,6 +496,9 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
         "FROM documents WHERE n_candidates>0"
     ).fetchone()
     served_browsable = row["synced"] or 0  # raw (uncapped) — authoritative "what's actually served"
+    # Denominator: the known national target (informadas) when we have it, else the served
+    # count itself (honest "complete", no fake cap against a wrong constant).
+    total = max(1, national_total if total_known else served_browsable)
     synced = min(served_browsable, total)
     pct = round(synced * 100 / total, 1)
     # Total rows in the served snapshot (incl. n_candidates=0). The served DB on the volume is the
@@ -524,9 +541,74 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
         "served_gap": served_gap,
         "served_gap_label": _es_thousands(served_gap),
         "pct": pct,
+        "total_known": total_known,
         "complete": synced >= total,
         "last_sync_text": last_sync_text,
         "eta_text": eta_text,
+    }
+
+
+def build_count_chain(recon: dict | None, served_total: int) -> dict:
+    """Assemble the count-model chain for display, from the pointer reconciliation block + the
+    app's own authoritative served count. Pure/derived so it unit-tests cleanly.
+
+    The chain is non-increasing top→bottom (total_global ≥ informadas ≥ downloaded ≥
+    crops_uploaded ≥ sqlite_served == published); any known count exceeding the one above it is
+    an inversion (status ``bad``) and an alarm. Unknown counts (a source not reachable from the
+    publishing machine) render as ``na`` and don't break the monotone check. ``sqlite_served`` is
+    the app's OWN live served count (authoritative); ``published`` is what the pointer claims it
+    shipped — they must be equal (``served_eq_published``).
+    """
+    recon = recon or {}
+    total_global = recon.get("total_global")
+    informadas = recon.get("mesas_informadas")
+    downloaded = recon.get("downloaded")
+    crops_uploaded = recon.get("crops_uploaded")
+    published = recon.get("sqlite_served")  # the pointer's claim of what it shipped
+    rows = [
+        {"key": "total_global", "label": "Total nacional (mesas)", "count": total_global,
+         "source": "Registraduría · allTransmissionCodes.json (todos los nodos)"},
+        {"key": "informadas", "label": "Mesas informadas", "count": informadas,
+         "source": "Registraduría · nodos con expectedName"},
+        {"key": "downloaded", "label": "Actas descargadas", "count": downloaded,
+         "source": "manifest · status=done"},
+        {"key": "crops_uploaded", "label": "Recortes subidos (frontera)", "count": crops_uploaded,
+         "source": "review/uploaded_crops.txt"},
+        {"key": "sqlite_served", "label": "En la DB servida", "count": served_total,
+         "source": "results.sqlite · COUNT(documents)"},
+        {"key": "published", "label": "Publicadas (lo que ve el público)", "count": published,
+         "source": "db/latest.json · n_docs"},
+    ]
+    prev = None
+    for r in rows:
+        c = r["count"]
+        if c is None:
+            r["status"] = "na"
+        elif prev is not None and c > prev:
+            r["status"] = "bad"  # inversion — a lower row exceeds a higher one
+        else:
+            r["status"] = "ok"
+        if c is not None:
+            prev = c
+        r["count_label"] = _es_thousands(c) if isinstance(c, int) else "—"
+    served_eq_published = published is None or published == served_total
+    cobertura = round(served_total * 100 / informadas, 2) if isinstance(informadas, int) and informadas else None
+    backlog_ingesta = max(0, informadas - served_total) if isinstance(informadas, int) else None
+    backlog_reporte = (max(0, total_global - informadas)
+                       if isinstance(total_global, int) and isinstance(informadas, int) else None)
+    return {
+        "rows": rows,
+        "cobertura": cobertura,
+        # Colombian decimal comma, e.g. 99.99 -> "99,99".
+        "cobertura_label": (f"{cobertura:.2f}".replace(".", ",") if cobertura is not None else None),
+        "backlog_ingesta": backlog_ingesta,
+        "backlog_ingesta_label": (_es_thousands(backlog_ingesta) if backlog_ingesta is not None else None),
+        "backlog_reporte": backlog_reporte,
+        "backlog_reporte_label": (_es_thousands(backlog_reporte) if backlog_reporte is not None else None),
+        "served_eq_published": served_eq_published,
+        "missing_count": recon.get("missing_count"),
+        "universe_fetched_at": recon.get("universe_fetched_at"),
+        "has_reconciliation": bool(recon),
     }
 
 
@@ -725,6 +807,25 @@ def create_app(
         _agg_cache[key] = (now, val)
         return val
 
+    def _pointer_reconciliation() -> dict | None:
+        # The count-model chain the publisher stamped into the pointer. Cached generously (5 min):
+        # it changes only when the publisher republishes, and resolving it is a network fetch.
+        if not config.CDN_BASE_URL:
+            return None
+
+        def _fetch():
+            from .dbsync import pointer_status
+            ptr = pointer_status(config.CDN_BASE_URL)
+            return (ptr or {}).get("reconciliation")
+        return _agg_cached("pointer_reconciliation", _fetch, ttl=300.0)
+
+    def _national_total() -> int | None:
+        # Denominator for the public progress bar: mesas_informadas from the reconciliation block
+        # (the single source of truth), or None when no reconciliation pointer exists yet.
+        recon = _pointer_reconciliation()
+        inf = (recon or {}).get("mesas_informadas")
+        return int(inf) if isinstance(inf, int) and inf > 0 else None
+
     # cid -> {field_key, crop_rel, document_id} is an immutable, append-only mapping (a cid is
     # registered when the feed surfaces it, well before it can be voted on), so resolving it
     # through a process-local LRU drops a per-vote Aurora Data API round-trip on the hot path.
@@ -817,7 +918,8 @@ def create_app(
                     # Progress of the snapshot we actually serve (== what the publisher shipped).
                     try:
                         with _connect(results_db) as db:
-                            return compute_sync_progress(db).get("pct")
+                            return compute_sync_progress(
+                                db, national_total=_national_total()).get("pct")
                     except Exception:  # noqa: BLE001 — can't measure -> let the helper page
                         return None
 
@@ -1030,10 +1132,18 @@ def create_app(
         # Pipeline health: what the served DB holds vs what the publisher last shipped.
         # A large pointer age, or a served count far below the published frontier, means
         # the publisher stalled or the reader isn't swapping (the stub-DB incident class).
-        with conn() as db:
-            pipeline = compute_sync_progress(db)
         from .dbsync import pointer_status, read_db_lock
         ptr = pointer_status(config.CDN_BASE_URL) if config.CDN_BASE_URL else None
+        recon = (ptr or {}).get("reconciliation")
+        national_total = None
+        if recon and isinstance(recon.get("mesas_informadas"), int):
+            national_total = recon["mesas_informadas"]
+        with conn() as db:
+            pipeline = compute_sync_progress(db, national_total=national_total)
+        # The count-model chain: one top-to-bottom reconciliation built from the pointer block +
+        # the app's own authoritative served count (asserts published == served).
+        chain = build_count_chain(recon, pipeline["served_total"])
+        pipeline["chain"] = chain
         if ptr:
             age = ptr.get("age_secs")
             pipeline["pointer_sha"] = ptr["sha"]
@@ -1069,23 +1179,25 @@ def create_app(
 
     @app.get("/admin/gap")
     async def admin_gap(request: Request, key: str = ""):
-        """The shipped actas with no candidate crop (n_candidates=0) — the 'sin recortes' rows
-        behind the served-vs-published count gap. Read straight off the live served DB so an
-        operator can explain the discrepancy from the admin panel, no shell required."""
+        """The ingesta backlog: mesas the Registraduría reports as informed but that we are not
+        yet serving (informadas − sqlite_served). Sourced from the pointer reconciliation block's
+        missing-key sample so an operator can see *which* mesas are behind, with no shell."""
         _require_admin(request, key)
-
-        def _rows() -> list[dict]:
-            with conn() as db:
-                cur = db.execute(
-                    "SELECT document_id, department_code, municipality_code, zone, puesto, mesa, "
-                    "       processing_timestamp "
-                    "FROM documents WHERE n_candidates=0 "
-                    "ORDER BY department_code, municipality_code, zone, puesto, mesa"
-                )
-                return [dict(r) for r in cur.fetchall()]
-
-        rows = await asyncio.to_thread(_rows)
-        return JSONResponse({"count": len(rows), "actas": rows})
+        recon = await asyncio.to_thread(_pointer_reconciliation)
+        recon = recon or {}
+        sample = recon.get("missing_keys_sample") or []
+        actas: list[dict] = []
+        for k in sample:
+            parts = str(k).split("_")
+            dep, muni, zona, puesto, mesa = (parts + [""] * 5)[:5]
+            actas.append({"key": k, "department_code": dep, "municipality_code": muni,
+                          "zone": zona, "puesto": puesto, "mesa": mesa})
+        return JSONResponse({
+            "count": recon.get("missing_count", len(actas)),
+            "shown": len(actas),
+            "actas": actas,
+            "note": "mesas informadas por la Registraduría aún no servidas (backlog de ingesta)",
+        })
 
     @app.post("/admin/db-lock")
     async def admin_db_lock(request: Request, key: str = "", locked: str = ""):
@@ -1168,9 +1280,13 @@ def create_app(
 
     def _progress_ctx():
         # National-load progress for the shared app bar. Cached (a cheap precomputed COUNT);
-        # opening a conn on a cache hit is negligible.
+        # opening a conn on a cache hit is negligible. The denominator (mesas_informadas) comes
+        # from the reconciliation block, itself cached, so the bar shows the true national share.
         with conn() as db:
-            return _agg_cached("sync_progress", lambda: compute_sync_progress(db))
+            return _agg_cached(
+                "sync_progress",
+                lambda: compute_sync_progress(db, national_total=_national_total()),
+            )
 
     def _total_reviews():
         # Community impact for the shared app bar: total mesas reviewed. A heavier aggregate (a

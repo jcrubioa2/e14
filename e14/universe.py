@@ -7,14 +7,32 @@ authoritative, enumerable download list — one node == one acta PDF.
 from __future__ import annotations
 
 import csv
+import json
 import logging
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
 from .session import CdnSession
 
 log = logging.getLogger("e14.universe")
+
+# The count model's external source of truth lives here (see the count-model plan /
+# memory): one JSON snapshot recording total_global (every mesa in the election) and
+# mesas_informadas (mesas with a transmitted acta) the moment we last scraped the
+# registraduría. The publisher reads it to stamp the reconciliation chain into the
+# pointer; nothing else hardcodes a national total.
+SNAPSHOT_PATH = Path("data") / "universe_snapshot.json"
+
+
+class UniverseShrinkError(RuntimeError):
+    """A freshly-fetched universe is drastically smaller than the last accepted one.
+
+    The election universe only grows (mesas get installed/informed); a sharp drop means a
+    truncated/partial fetch, not real news. Refusing it keeps a bad scrape from inverting
+    the coverage chain (a shrunken denominator would manufacture a fake >100% cobertura).
+    """
 
 
 @dataclass(frozen=True)
@@ -76,6 +94,90 @@ def fetch_universe(session: CdnSession | None = None) -> list[ActaRecord]:
                 records.append(rec)
     log.info("parsed %d actas with filenames", len(records))
     return records
+
+
+def fetch_universe_counts(session: CdnSession | None = None) -> tuple[list[ActaRecord], int]:
+    """Fetch the national list, returning (informed_records, total_global).
+
+    ``total_global`` counts *every* node in ``allTransmissionCodes.json`` — including mesas
+    not yet informed (no ``expectedName``). The returned records are only the informed ones
+    (``expected_name`` set), so ``len(records) == mesas_informadas``. This is the single
+    place the two external counts of the count model are derived together, from one fetch, so
+    they can never disagree by being read at different times.
+    """
+    session = session or CdnSession()
+    url = f"{config.JSON_BASE}/{config.JSON_FILES['transmission_codes']}"
+    log.info("fetching national acta list (with totals): %s", url)
+    payload = session.get_json(url)
+    data = payload.get("data", payload)
+    records: list[ActaRecord] = []
+    total_global = 0
+    for block in data.values():
+        for node in (block or {}).get("nodes", []) or []:
+            total_global += 1
+            rec = _node_to_record(node)
+            if rec.expected_name:
+                records.append(rec)
+    log.info("universe: total_global=%d mesas_informadas=%d", total_global, len(records))
+    return records, total_global
+
+
+def load_universe_snapshot(path: Path = SNAPSHOT_PATH) -> dict | None:
+    """Return the last accepted universe snapshot dict, or None if absent/unreadable."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a corrupt snapshot reads as "none yet", never crashes
+        log.warning("universe snapshot unreadable: %s", path)
+        return None
+
+
+def write_universe_snapshot(
+    records: list[ActaRecord],
+    total_global: int,
+    path: Path = SNAPSHOT_PATH,
+    *,
+    allow_shrink: bool = False,
+    shrink_factor: float = 0.5,
+) -> dict:
+    """Atomically write the universe snapshot, guarding against a shrunk fetch.
+
+    Records both external counts plus the full sorted informed-key list (so the publisher can
+    diff served-vs-informed to surface the ingest backlog). Refuses — raising
+    ``UniverseShrinkError`` — when the new ``total_global`` or ``mesas_informadas`` is below
+    ``shrink_factor`` of the previously accepted snapshot, unless ``allow_shrink``.
+    """
+    path = Path(path)
+    mesas_informadas = len(records)
+    prev = load_universe_snapshot(path)
+    if prev and not allow_shrink:
+        prev_total = int(prev.get("total_global") or 0)
+        prev_inf = int(prev.get("mesas_informadas") or 0)
+        if prev_total and total_global < shrink_factor * prev_total:
+            raise UniverseShrinkError(
+                f"refusing snapshot: total_global {total_global} < {shrink_factor:.0%} of "
+                f"the last accepted {prev_total} — looks like a truncated fetch. "
+                f"Pass allow_shrink=True to override.")
+        if prev_inf and mesas_informadas < shrink_factor * prev_inf:
+            raise UniverseShrinkError(
+                f"refusing snapshot: mesas_informadas {mesas_informadas} < {shrink_factor:.0%} "
+                f"of the last accepted {prev_inf} — looks like a truncated fetch. "
+                f"Pass allow_shrink=True to override.")
+    snap = {
+        "total_global": int(total_global),
+        "mesas_informadas": int(mesas_informadas),
+        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "keys": sorted(r.key for r in records),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(snap), encoding="utf-8")
+    tmp.replace(path)
+    log.info("wrote universe snapshot total_global=%d informadas=%d -> %s",
+             total_global, mesas_informadas, path)
+    return snap
 
 
 def write_universe_csv(records: list[ActaRecord], path: Path) -> None:

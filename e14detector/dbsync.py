@@ -195,6 +195,114 @@ def _resolve_bucket(bucket: str | None) -> str | None:
     return bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
 
 
+# --- count-model reconciliation ---------------------------------------------
+# The publisher is the only component that can see every source of truth at once (the
+# external universe snapshot, the download manifest, the uploaded-crops frontier, and the
+# served snapshot it is about to ship), so it stamps the whole count chain into the pointer.
+# The app/admin/public page then render ONE reconciliation record instead of re-deriving
+# numbers from scattered queries at different times (which is how we "went in circles").
+
+def _served_keys(snap_db: Path) -> set[str]:
+    """Mesa keys present in a served snapshot, in the canonical ``ActaRecord.key`` form.
+
+    ``dep_muni_zona_puesto_mesa`` with the same zero-padding the universe uses, so the set
+    diffs cleanly against the snapshot's informed-key list.
+    """
+    con = sqlite3.connect(f"file:{Path(snap_db).resolve()}?mode=ro", uri=True, timeout=60.0)
+    try:
+        rows = con.execute(
+            "SELECT department_code, municipality_code, zone, puesto, mesa FROM documents"
+        ).fetchall()
+    finally:
+        con.close()
+    keys: set[str] = set()
+    for dep, muni, zona, puesto, mesa in rows:
+        if dep is None or mesa is None:
+            continue
+        keys.add(
+            f"{str(dep).strip().zfill(2)}_{str(muni or '').strip().zfill(3)}_"
+            f"{str(zona or '').strip().zfill(3)}_{str(puesto or '').strip().zfill(2)}_"
+            f"{str(mesa).strip().zfill(3)}"
+        )
+    return keys
+
+
+def _manifest_done_count(manifest_db: Path | None) -> int | None:
+    """Best-effort count of downloaded actas (manifest ``status='done'``); None if absent."""
+    if not manifest_db:
+        manifest_db = Path("data") / "manifest.db"
+    manifest_db = Path(manifest_db)
+    if not manifest_db.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{manifest_db.resolve()}?mode=ro", uri=True, timeout=30.0)
+        try:
+            return int(con.execute(
+                "SELECT COUNT(DISTINCT key) FROM actas WHERE status='done'").fetchone()[0])
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 — a missing/locked manifest just means "unknown", not failure
+        return None
+
+
+def compute_reconciliation(
+    snap_db: Path,
+    *,
+    n_docs: int,
+    output_dir: Path,
+    kept: int | None = None,
+    universe_path: Path | None = None,
+    manifest_db: Path | None = None,
+    missing_sample: int = 50,
+) -> dict:
+    """Build the count-model reconciliation block stamped into the pointer.
+
+    Every field is best-effort: a source that isn't reachable from the publishing machine
+    is simply omitted (rendered as "—"), never an error. The two anchors that matter most —
+    the external ``total_global``/``mesas_informadas`` and the served ``sqlite_served`` — plus
+    the derived backlogs are present whenever the universe snapshot exists. ``backlog_ingesta``
+    is authoritative arithmetic (informadas − served); ``missing_keys_sample``/``missing_count``
+    are a best-effort *enumeration* of which informed mesas aren't served yet.
+    """
+    rec: dict = {"sqlite_served": int(n_docs), "ts": int(time.time())}
+    # External truth (the count model's E1/E2) from the universe snapshot.
+    snap = None
+    try:
+        from e14.universe import SNAPSHOT_PATH, load_universe_snapshot
+
+        snap = load_universe_snapshot(universe_path or SNAPSHOT_PATH)
+    except Exception:  # noqa: BLE001 — snapshot optional; absence just leaves the rows blank
+        snap = None
+    if snap:
+        tg = snap.get("total_global")
+        inf = snap.get("mesas_informadas")
+        rec["total_global"] = tg
+        rec["mesas_informadas"] = inf
+        rec["universe_fetched_at"] = snap.get("fetched_at")
+        if isinstance(inf, int):
+            rec["backlog_ingesta"] = max(0, inf - int(n_docs))
+        if isinstance(tg, int) and isinstance(inf, int):
+            rec["backlog_reporte"] = max(0, tg - inf)
+        try:
+            informed = set(snap.get("keys") or [])
+            if informed:
+                missing = sorted(informed - _served_keys(snap_db))
+                rec["missing_count"] = len(missing)
+                rec["missing_keys_sample"] = missing[:missing_sample]
+        except Exception:  # noqa: BLE001 — enumeration is a diagnostic; arithmetic stands alone
+            pass
+    # Internal frontier (I1/I2). Best-effort; only present when the local files are here.
+    dl = _manifest_done_count(manifest_db)
+    if dl is not None:
+        rec["downloaded"] = dl
+    # crops_uploaded as an *acta* count is the published frontier itself: we never serve an
+    # acta whose crops aren't all uploaded, so for any published snapshot it equals the kept
+    # frontier (only_uploaded mode) and otherwise sqlite_served. Recording it keeps the chain
+    # explicit even though I2==I3==I4 holds by construction.
+    rec["crops_uploaded"] = int(kept) if kept is not None else int(n_docs)
+    return rec
+
+
 def read_db_lock(*, client=None, bucket: str | None = None) -> dict:
     """Return the publish lock object (``{"locked": bool, ...}``). Best-effort: a missing
     object or any read error reads as unlocked so a flaky bucket never blocks publishing."""
@@ -237,6 +345,7 @@ def publish_db(
     manifest: Path | None = None,
     allow_shrink: bool = False,
     allow_locked: bool = False,
+    force_pointer: bool = False,
     verbose: bool = True,
 ) -> dict | None:
     """Snapshot the local results DB and publish it + the pointer to the bucket.
@@ -256,6 +365,11 @@ def publish_db(
 
     Lock: if the bucket carries a locked ``db/lock.json`` (see ``set_db_lock``), publishing is
     refused unless ``allow_locked``. Used to freeze the served DB once it is complete.
+
+    ``force_pointer``: normally an unchanged DB (same sha as the live pointer) is a no-op. With
+    ``force_pointer`` the pointer is re-stamped with a fresh reconciliation block even when the
+    snapshot bytes are identical — used for the one-off refresh that brings a frozen/locked
+    round's pointer up to the current count model without re-uploading the snapshot.
     """
     src = Path(output_dir) / "results" / "results.sqlite"
     if not src.exists():
@@ -314,6 +428,12 @@ def publish_db(
                 "SELECT COUNT(*) FROM documents WHERE n_candidates>0").fetchone()[0]
         finally:
             _c.close()
+        # Stamp the whole count chain (best-effort; see compute_reconciliation). Computed once
+        # here so every return path — published, re-stamped, skipped — carries the same record.
+        recon = compute_reconciliation(
+            snap, n_docs=n_docs, output_dir=Path(output_dir),
+            kept=(kept if only_uploaded else None), manifest_db=None,
+        )
         key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
         # Inspect the currently-published pointer for the unchanged-skip and shrink guard.
         try:
@@ -322,11 +442,28 @@ def publish_db(
             cur = None  # no pointer yet, or client without get_object — just publish
         if cur is not None:
             if cur.get("sha256") == digest:
+                if not force_pointer:
+                    if verbose:
+                        print("publish-db: unchanged since last publish; skipping upload", flush=True)
+                    return {"key": key, "sha256": digest, "size": cur.get("size", 0),
+                            "n_docs": n_docs, "n_browsable": n_browsable, "reconciliation": recon,
+                            "kept": kept if only_uploaded else None, "skipped": True}
+                # force_pointer: the snapshot object already exists (same sha), so re-stamp ONLY
+                # the pointer with a refreshed reconciliation block — no re-upload of the gz.
+                pointer = json.dumps({
+                    "key": cur.get("key", key), "sha256": digest,
+                    "size": cur.get("size", 0), "raw_size": cur.get("raw_size", raw_size),
+                    "n_docs": n_docs, "n_browsable": n_browsable,
+                    "reconciliation": recon, "ts": int(time.time())})
+                client.put_object(
+                    Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
+                    ContentType="application/json", CacheControl="no-store, max-age=0")
                 if verbose:
-                    print("publish-db: unchanged since last publish; skipping upload", flush=True)
-                return {"key": key, "sha256": digest, "size": cur.get("size", 0),
-                        "n_docs": n_docs, "n_browsable": n_browsable,
-                        "kept": kept if only_uploaded else None, "skipped": True}
+                    print("publish-db: unchanged DB — re-stamped pointer with fresh "
+                          "reconciliation (force_pointer)", flush=True)
+                return {"key": cur.get("key", key), "sha256": digest, "size": cur.get("size", 0),
+                        "n_docs": n_docs, "n_browsable": n_browsable, "reconciliation": recon,
+                        "kept": kept if only_uploaded else None, "restamped": True}
             cur_docs = cur.get("n_docs")
             cur_raw = cur.get("raw_size", 0)
             guard_msg = None
@@ -351,7 +488,7 @@ def publish_db(
                 if verbose:
                     print(guard_msg, flush=True)
                 return {"key": key, "sha256": digest, "size": 0, "raw_size": raw_size,
-                        "n_docs": n_docs, "n_browsable": n_browsable,
+                        "n_docs": n_docs, "n_browsable": n_browsable, "reconciliation": recon,
                         "kept": kept if only_uploaded else None, "guarded": True}
         # gzip the snapshot — a paths/metadata DB (mostly NULL columns + repetitive crop
         # paths) compresses ~10x, so the upload is far smaller and cycles stay short.
@@ -372,13 +509,15 @@ def publish_db(
         # ... then flip the pointer last (never cache it).
         pointer = json.dumps({"key": key, "sha256": digest, "size": gz_size,
                               "raw_size": raw_size, "n_docs": n_docs,
-                              "n_browsable": n_browsable, "ts": int(time.time())})
+                              "n_browsable": n_browsable, "reconciliation": recon,
+                              "ts": int(time.time())})
         client.put_object(
             Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
     return {"key": key, "sha256": digest, "size": gz_size, "n_docs": n_docs,
-            "n_browsable": n_browsable, "kept": kept if only_uploaded else None}
+            "n_browsable": n_browsable, "reconciliation": recon,
+            "kept": kept if only_uploaded else None}
 
 
 # --- multi-writer merge (local crop machines) --------------------------------
@@ -598,6 +737,8 @@ def pointer_status(cdn_base: str, *, timeout: float = 10.0) -> dict | None:
             # None (not 0) for pre-reconciliation pointers so the admin board shows "—" rather
             # than a false "0 browsable" / a bogus divergence against a real served count.
             "n_browsable": p.get("n_browsable"),
+            # The full count-model chain stamped by the publisher (None on legacy pointers).
+            "reconciliation": p.get("reconciliation"),
             "ts": ts,
             "age_secs": int(time.time()) - ts if ts else None,
         }

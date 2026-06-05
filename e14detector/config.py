@@ -33,9 +33,12 @@ DEFAULT_OUTPUT_DIR = Path("data") / "detector"
 DEFAULT_RESULTS_DB = DEFAULT_OUTPUT_DIR / "results" / "results.sqlite"
 DEFAULT_RESULTS_JSONL = DEFAULT_OUTPUT_DIR / "results" / "results.jsonl"
 
-# Size of the full national universe of E-14 actas. Used only to show public
-# rollout progress ("X de Y actas sincronizadas"); override per-deployment.
-NATIONAL_TOTAL_ACTAS = int(os.environ.get("E14_NATIONAL_TOTAL", "121913"))
+# The national universe total is NO LONGER a hardcoded constant (the old
+# NATIONAL_TOTAL_ACTAS=121913 matched nothing and manufactured a fake 100%). The denominator
+# now comes from the count-model reconciliation block stamped into the published pointer
+# (mesas_informadas, sourced from data/universe_snapshot.json). An optional E14_NATIONAL_TOTAL
+# env var still overrides it for tests/dev (see webapp.compute_sync_progress); there is no
+# baked-in default.
 
 # A stale snapshot pointer only means a *stalled* publisher while the rollout is still in
 # progress; once the served set reaches ~this percent of the national total, the publisher

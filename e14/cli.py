@@ -2,6 +2,7 @@
 
 Subcommands:
   build-universe   Fetch the national acta list -> data/mesa_universe.csv
+  refresh-universe Refresh the count-model snapshot (total_global + mesas_informadas)
   download         Download acta PDFs (resumable; --depto/--muni/--limit filters)
   estimate         Print national volume + runtime projection (no downloads)
   stats            Show manifest status summary
@@ -18,8 +19,10 @@ from . import config
 from .manifest import Manifest
 from .session import CdnSession
 from .universe import (
-    fetch_names, fetch_universe, filter_records, load_universe_csv,
+    SNAPSHOT_PATH, UniverseShrinkError, fetch_names, fetch_universe,
+    fetch_universe_counts, filter_records, load_universe_csv,
     write_dictionary_csv, write_index_csv, write_universe_csv,
+    write_universe_snapshot,
 )
 
 DICTIONARY_CSV = Path("data") / "divipol_dictionary.csv"
@@ -66,6 +69,30 @@ def cmd_build_universe(args) -> int:
     deps = sorted({r.dep.zfill(2) for r in recs})
     print(f"Universe: {len(recs)} actas across {len(deps)} departments "
           f"-> {UNIVERSE_CSV}")
+    return 0
+
+
+def cmd_refresh_universe(args) -> int:
+    """Refresh the external source of truth for the count model.
+
+    Re-fetches allTransmissionCodes.json, records total_global + mesas_informadas into
+    data/universe_snapshot.json (the freshness anchor that replaces the old hardcoded
+    NATIONAL_TOTAL), and keeps the legacy mesa_universe.csv current for existing consumers.
+    The shrink-guard refuses a truncated fetch unless --allow-shrink.
+    """
+    recs, total_global = fetch_universe_counts()
+    write_universe_csv(recs, UNIVERSE_CSV)
+    try:
+        snap = write_universe_snapshot(recs, total_global, allow_shrink=args.allow_shrink)
+    except UniverseShrinkError as exc:
+        print(f"✗ {exc}")
+        return 1
+    informadas = snap["mesas_informadas"]
+    backlog_reporte = max(0, snap["total_global"] - informadas)
+    print(f"Universe snapshot -> {SNAPSHOT_PATH}")
+    print(f"  total_global      = {snap['total_global']:,}")
+    print(f"  mesas_informadas  = {informadas:,}  (backlog de reporte: {backlog_reporte:,})")
+    print(f"  fetched_at        = {snap['fetched_at']}")
     return 0
 
 
@@ -324,6 +351,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("build-universe", help="fetch national acta list to CSV")
     sp.set_defaults(func=cmd_build_universe)
+
+    sp = sub.add_parser("refresh-universe",
+                        help="refresh the universe snapshot (total_global + mesas_informadas)")
+    sp.add_argument("--allow-shrink", action="store_true",
+                    help="accept a snapshot smaller than the last (override the shrink-guard)")
+    sp.set_defaults(func=cmd_refresh_universe)
 
     sp = sub.add_parser("estimate", help="print volume + runtime estimate")
     common(sp)

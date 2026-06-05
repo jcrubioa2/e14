@@ -430,6 +430,119 @@ def test_publish_db_records_browsable_count_and_gap(tmp_path: Path) -> None:
     assert pointer["n_browsable"] <= pointer["n_docs"]  # the invariant the admin board relies on
 
 
+def _make_geo_db(path: Path, served_keys: list[tuple[str, str, str, str, str]]) -> None:
+    """A results DB whose documents carry geo codes (dep,muni,zona,puesto,mesa) so the
+    reconciliation can diff served keys against the universe's informed keys."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT, "
+                "department_code TEXT, municipality_code TEXT, zone TEXT, puesto TEXT, mesa TEXT)")
+    con.execute("CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, page_number INTEGER, "
+                "row_number INTEGER, row_type TEXT, section TEXT, candidate_number INTEGER, "
+                "candidate_name TEXT, raw_crop_path TEXT, vlm_classification TEXT)")
+    for i, (dep, muni, zona, puesto, mesa) in enumerate(served_keys):
+        d = f"doc-{i}"
+        con.execute("INSERT INTO documents VALUES (?,?,?,?,?,?,?)", (d, f"{d}.pdf", dep, muni, zona, puesto, mesa))
+        con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                    "VALUES (?,1,1,'candidate',?)", (d, f"crops/{d}.png"))
+    con.commit(); con.close()
+
+
+def _write_universe_snapshot(path: Path, total_global: int, keys: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "total_global": total_global, "mesas_informadas": len(keys),
+        "fetched_at": "2026-06-05T00:00:00+00:00", "keys": sorted(keys)}))
+
+
+def test_publish_db_stamps_reconciliation_chain(tmp_path: Path, monkeypatch) -> None:
+    """The publisher stamps the count-model chain into the pointer: total_global / informadas
+    from the universe snapshot, sqlite_served from the snapshot, and the derived ingest backlog
+    (informadas − served) with a sample of which informed mesas aren't served yet."""
+    from e14 import universe
+
+    out = tmp_path / "out"
+    # Serve 3 mesas; the universe knows 4 informed mesas (1 is behind) out of 6 total_global.
+    served = [("01", "001", "001", "01", "001"), ("01", "001", "001", "01", "002"),
+              ("01", "001", "001", "01", "003")]
+    _make_geo_db(out / "results" / "results.sqlite", served)
+    informed_keys = [f"01_001_001_01_{m}" for m in ("001", "002", "003", "004")]  # 004 is the backlog
+    snap_path = tmp_path / "universe_snapshot.json"
+    _write_universe_snapshot(snap_path, total_global=6, keys=informed_keys)
+    monkeypatch.setattr(universe, "SNAPSHOT_PATH", snap_path)
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _FakeS3()
+    info = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    recon = info["reconciliation"]
+    assert recon["total_global"] == 6
+    assert recon["mesas_informadas"] == 4
+    assert recon["sqlite_served"] == 3
+    assert recon["backlog_ingesta"] == 1   # 4 informed − 3 served
+    assert recon["backlog_reporte"] == 2   # 6 total − 4 informed
+    assert recon["missing_count"] == 1
+    assert recon["missing_keys_sample"] == ["01_001_001_01_004"]
+    # The pointer on the bucket carries the same block.
+    pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
+    assert pointer["reconciliation"]["backlog_ingesta"] == 1
+
+
+def test_publish_db_force_pointer_restamps_unchanged_db(tmp_path: Path, monkeypatch) -> None:
+    """A frozen/locked round's DB is unchanged (same sha), so a normal publish is a no-op. With
+    force_pointer the pointer is re-stamped with a fresh reconciliation block — no re-upload."""
+    from e14 import universe
+
+    out = tmp_path / "out"
+    served = [("01", "001", "001", "01", "001"), ("01", "001", "001", "01", "002")]
+    _make_geo_db(out / "results" / "results.sqlite", served)
+    snap_path = tmp_path / "universe_snapshot.json"
+    _write_universe_snapshot(snap_path, total_global=5, keys=[f"01_001_001_01_{m}" for m in ("001", "002", "003")])
+    monkeypatch.setattr(universe, "SNAPSHOT_PATH", snap_path)
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+            self.uploads = 0
+
+        def get_object(self, Bucket, Key):  # noqa: N803
+            if Key not in self.objects:
+                raise KeyError(Key)
+            return {"Body": type("B", (), {"read": lambda s: self.objects[Key]})()}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.uploads += 1
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _FakeS3()
+    first = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    uploads_after_first = s3.uploads
+    assert first["reconciliation"]["sqlite_served"] == 2
+
+    # Re-publishing the same DB without force_pointer is a skip (no re-upload, no re-stamp).
+    skipped = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    assert skipped.get("skipped") is True and s3.uploads == uploads_after_first
+
+    # With force_pointer it re-stamps the pointer (fresh ts) but does NOT re-upload the snapshot.
+    restamped = dbsync.publish_db(out, bucket="b", client=s3, force_pointer=True, verbose=False)
+    assert restamped.get("restamped") is True
+    assert s3.uploads == uploads_after_first  # snapshot object untouched
+    pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
+    assert pointer["reconciliation"]["sqlite_served"] == 2
+    assert pointer["sha256"] == first["sha256"]  # same content, just a refreshed pointer
+
+
 def test_build_serving_db_drops_fat_columns_and_tables(tmp_path: Path) -> None:
     """The serving snapshot keeps only the registry the live site reads: fat columns
     (debug paths, cv_score, vlm_raw_json) and whole working tables (cv_features) are gone,

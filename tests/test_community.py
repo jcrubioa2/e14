@@ -395,4 +395,6 @@ def test_admin_poll_is_token_gated(tmp_path: Path, monkeypatch) -> None:
     assert client.get("/admin/poll").status_code == 403            # no key
     assert client.get("/admin/poll?key=wrong").status_code == 403
     ok = client.get("/admin/poll?key=s3cret")
-    assert ok.status_code == 200 and "Cand 1" in ok.text and "MEDELLIN" in ok.text
+    # The admin board now renders the count-model reconciliation + DB-management panel (the old
+    # per-candidate votes table was retired); the token gate is what this test guards.
+    assert ok.status_code == 200 and "Reconciliación de conteos" in ok.text

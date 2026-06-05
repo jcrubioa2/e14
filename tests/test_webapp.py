@@ -86,7 +86,9 @@ def test_browse_shows_national_sync_progress(tmp_path: Path, monkeypatch) -> Non
     """The shared app bar shows national-load progress (pct) while the rollout is incomplete.
     (The old /browse synced/total/ETA panel was retired when /browse split into /buscar+/reportes;
     the compact app-bar label is what remains, and it renders on every page incl. /buscar.)"""
-    monkeypatch.setattr(config, "NATIONAL_TOTAL_ACTAS", 100)
+    # The denominator now comes from the count-model reconciliation; with no published pointer
+    # in tests, the E14_NATIONAL_TOTAL env override supplies it (replaces the old constant).
+    monkeypatch.setenv("E14_NATIONAL_TOTAL", "100")
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     crop = _crop(output_dir / "crops" / "c.png")
@@ -481,6 +483,65 @@ def test_compute_sync_progress_separates_browsable_from_total(tmp_path: Path) ->
     assert prog["served_gap"] == 1  # the 'sin recortes' gap = total - browsable
     assert prog["served_total"] == prog["served_browsable"] + prog["served_gap"]  # triplet reconciles
     assert prog["synced"] == 1  # headline derives from browsable, not the row total
+
+
+def test_build_count_chain_orders_and_derives() -> None:
+    """The chain renders non-increasing top→bottom, computes cobertura + both backlogs, and
+    confirms published==served — the single reconciliation the admin/public pages render."""
+    from e14detector.webapp import build_count_chain
+
+    recon = {
+        "total_global": 122020, "mesas_informadas": 122020,
+        "downloaded": 122010, "crops_uploaded": 122007,
+        "sqlite_served": 122007, "missing_count": 13,
+    }
+    chain = build_count_chain(recon, served_total=122007)
+    by_key = {r["key"]: r for r in chain["rows"]}
+    assert [r["status"] for r in chain["rows"]] == ["ok"] * 6  # monotone, nothing inverted
+    assert by_key["published"]["count"] == 122007
+    assert chain["served_eq_published"] is True
+    assert chain["cobertura"] == round(122007 * 100 / 122020, 2)  # 99.99
+    assert chain["cobertura_label"] == "99,99"  # Colombian decimal comma
+    assert chain["backlog_ingesta"] == 13
+    assert chain["backlog_reporte"] == 0
+
+
+def test_build_count_chain_flags_inversion_and_divergence() -> None:
+    """An impossible inversion (a lower count exceeds a higher one) is flagged 'bad', and a
+    published count that disagrees with the app's own served count breaks served_eq_published."""
+    from e14detector.webapp import build_count_chain
+
+    # sqlite_served (120) > crops_uploaded (100): an inversion that must alarm.
+    recon = {"total_global": 200, "mesas_informadas": 150, "downloaded": 130,
+             "crops_uploaded": 100, "sqlite_served": 99}
+    chain = build_count_chain(recon, served_total=120)
+    statuses = {r["key"]: r["status"] for r in chain["rows"]}
+    assert statuses["sqlite_served"] == "bad"  # 120 > 100 above it
+    # The app's own served (120) disagrees with the pointer's published (99).
+    assert chain["served_eq_published"] is False
+
+
+def test_build_count_chain_tolerates_unknown_rows() -> None:
+    """Counts a publishing machine can't see (downloaded/crops_uploaded) render 'na' and don't
+    break the monotone check — only the external anchors + served are guaranteed present."""
+    from e14detector.webapp import build_count_chain
+
+    recon = {"total_global": 100, "mesas_informadas": 100, "sqlite_served": 90}
+    chain = build_count_chain(recon, served_total=90)
+    statuses = {r["key"]: r["status"] for r in chain["rows"]}
+    assert statuses["downloaded"] == "na" and statuses["crops_uploaded"] != "bad"
+    assert chain["backlog_ingesta"] == 10
+    assert chain["served_eq_published"] is True
+
+
+def test_build_count_chain_without_reconciliation_is_empty() -> None:
+    """A legacy pointer (no reconciliation block) yields has_reconciliation=False so the admin
+    page shows the 'run publish-db --force-pointer' hint instead of a half-blank table."""
+    from e14detector.webapp import build_count_chain
+
+    chain = build_count_chain(None, served_total=122007)
+    assert chain["has_reconciliation"] is False
+    assert chain["cobertura"] is None
 
 
 def _drop_n_candidates(db: Path) -> None:
