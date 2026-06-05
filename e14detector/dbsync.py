@@ -306,6 +306,12 @@ def publish_db(
         _c = sqlite3.connect(snap)
         try:
             n_docs = _c.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            # Browsable actas (>=1 candidate crop) — what /browse and the public actually serve.
+            # Shipped alongside n_docs so the admin board can reconcile "servidas" vs "publicadas"
+            # from one source and never display two unexplained totals (the n_docs-vs-browsable gap
+            # is exactly the documents with n_candidates=0: metadata-only / failed-crop rows).
+            n_browsable = _c.execute(
+                "SELECT COUNT(*) FROM documents WHERE n_candidates>0").fetchone()[0]
         finally:
             _c.close()
         key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
@@ -319,7 +325,8 @@ def publish_db(
                 if verbose:
                     print("publish-db: unchanged since last publish; skipping upload", flush=True)
                 return {"key": key, "sha256": digest, "size": cur.get("size", 0),
-                        "n_docs": n_docs, "kept": kept if only_uploaded else None, "skipped": True}
+                        "n_docs": n_docs, "n_browsable": n_browsable,
+                        "kept": kept if only_uploaded else None, "skipped": True}
             cur_docs = cur.get("n_docs")
             cur_raw = cur.get("raw_size", 0)
             guard_msg = None
@@ -344,7 +351,8 @@ def publish_db(
                 if verbose:
                     print(guard_msg, flush=True)
                 return {"key": key, "sha256": digest, "size": 0, "raw_size": raw_size,
-                        "n_docs": n_docs, "kept": kept if only_uploaded else None, "guarded": True}
+                        "n_docs": n_docs, "n_browsable": n_browsable,
+                        "kept": kept if only_uploaded else None, "guarded": True}
         # gzip the snapshot — a paths/metadata DB (mostly NULL columns + repetitive crop
         # paths) compresses ~10x, so the upload is far smaller and cycles stay short.
         gz = Path(str(snap) + ".gz")
@@ -363,13 +371,14 @@ def publish_db(
         )
         # ... then flip the pointer last (never cache it).
         pointer = json.dumps({"key": key, "sha256": digest, "size": gz_size,
-                              "raw_size": raw_size, "n_docs": n_docs, "ts": int(time.time())})
+                              "raw_size": raw_size, "n_docs": n_docs,
+                              "n_browsable": n_browsable, "ts": int(time.time())})
         client.put_object(
             Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
     return {"key": key, "sha256": digest, "size": gz_size, "n_docs": n_docs,
-            "kept": kept if only_uploaded else None}
+            "n_browsable": n_browsable, "kept": kept if only_uploaded else None}
 
 
 # --- multi-writer merge (local crop machines) --------------------------------
@@ -586,6 +595,9 @@ def pointer_status(cdn_base: str, *, timeout: float = 10.0) -> dict | None:
             "gz_size": p.get("size", 0),
             "raw_size": p.get("raw_size", 0),
             "n_docs": p.get("n_docs", 0),
+            # None (not 0) for pre-reconciliation pointers so the admin board shows "—" rather
+            # than a false "0 browsable" / a bogus divergence against a real served count.
+            "n_browsable": p.get("n_browsable"),
             "ts": ts,
             "age_secs": int(time.time()) - ts if ts else None,
         }

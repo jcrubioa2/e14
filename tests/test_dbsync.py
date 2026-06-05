@@ -383,6 +383,51 @@ def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) ->
     pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
     assert pointer["sha256"] == info["sha256"] and pointer["key"] == info["key"]
     assert pointer["n_docs"] == info["n_docs"] == 2  # count recorded for the count-based guard
+    # Both totals shipped, and every doc here is browsable (has a candidate crop) so they match.
+    assert pointer["n_browsable"] == info["n_browsable"] == 2
+
+
+def test_publish_db_records_browsable_count_and_gap(tmp_path: Path) -> None:
+    """The pointer carries n_browsable (actas with >=1 candidate crop) next to n_docs so the admin
+    board reconciles 'servidas' vs 'publicadas' from one source. Docs with no candidate crop
+    (n_candidates=0) widen the n_docs-vs-n_browsable gap — they must not count as browsable."""
+    out = tmp_path / "out"
+    db = out / "results" / "results.sqlite"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT)")
+    con.execute(
+        "CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, page_number INTEGER, "
+        "row_number INTEGER, row_type TEXT, section TEXT, candidate_number INTEGER, "
+        "candidate_name TEXT, raw_crop_path TEXT, vlm_classification TEXT)")
+    # 3 browsable docs: a candidate row WITH a crop path.
+    for d in ("d0", "d1", "d2"):
+        con.execute("INSERT INTO documents VALUES (?, ?)", (d, f"{d}.pdf"))
+        con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                    "VALUES (?,1,1,'candidate',?)", (d, f"crops/{d}.png"))
+    # 2 metadata-only docs (n_candidates=0): one with no vote_fields, one with only a summary row.
+    con.execute("INSERT INTO documents VALUES ('g0', 'g0.pdf')")
+    con.execute("INSERT INTO documents VALUES ('g1', 'g1.pdf')")
+    con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                "VALUES ('g1',2,14,'summary',NULL)")
+    con.commit(); con.close()
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _FakeS3()
+    info = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    assert info["n_docs"] == 5 and info["n_browsable"] == 3  # 2 metadata-only docs in the gap
+    pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
+    assert pointer["n_docs"] == 5 and pointer["n_browsable"] == 3
+    assert pointer["n_browsable"] <= pointer["n_docs"]  # the invariant the admin board relies on
 
 
 def test_build_serving_db_drops_fat_columns_and_tables(tmp_path: Path) -> None:

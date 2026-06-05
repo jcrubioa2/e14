@@ -23,8 +23,14 @@
     .pipeline { margin-top:12px; padding:8px 12px; border-radius:8px; font-size:13px; border:1px solid var(--line); }
     .pipeline.ok { background:#eaf6ec; border-color:#aedcb8; }
     .pipeline.warn { background:#fff8e6; border-color:#e6c34a; }
+    .pipeline.bad { background:#fdeceb; border-color:var(--bad); color:var(--bad); }
     .pipeline .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:#1a7f37; vertical-align:middle; }
     .pipeline.warn .dot { background:#b88200; }
+    .pipeline.bad .dot { background:var(--bad); }
+    .gaplink { margin-left:8px; font-size:12px; color:var(--accent); background:none; border:none; padding:0; cursor:pointer; text-decoration:underline; }
+    .gapbox { margin-top:10px; }
+    .gapbox .muted { margin-bottom:6px; }
+    .gaptable-wrap { max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
     .status { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
     .tile { border:1px solid var(--line); border-left-width:4px; border-radius:6px; padding:6px 10px; font-size:12px; color:var(--muted); min-width:120px; }
     .tile b { display:block; font-size:14px; color:var(--ink); margin-top:2px; }
@@ -53,7 +59,7 @@
     <div class="pipeline {{ 'warn' if pipeline.pointer_stale and not pipeline.complete else 'ok' }}">
       <span class="dot"></span>
       <b>Publicación:</b>
-      {{ pipeline.synced_label }} de {{ pipeline.total_label }} actas servidas ({{ pipeline.pct }}%)
+      {{ pipeline.synced_label }} de {{ pipeline.total_label }} actas con recortes servidas ({{ pipeline.pct }}%)
       {%- if pipeline.last_sync_text %} &middot; última acta {{ pipeline.last_sync_text }}{% endif %}
       {%- if pipeline.eta_text %} &middot; ETA {{ pipeline.eta_text }}{% endif %}
       {%- if pipeline.pointer_age_min is not none %} &middot;
@@ -62,6 +68,17 @@
         {%- if pipeline.pointer_stale and not pipeline.complete %} <b>&mdash; ¿publicador detenido?</b>{% endif %}
       {%- endif %}
     </div>
+    {% if pipeline.count_divergence %}
+    <div class="pipeline bad">
+      <span class="dot"></span>
+      <b>Divergencia de conteo ({{ pipeline.divergence_kind }}):</b>
+      la DB servida tiene
+      {{ pipeline.served_total_label if pipeline.divergence_kind == 'totales' else pipeline.served_browsable_label }}
+      actas, pero el último puntero publicado declara
+      {{ pipeline.pointer_n_docs if pipeline.divergence_kind == 'totales' else pipeline.pointer_n_browsable }}
+      (diferencia de {{ pipeline.count_divergence }}) &mdash; ¿publicador detenido o lector sin intercambiar?
+    </div>
+    {% endif %}
     {% endif %}
     {% if health %}
     <div class="status">
@@ -111,10 +128,27 @@
         </div>
       </div>
       <div class="dbmeta">
-        <div class="card">actas publicadas<b>{% if pipeline and pipeline.pointer_n_docs %}{{ pipeline.pointer_n_docs }}{% else %}&mdash;{% endif %}</b></div>
+        <div class="card">actas totales<b>{% if pipeline and pipeline.served_total_label %}{{ pipeline.served_total_label }}{% else %}&mdash;{% endif %}</b></div>
+        <div class="card">con recortes (servidas)<b>{% if pipeline and pipeline.served_browsable_label %}{{ pipeline.served_browsable_label }}{% else %}&mdash;{% endif %}</b></div>
+        <div class="card">sin recortes<b>{% if pipeline and pipeline.served_gap is not none %}{{ pipeline.served_gap_label }}{% else %}&mdash;{% endif %}</b>
+          {%- if pipeline and pipeline.served_gap %}<button class="gaplink" id="gapBtn" type="button">ver detalle</button>{% endif %}</div>
         <div class="card">tamaño publicado<b>{% if pipeline and pipeline.pointer_raw_mb %}{{ pipeline.pointer_raw_mb }} MB{% else %}&mdash;{% endif %}</b></div>
         <div class="card">sha<b>{% if pipeline and pipeline.pointer_sha %}{{ pipeline.pointer_sha }}{% else %}&mdash;{% endif %}</b></div>
         <div class="card">última publicación<b>{% if pipeline and pipeline.pointer_age_min is not none %}hace {{ pipeline.pointer_age_min }} min{% else %}&mdash;{% endif %}</b></div>
+      </div>
+      <div class="muted" style="margin-top:8px; font-size:12px;">
+        Conteos de la DB servida (lo que ven los visitantes). <b>con recortes</b> = actas visibles en /browse;
+        <b>sin recortes</b> = actas en la DB sin ningún recorte de candidato (no aparecen en /browse).
+        <b>totales = con recortes + sin recortes.</b>
+      </div>
+      <div class="gapbox" id="gapBox" hidden>
+        <div class="muted"></div>
+        <div class="gaptable-wrap">
+          <table>
+            <thead><tr><th>document_id</th><th>depto</th><th>mun.</th><th>zona</th><th>puesto</th><th>mesa</th><th>procesada</th></tr></thead>
+            <tbody id="gapRows"></tbody>
+          </table>
+        </div>
       </div>
     </section>
   </main>
@@ -131,6 +165,30 @@
         location.reload();
       } catch (e) { alert('Error: ' + e.message); b.disabled = false; location.reload(); }
     }));
+
+    // "ver detalle": list the shipped actas with no candidate crop (the 'sin recortes' gap),
+    // straight from /admin/gap, so the served-vs-published difference is explainable in one click.
+    const gapBtn = document.getElementById('gapBtn');
+    if (gapBtn) gapBtn.addEventListener('click', async () => {
+      const box = document.getElementById('gapBox');
+      if (!box.hidden) { box.hidden = true; gapBtn.textContent = 'ver detalle'; return; }
+      gapBtn.disabled = true; gapBtn.textContent = '…';
+      try {
+        const r = await fetch(`/admin/gap?key=${encodeURIComponent(KEY)}`);
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+        document.querySelector('#gapBox .muted').textContent =
+          `${data.count} acta(s) sin recortes de candidato (no aparecen en /browse):`;
+        document.getElementById('gapRows').innerHTML = data.actas.map(a =>
+          `<tr><td>${esc(a.document_id)}</td><td>${esc(a.department_code)}</td>` +
+          `<td>${esc(a.municipality_code)}</td><td>${esc(a.zone)}</td>` +
+          `<td>${esc(a.puesto)}</td><td>${esc(a.mesa)}</td>` +
+          `<td>${esc(a.processing_timestamp)}</td></tr>`).join('');
+        box.hidden = false; gapBtn.textContent = 'ocultar detalle';
+      } catch (e) { alert('Error: ' + e.message); }
+      finally { gapBtn.disabled = false; }
+    });
   </script>
 </body>
 </html>

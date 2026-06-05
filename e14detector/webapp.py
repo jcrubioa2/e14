@@ -481,8 +481,15 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
         "       MAX(processing_timestamp) AS last_ts "
         "FROM documents WHERE n_candidates>0"
     ).fetchone()
-    synced = min(row["synced"] or 0, total)
+    served_browsable = row["synced"] or 0  # raw (uncapped) — authoritative "what's actually served"
+    synced = min(served_browsable, total)
     pct = round(synced * 100 / total, 1)
+    # Total rows in the served snapshot (incl. n_candidates=0). The served DB on the volume is the
+    # ground truth of what visitors get, so the admin board's totales/con-recortes/sin-recortes
+    # triplet is derived from HERE (always available) — the pointer is only used to flag a
+    # served-vs-published *divergence*. served_gap = the 'sin recortes' rows (n_candidates=0).
+    served_total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    served_gap = served_total - served_browsable
 
     last_sync_text = None
     if row["last_ts"]:
@@ -510,6 +517,12 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
         "total": total,
         "synced_label": _es_thousands(synced),
         "total_label": _es_thousands(total),
+        "served_browsable": served_browsable,
+        "served_browsable_label": _es_thousands(served_browsable),
+        "served_total": served_total,
+        "served_total_label": _es_thousands(served_total),
+        "served_gap": served_gap,
+        "served_gap_label": _es_thousands(served_gap),
         "pct": pct,
         "complete": synced >= total,
         "last_sync_text": last_sync_text,
@@ -1027,9 +1040,24 @@ def create_app(
             pipeline["pointer_raw_mb"] = round(ptr["raw_size"] / 1e6) if ptr.get("raw_size") else None
             pipeline["pointer_gz_mb"] = round(ptr["gz_size"] / 1e6, 1) if ptr.get("gz_size") else None
             pipeline["pointer_n_docs"] = ptr.get("n_docs") or None
+            pipeline["pointer_n_browsable"] = ptr.get("n_browsable")
             pipeline["pointer_age_min"] = round(age / 60) if age is not None else None
             # Stale if the publisher hasn't flipped the pointer in >30 min (cycles run ~10-14).
             pipeline["pointer_stale"] = age is not None and age > 30 * 60
+            # Divergence = the served DB (authoritative — what visitors actually get) disagrees with
+            # what the publisher's pointer claims it shipped, i.e. the publisher stalled or the reader
+            # hasn't swapped. Compare totals always (every pointer has n_docs) and browsable when the
+            # pointer carries it (post-reconciliation pointers; legacy pointers simply skip that half,
+            # never a false alarm). The triplet itself is served-derived, so it renders even on a
+            # legacy/locked pointer that predates n_browsable.
+            pn_docs = pipeline["pointer_n_docs"]
+            pn_browsable = pipeline["pointer_n_browsable"]
+            if pn_docs is not None and pipeline["served_total"] != pn_docs:
+                pipeline["count_divergence"] = abs(pipeline["served_total"] - pn_docs)
+                pipeline["divergence_kind"] = "totales"
+            elif pn_browsable is not None and pipeline["served_browsable"] != pn_browsable:
+                pipeline["count_divergence"] = abs(pipeline["served_browsable"] - pn_browsable)
+                pipeline["divergence_kind"] = "con recortes"
         # Off the event loop: _admin_health and the lock read do blocking network probes.
         health = await asyncio.to_thread(_admin_health, votes_ok, pipeline)
         lock = await asyncio.to_thread(read_db_lock)
@@ -1038,6 +1066,26 @@ def create_app(
             "admin.html",
             {"key": key, "pipeline": pipeline, "health": health, "lock": lock},
         )
+
+    @app.get("/admin/gap")
+    async def admin_gap(request: Request, key: str = ""):
+        """The shipped actas with no candidate crop (n_candidates=0) — the 'sin recortes' rows
+        behind the served-vs-published count gap. Read straight off the live served DB so an
+        operator can explain the discrepancy from the admin panel, no shell required."""
+        _require_admin(request, key)
+
+        def _rows() -> list[dict]:
+            with conn() as db:
+                cur = db.execute(
+                    "SELECT document_id, department_code, municipality_code, zone, puesto, mesa, "
+                    "       processing_timestamp "
+                    "FROM documents WHERE n_candidates=0 "
+                    "ORDER BY department_code, municipality_code, zone, puesto, mesa"
+                )
+                return [dict(r) for r in cur.fetchall()]
+
+        rows = await asyncio.to_thread(_rows)
+        return JSONResponse({"count": len(rows), "actas": rows})
 
     @app.post("/admin/db-lock")
     async def admin_db_lock(request: Request, key: str = "", locked: str = ""):

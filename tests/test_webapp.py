@@ -450,6 +450,39 @@ def test_browse_shows_billboard(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_compute_sync_progress_separates_browsable_from_total(tmp_path: Path) -> None:
+    """The served headline counts browsable actas only; docs with no candidate crop widen the
+    served_total gap, never the served count. This is the reconciliation the admin board renders,
+    and the reason 'servidas' and 'publicadas' must never be shown as one undifferentiated number."""
+    import sqlite3
+
+    from e14detector.webapp import compute_sync_progress
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-has", source_path="doc-has.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc-has", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop)))
+    store.upsert_document(DocumentMetadata(document_id="doc-none", source_path="doc-none.pdf"))
+    store.commit()
+    store.close()
+
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    try:
+        prog = compute_sync_progress(con)
+    finally:
+        con.close()
+    assert prog["served_browsable"] == 1  # only the doc with a candidate crop
+    assert prog["served_total"] == 2  # both docs are shipped in the snapshot
+    assert prog["served_gap"] == 1  # the 'sin recortes' gap = total - browsable
+    assert prog["served_total"] == prog["served_browsable"] + prog["served_gap"]  # triplet reconciles
+    assert prog["synced"] == 1  # headline derives from browsable, not the row total
+
+
 def _drop_n_candidates(db: Path) -> None:
     """Rebuild documents WITHOUT n_candidates, simulating an older/raw serving snapshot.
     (A plain DROP COLUMN trips on the inline comment in the table DDL, so recreate instead.)"""
