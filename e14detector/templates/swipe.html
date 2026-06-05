@@ -385,6 +385,14 @@
     const turnstileOn = !!window.__turnstileSitekey;
     let tsWidget = null;
     let establishing = false;
+    // Clicks that arrive before the session token exists WAIT on these resolvers instead of being
+    // dropped; establishSession (and the error/timeout paths) settle them so the queued submit
+    // continues on its own — the user never has to click twice.
+    let sessionWaiters = [];
+    function _settleSession(ok) {
+      const waiters = sessionWaiters; sessionWaiters = [];
+      waiters.forEach((r) => { try { r(ok); } catch (e) {} });
+    }
 
     window.__tsInit = function () {
       try {
@@ -393,15 +401,26 @@
           size: 'invisible',
           callback: function (token) { establishSession(token); },
           'expired-callback': function () { window.__formToken = ''; ensureSession(); },
-          'error-callback': function () { establishing = false; },
+          'error-callback': function () { establishing = false; _settleSession(false); },
         });
+        // Pre-warm the token so the first submit doesn't have to wait (invisible widgets usually
+        // auto-run on render; kick it if nothing has arrived shortly after).
+        setTimeout(function () { if (!window.__formToken) ensureSession(); }, 1500);
       } catch (e) {}
     };
+    // Resolves true once a usable form token exists (false if we couldn't get one). Idempotent:
+    // concurrent callers share the single in-flight Turnstile solve.
     function ensureSession() {
-      if (!turnstileOn || establishing || !window.turnstile || tsWidget === null) return;
-      establishing = true;
-      try { window.turnstile.reset(tsWidget); window.turnstile.execute(tsWidget); }
-      catch (e) { establishing = false; }
+      if (!turnstileOn || window.__formToken) return Promise.resolve(voteReady());
+      return new Promise((resolve) => {
+        sessionWaiters.push(resolve);
+        setTimeout(() => resolve(false), 10000);  // never hang the button if the solve stalls
+        if (!establishing && window.turnstile && tsWidget !== null) {
+          establishing = true;
+          try { window.turnstile.reset(tsWidget); window.turnstile.execute(tsWidget); }
+          catch (e) { establishing = false; _settleSession(false); }
+        }
+      });
     }
     async function establishSession(token) {
       try {
@@ -411,7 +430,7 @@
         });
         const data = await res.json().catch(() => ({}));
         if (data && data.ok && data.form_token) window.__formToken = data.form_token;
-      } catch (e) {} finally { establishing = false; }
+      } catch (e) {} finally { establishing = false; _settleSession(!!window.__formToken); }
     }
     function voteReady() { return !turnstileOn || !!window.__formToken; }
 
@@ -587,25 +606,32 @@
       }).catch(() => {});
     }
 
-    function submitDeck() {
+    async function submitDeck() {
       if (sending) return;
-      if (!voteReady()) { showToast('Verificando…', true); ensureSession(); return; }
       sending = true;
-      const strange = deck.map((it) => it.cid).filter((c) => marked.has(c));
-      const good = deck.map((it) => it.cid).filter((c) => !marked.has(c));
-      reviewed++;
-      persistReviewed();
-      renderReviewed();                  // tick the personal chip up immediately (count + rank + progress)
-      if (window.e14BumpReviews) window.e14BumpReviews(1);  // and the community total in the app bar
-      // On a milestone, let the rank chip's unlock toast carry the moment; otherwise a plain thanks.
-      const r = rankFor(reviewed);
-      if (r && r.at > lastRankAt) { lastRankAt = r.at; celebrateRank(r); }
-      else { showToast(thanks()); }
-      sendBatch(strange, good);          // optimistic: don't block the next mesa on the response
-      board.innerHTML = skeleton();
-      bar.hidden = true;
-      sending = false;
-      loadDeck();
+      try {
+        // If the bot-gate token isn't ready yet (first submit, or it expired), establish it and
+        // then continue THIS submit — don't make the user click again.
+        if (!voteReady()) {
+          showToast('Verificando…', true);
+          const ok = await ensureSession();
+          if (!ok || !voteReady()) { showToast('No se pudo verificar, intenta de nuevo', true); return; }
+        }
+        const strange = deck.map((it) => it.cid).filter((c) => marked.has(c));
+        const good = deck.map((it) => it.cid).filter((c) => !marked.has(c));
+        reviewed++;
+        persistReviewed();
+        renderReviewed();                  // tick the personal chip up immediately (count + rank + progress)
+        if (window.e14BumpReviews) window.e14BumpReviews(1);  // and the community total in the app bar
+        // On a milestone, let the rank chip's unlock toast carry the moment; otherwise a plain thanks.
+        const r = rankFor(reviewed);
+        if (r && r.at > lastRankAt) { lastRankAt = r.at; celebrateRank(r); }
+        else { showToast(thanks()); }
+        sendBatch(strange, good);          // optimistic: don't block the next mesa on the response
+        board.innerHTML = skeleton();
+        bar.hidden = true;
+        loadDeck();
+      } finally { sending = false; }
     }
 
     sendBtn.addEventListener('click', submitDeck);

@@ -187,6 +187,28 @@ ADMIN_TOKEN = os.environ.get("E14_ADMIN_TOKEN", "")
 # visitor's session. Empty => not enforced (local dev / tests). A request with NO Origin (a
 # non-browser client) is left to the rate-limit / Turnstile controls, not blocked here.
 ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("E14_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# Header carrying the REAL client IP, set by the edge proxy (Fly sets ``Fly-Client-IP``;
+# behind Cloudflare use ``cf-connecting-ip``). The edge overwrites any client-supplied value,
+# so it cannot be forged — unlike ``X-Forwarded-For``, whose first hop is attacker-controlled.
+# The per-IP voter identity + rate limiter key on THIS, never on a raw XFF first entry.
+# Lowercased for case-insensitive header lookup.
+TRUSTED_IP_HEADER = os.environ.get("E14_TRUSTED_IP_HEADER", "fly-client-ip").strip().lower()
+# Minimum distinct voters before a crop/acta surfaces on the PUBLIC "most reported" billboard
+# / ranking. With IPv6 collapsed to a /64 in the voter identity, distinct voters ~= distinct
+# networks, so this is a cheap anti-manufacture floor (one attacker can't make a crop "hot"
+# alone). Default 1 = no floor (unchanged behaviour: a single report still surfaces). Set
+# E14_MIN_PROMOTE_VOTERS=3 (or 2) in production to require a small crowd before promotion. Does
+# NOT hide tallies on an acta a visitor opens directly.
+MIN_PROMOTE_VOTERS = int(os.environ.get("E14_MIN_PROMOTE_VOTERS", "1"))
+# Per-IP read limit for the deck/feed endpoints (in-process token bucket, separate from the
+# vote limiter) so a script can't drive unbounded cid_index writes / Aurora cost by hammering
+# /api/feed. Generous — real scrollers poll often. refill/min and burst capacity.
+FEED_RATE_REFILL_PER_MIN = float(os.environ.get("E14_FEED_RATE_REFILL_PER_MIN", "120"))
+FEED_RATE_BUCKET = float(os.environ.get("E14_FEED_RATE_BUCKET", "240"))
+# Votes charged per rate-token on the batch endpoint: a normal full-acta submit (~10-20 crops)
+# costs ~1 token; a giant batch is charged ceil(n / this). Keeps normal UX free while bounding
+# how much one identity can enqueue per submit.
+BATCH_VOTES_PER_TOKEN = int(os.environ.get("E14_BATCH_VOTES_PER_TOKEN", "20"))
 # Interactive API docs (/docs, /redoc, /openapi.json) publish the full route+schema surface.
 # Off by default (prod); set E14_EXPOSE_DOCS=1 for local exploration.
 EXPOSE_DOCS = os.environ.get("E14_EXPOSE_DOCS", "").lower() in ("1", "true", "yes")

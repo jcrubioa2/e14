@@ -732,3 +732,202 @@ def test_api_session_requires_turnstile_when_enabled(tmp_path: Path, monkeypatch
     monkeypatch.setattr(wa, "verify_turnstile", lambda *a, **k: True)
     r = asyncio.run(run(True))
     assert r.status_code == 200 and r.json()["form_token"]
+
+
+# --- Security hardening: trusted client IP, IPv6 bucketing, amplification, promotion floor ----
+
+def _fake_request(headers: dict | None = None, client=("203.0.113.7", 0)):
+    from starlette.requests import Request
+
+    hdrs = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    return Request({"type": "http", "headers": hdrs, "client": client})
+
+
+def test_client_ip_trusts_edge_header_not_spoofable_xff() -> None:
+    """The voter IP must come from the edge-set header (Fly-Client-IP), never the attacker-
+    controlled first X-Forwarded-For hop — that distinction is the whole anti-Sybil fix."""
+    from e14detector.webapp import _client_ip
+
+    # Trusted edge header wins even when the client forges an XFF first hop.
+    req = _fake_request({"fly-client-ip": "9.9.9.9", "x-forwarded-for": "1.2.3.4, 9.9.9.9"})
+    assert _client_ip(req) == "9.9.9.9"
+    # No trusted header -> fall back to the LAST xff hop (closest trusted proxy), not the first.
+    assert _client_ip(_fake_request({"x-forwarded-for": "1.2.3.4, 8.8.8.8"})) == "8.8.8.8"
+    # Nothing -> the socket peer.
+    assert _client_ip(_fake_request(client=("203.0.113.7", 0))) == "203.0.113.7"
+
+
+def test_voter_ip_collapses_ipv6_to_64() -> None:
+    """One IPv6 /64 allocation = one identity (else a single allocation mints billions)."""
+    from e14detector.webapp import _voter_ip
+
+    a = _voter_ip(_fake_request({"fly-client-ip": "2001:db8:abcd:1234::1"}))
+    b = _voter_ip(_fake_request({"fly-client-ip": "2001:db8:abcd:1234:ffff:ffff:ffff:ffff"}))
+    c = _voter_ip(_fake_request({"fly-client-ip": "2001:db8:abcd:9999::1"}))
+    assert a == b          # same /64 -> one identity
+    assert a != c          # different /64 -> different identity
+    assert _voter_ip(_fake_request({"fly-client-ip": "203.0.113.7"})) == "203.0.113.7"  # IPv4 as-is
+
+
+def _one_crop_db(tmp_path: Path, doc="doc-x", n=1):
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(
+        document_id=doc, source_path=f"{doc}.pdf",
+        department_name="VALLE", municipality_name="CALI", mesa="07"))
+    for i in range(n):
+        store.insert_vote_field(VoteField(
+            document_id=doc, page_number=1, row_type="candidate", row_number=i + 1,
+            candidate_name=f"C{i}", raw_crop_path=str(crop)))
+    store.commit()
+    store.close()
+    return output_dir, db
+
+
+def test_vote_identity_keys_on_trusted_ip_not_spoofed_xff(tmp_path: Path) -> None:
+    """Spoofing X-Forwarded-For can no longer mint new identities: many forged XFF values behind
+    one Fly-Client-IP collapse to ONE vote; a genuinely different Fly-Client-IP is a second."""
+    import dataclasses
+    from e14detector.community import CommunityStore, PollConfig, field_key_of
+
+    output_dir, db = _one_crop_db(tmp_path)
+    community_db = tmp_path / "community.sqlite"
+    cfg = dataclasses.replace(PollConfig.from_config(), form_token_secret="")
+    fk = field_key_of("doc-x", 1, 1, None)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db, poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            cid = (await client.get("/api/acta-deck", headers={"fly-client-ip": "10.0.0.1"})
+                   ).json()["items"][0]["cid"]
+            for xff in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):  # same edge IP, forged XFF each time
+                r = await client.post("/api/vote", json={"cid": cid, "value": "strange"},
+                                      headers={"fly-client-ip": "10.0.0.1", "x-forwarded-for": xff})
+                assert r.status_code == 200
+            r = await client.post("/api/vote", json={"cid": cid, "value": "strange"},
+                                  headers={"fly-client-ip": "10.0.0.2"})  # a real second identity
+            assert r.status_code == 200
+
+    asyncio.run(run())
+    cs = CommunityStore(community_db)
+    strange = cs.counts_among([fk])[fk]["strange"]
+    cs.close()
+    assert strange == 2  # 3 spoofed-XFF votes from 10.0.0.1 dedup to 1; +1 from 10.0.0.2
+
+
+def test_feed_endpoint_rate_limited_per_ip(tmp_path: Path, monkeypatch) -> None:
+    """/api/feed is throttled per IP so a script can't drive unbounded cid_index writes."""
+    from e14detector import config as _config, webapp as _wa
+
+    monkeypatch.setattr(_config, "FEED_RATE_BUCKET", 3.0)
+    monkeypatch.setattr(_config, "FEED_RATE_REFILL_PER_MIN", 1.0)  # ~0 refill during the test
+    _wa._feed_buckets.clear()
+    output_dir, db = _one_crop_db(tmp_path)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "c.sqlite")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            h = {"fly-client-ip": "198.51.100.5"}
+            codes = [(await client.get("/api/feed?n=1", headers=h)).status_code for _ in range(5)]
+            assert codes[:3] == [200, 200, 200] and 429 in codes[3:]
+
+    asyncio.run(run())
+
+
+def test_vote_batch_charges_rate_proportionally(tmp_path: Path, monkeypatch) -> None:
+    """A batch larger than the bucket allows is rejected (charged ceil(n/BATCH_VOTES_PER_TOKEN))."""
+    import dataclasses
+    from e14detector import config as _config
+    from e14detector.community import PollConfig
+
+    monkeypatch.setattr(_config, "BATCH_VOTES_PER_TOKEN", 1)
+    output_dir, db = _one_crop_db(tmp_path, n=5)
+    cfg = dataclasses.replace(PollConfig.from_config(), form_token_secret="",
+                              rate_bucket=2.0, rate_refill_per_min=0.0)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "c.sqlite", poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            cids = [it["cid"] for it in (await client.get(
+                "/api/acta-deck", headers={"fly-client-ip": "203.0.113.20"})).json()["items"]]
+            assert len(cids) == 5
+            r = await client.post("/api/vote-batch", json={"strange": [], "good": cids},
+                                  headers={"fly-client-ip": "203.0.113.20"})
+            assert r.status_code == 429 and r.json()["error"] == "rate_limited"
+
+    asyncio.run(run())
+
+
+def test_promotion_floor_hides_single_voter_actas(tmp_path: Path, monkeypatch) -> None:
+    """With MIN_PROMOTE_VOTERS=2 a single-reporter acta stays off the public billboard/reportes
+    until a second distinct voter flags it."""
+    from e14detector import config as _config
+    from e14detector.community import CommunityStore, field_key_of
+
+    monkeypatch.setattr(_config, "MIN_PROMOTE_VOTERS", 2)
+    output_dir, db = _one_crop_db(tmp_path, doc="doc-hot")
+    community_db = tmp_path / "community.sqlite"
+    fk = field_key_of("doc-hot", 1, 1, None)
+    cs = CommunityStore(community_db)
+    cs.record_flag(fk, "voter-1")  # only ONE distinct voter -> below the floor
+    cs.close()
+
+    async def reportes_html() -> tuple[str, list]:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/reportes")).text
+            bb = (await client.get("/api/billboard")).json()["items"]
+            return html, bb
+
+    html, bb = asyncio.run(reportes_html())
+    assert "/acta/doc-hot" not in html and bb == []
+
+    cs = CommunityStore(community_db)
+    cs.record_flag(fk, "voter-2")  # second distinct voter -> meets the floor
+    cs.close()
+    html2, _ = asyncio.run(reportes_html())
+    assert "/acta/doc-hot" in html2
+
+
+def test_vote_succeeds_with_session_token_when_turnstile_enabled(tmp_path: Path, monkeypatch) -> None:
+    """With Turnstile ON, a vote carrying the /api/session-minted form token must be ACCEPTED and
+    recorded. Turnstile gates the session (one solve -> form token); votes do NOT carry a per-vote
+    Turnstile token, so the handler must not re-verify one (doing so 403'd every vote)."""
+    import dataclasses
+    from e14detector import webapp as wa
+    from e14detector.community import CommunityStore, PollConfig, field_key_of
+
+    output_dir, db = _one_crop_db(tmp_path)
+    community_db = tmp_path / "community.sqlite"
+    cfg = dataclasses.replace(
+        PollConfig.from_config(), turnstile_enabled=True,
+        turnstile_sitekey="0xSITE", turnstile_secret="sekret", form_min_seconds=0.0)
+    # Realistic stub: a Turnstile token verifies only when one is actually present (so a stray
+    # per-vote check on a token-less vote would fail — exactly the bug this guards against).
+    monkeypatch.setattr(wa, "verify_turnstile", lambda secret, token, ip=None: bool(token))
+    fk = field_key_of("doc-x", 1, 1, None)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db, poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            h = {"fly-client-ip": "10.1.1.1"}
+            cid = (await client.get("/api/acta-deck", headers=h)).json()["items"][0]["cid"]
+            ft = (await client.post("/api/session", json={"turnstile_token": "x"}, headers=h)
+                  ).json()["form_token"]
+            assert ft
+            r = await client.post("/api/vote", json={"cid": cid, "value": "strange", "form_token": ft},
+                                  headers=h)  # carries the FORM token, no turnstile_token
+            assert r.status_code == 200 and r.json()["ok"] is True
+
+    asyncio.run(run())
+    cs = CommunityStore(community_db)
+    n = cs.counts_among([fk])[fk]["strange"]
+    cs.close()
+    assert n == 1  # the vote was actually recorded, not silently 403'd
