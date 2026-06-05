@@ -11,38 +11,49 @@ import sqlite3
 from pathlib import Path
 
 
-def _crop_key(raw: str) -> str:
-    """The ``crops/<file>`` object key for a stored crop path (mirrors webapp.crop_key, inlined
-    so this stays importable without pulling in FastAPI)."""
+def _crop_prefix(round: str | None = None) -> str:
+    """Round crop prefix (mirrors webapp.crop_prefix, inlined so this stays importable without
+    pulling in FastAPI). ``crops/`` for r1 (legacy), ``crops/<round>/`` otherwise."""
+    from . import config
+
+    r = (round or config.ELECTION_ROUND or "r1").strip().lower()
+    return "crops/" if r == "r1" else f"crops/{r}/"
+
+
+def _crop_key(raw: str, round: str | None = None) -> str:
+    """The round-scoped object key for a stored crop path (mirrors webapp.crop_key, inlined).
+    ``crops/<file>`` for r1; ``crops/<round>/<file>`` otherwise."""
     s = str(raw).replace("\\", "/")
     i = s.find("crops/")
-    return s[i:] if i != -1 else s.lstrip("/")
+    rel = s[i + len("crops/"):] if i != -1 else s.lstrip("/")
+    return _crop_prefix(round) + rel
 
 
-def served_crop_keys(served_db: Path) -> set[str]:
-    """Every candidate-crop object key referenced by the served DB."""
+def served_crop_keys(served_db: Path, round: str | None = None) -> set[str]:
+    """Every candidate-crop object key referenced by the served DB, scoped to ``round``."""
     con = sqlite3.connect(f"file:{Path(served_db).resolve()}?mode=ro", uri=True, timeout=60.0)
     try:
         rows = con.execute(
             "SELECT raw_crop_path FROM vote_fields "
             "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL")
-        return {_crop_key(r[0]) for r in rows}
+        return {_crop_key(r[0], round) for r in rows}
     finally:
         con.close()
 
 
-def audit_served_crops(output_dir: Path, *, bucket: str | None = None, client=None) -> list[str]:
+def audit_served_crops(output_dir: Path, *, bucket: str | None = None, client=None,
+                       round: str | None = None) -> list[str]:
     """Return a list of problem strings (empty == clean). Confirms every served candidate crop
     resolves to a real bucket object; any served key missing from the bucket is an orphan."""
     served_db = Path(output_dir) / "results" / "results.sqlite"
     if not served_db.exists():
         return ["auditoría de recortes: no hay DB servida local"]
-    served = served_crop_keys(served_db)
+    served = served_crop_keys(served_db, round)
     if not served:
         return []
     from .publish import list_bucket_crop_keys
 
-    bucket_keys = list_bucket_crop_keys(bucket=bucket, client=client)
+    bucket_keys = list_bucket_crop_keys(bucket=bucket, client=client, round=round)
     orphans = sorted(served - bucket_keys)
     if not orphans:
         return []

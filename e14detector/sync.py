@@ -58,21 +58,22 @@ def _served_count(output_dir: Path) -> int | None:
         return None
 
 
-def gather_reconciliation(output_dir: Path, *, cdn_base: str | None = None) -> tuple[dict, str]:
+def gather_reconciliation(output_dir: Path, *, cdn_base: str | None = None,
+                          round: str | None = None) -> tuple[dict, str]:
     """Return (reconciliation, source). Prefer the live published pointer (the single
     reconciliation record); fall back to computing it locally from the served DB + the
     universe snapshot when there is no pointer (fresh machine / offline)."""
-    from .dbsync import compute_reconciliation, pointer_status
+    from .dbsync import compute_reconciliation, pointer_key, pointer_status
 
     if cdn_base:
-        ptr = pointer_status(cdn_base)
+        ptr = pointer_status(cdn_base, round=round)
         recon = (ptr or {}).get("reconciliation")
         if recon:
-            return recon, "puntero publicado (db/latest.json)"
+            return recon, f"puntero publicado ({pointer_key(round)})"
     db = _served_db(output_dir)
     if db.exists():
         n = _served_count(output_dir) or 0
-        recon = compute_reconciliation(db, n_docs=n, output_dir=Path(output_dir))
+        recon = compute_reconciliation(db, n_docs=n, output_dir=Path(output_dir), round=round)
         return recon, "cálculo local (DB servida + universe_snapshot)"
     return {}, "sin datos"
 
@@ -154,23 +155,24 @@ def format_chain(recon: dict, source: str) -> str:
 
 # --- orchestrated actions (called by the CLI) ------------------------------
 
-def do_status(output_dir: Path, *, cdn_base: str | None) -> int:
-    recon, source = gather_reconciliation(output_dir, cdn_base=cdn_base)
+def do_status(output_dir: Path, *, cdn_base: str | None, round: str | None = None) -> int:
+    recon, source = gather_reconciliation(output_dir, cdn_base=cdn_base, round=round)
     print(format_chain(recon, source))
     return 0
 
 
 def do_verify(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
-              check_crops: bool = False, check_content: bool = False) -> int:
+              check_crops: bool = False, check_content: bool = False,
+              round: str | None = None) -> int:
     """Invariant-chain assertions (plus optional crop-existence / content-integrity, wired in
     P1.C/P1.D). Returns a nonzero exit code on any violation so it can gate a cron / pre-lock."""
     from .dbsync import pointer_status
 
-    recon, source = gather_reconciliation(output_dir, cdn_base=cdn_base)
+    recon, source = gather_reconciliation(output_dir, cdn_base=cdn_base, round=round)
     served = _served_count(output_dir)
     published = None
     if cdn_base:
-        ptr = pointer_status(cdn_base)
+        ptr = pointer_status(cdn_base, round=round)
         published = (ptr or {}).get("n_docs")
     rep = verify_chain(recon, served_count=served, published=published)
 
@@ -180,7 +182,7 @@ def do_verify(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
         except ImportError:
             rep.notes.append("verificación de recortes: módulo aún no disponible (P1.D)")
         else:
-            rep.problems.extend(audit_served_crops(output_dir, bucket=bucket))
+            rep.problems.extend(audit_served_crops(output_dir, bucket=bucket, round=round))
     if check_content:
         from .contentcheck import content_note
         note = content_note()
@@ -200,15 +202,16 @@ def do_verify(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
 
 
 def do_restore(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
-               prefix: str = "crops/") -> int:
+               prefix: str | None = None, round: str | None = None) -> int:
     """Resume on a fresh/crashed machine: rebuild the upload manifest from the bucket, then pull
-    and merge the published DB. Wraps ``reconcile_manifest`` + ``pull_db``."""
+    and merge the published DB. Wraps ``reconcile_manifest`` + ``pull_db``. Round-scoped: the
+    manifest is rebuilt from the round's crop prefix and the round's published pointer."""
     from .dbsync import pull_db
     from .publish import reconcile_manifest
 
-    info = reconcile_manifest(output_dir=Path(output_dir), bucket=bucket, prefix=prefix)
+    info = reconcile_manifest(output_dir=Path(output_dir), bucket=bucket, prefix=prefix, round=round)
     print(f"restore: bucket tenía {info['listed']} recorte(s); manifest {info['before']} -> {info['after']}")
-    pulled = pull_db(Path(output_dir), cdn_base=cdn_base, bucket=bucket)
+    pulled = pull_db(Path(output_dir), cdn_base=cdn_base, bucket=bucket, round=round)
     if pulled is None:
         print("restore: no hay puntero publicado aún (nada que fusionar)")
     else:
@@ -216,7 +219,8 @@ def do_restore(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
     return 0
 
 
-def do_stamp_pointer(output_dir: Path, *, bucket: str | None, cdn_base: str | None) -> int:
+def do_stamp_pointer(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
+                     round: str | None = None) -> int:
     """Safely add/refresh the reconciliation block on the LIVE pointer WITHOUT rebuilding the DB.
 
     For a frozen/locked round whose snapshot is unchanged: ``publish-db --force-pointer`` would
@@ -229,16 +233,17 @@ def do_stamp_pointer(output_dir: Path, *, bucket: str | None, cdn_base: str | No
     import tempfile
 
     from .dbsync import (
-        POINTER_KEY, _download_snapshot_file, _resolve_bucket, _s3_client,
-        compute_reconciliation, fetch_published_pointer,
+        _download_snapshot_file, _resolve_bucket, _s3_client,
+        compute_reconciliation, fetch_published_pointer, pointer_key,
     )
 
+    pk = pointer_key(round)
     bucket = _resolve_bucket(bucket)
     if not bucket:
         print("stamp-pointer: no bucket (set BUCKET_NAME or pass --bucket)")
         return 1
     client = _s3_client()
-    pointer = fetch_published_pointer(bucket=bucket, client=client)
+    pointer = fetch_published_pointer(bucket=bucket, client=client, round=round)
     if pointer is None:
         print("stamp-pointer: no hay puntero publicado")
         return 1
@@ -247,24 +252,26 @@ def do_stamp_pointer(output_dir: Path, *, bucket: str | None, cdn_base: str | No
         snap = Path(td) / "live.sqlite"
         _download_snapshot_file(pointer, snap, cdn_base=cdn_base or None, bucket=bucket,
                                 client=client, timeout=600)
-        recon = compute_reconciliation(snap, n_docs=int(n_docs or 0), output_dir=Path(output_dir))
+        recon = compute_reconciliation(snap, n_docs=int(n_docs or 0), output_dir=Path(output_dir),
+                                       round=round)
     pointer["reconciliation"] = recon
     pointer["ts"] = int(time.time())
-    client.put_object(Bucket=bucket, Key=POINTER_KEY,
+    client.put_object(Bucket=bucket, Key=pk,
                       Body=json.dumps(pointer).encode(),
                       ContentType="application/json", CacheControl="no-store, max-age=0")
-    print(f"stamp-pointer: reconciliación estampada en {POINTER_KEY} "
+    print(f"stamp-pointer: reconciliación estampada en {pk} "
           f"(n_docs preservado={n_docs}, total_global={recon.get('total_global', '—')}, "
           f"informadas={recon.get('mesas_informadas', '—')}, "
           f"ingesta={recon.get('backlog_ingesta', '—')}, reporte={recon.get('backlog_reporte', '—')})")
     return 0
 
 
-def do_backup(output_dir: Path, *, dest: Path, bucket: str | None, cdn_base: str | None) -> int:
+def do_backup(output_dir: Path, *, dest: Path, bucket: str | None, cdn_base: str | None,
+              round: str | None = None) -> int:
     """Write one off-Tigris DR copy of the live published snapshot (R1 is the permanent record)."""
     from .dbsync import backup_published_db
 
-    info = backup_published_db(Path(dest), cdn_base=cdn_base, bucket=bucket)
+    info = backup_published_db(Path(dest), cdn_base=cdn_base, bucket=bucket, round=round)
     if info is None:
         print("backup: no hay puntero publicado (nada que respaldar)")
         return 1
@@ -276,7 +283,7 @@ def do_run(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
            refresh_universe: bool = True, workers: int = 32, upload_limit: int | None = 12000,
            interval: int = 60, db_interval: int = 300, once: bool = False,
            department: str | None = None, allow_locked: bool = False,
-           allow_shrink: bool = False) -> int:
+           allow_shrink: bool = False, round: str | None = None) -> int:
     """The one safe publisher loop, with the consistency rules baked in.
 
     Each cycle: (optionally) refresh the universe snapshot so the chain denominator stays honest,
@@ -294,8 +301,10 @@ def do_run(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
             import os as _os
 
             from e14.universe import (
-                fetch_universe_counts, load_universe_snapshot, write_universe_snapshot,
+                fetch_universe_counts, load_universe_snapshot, snapshot_path,
+                write_universe_snapshot,
             )
+            uni_path = snapshot_path(round)
             recs, _nodes = fetch_universe_counts()
             # total_global (installed mesas) is from the bot-protected results portal, so it can't
             # be scraped here: take $E14_TOTAL_GLOBAL, else carry forward the last snapshot's value.
@@ -304,10 +313,10 @@ def do_run(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
             if _os.environ.get("E14_TOTAL_GLOBAL", "").isdigit():
                 tg, src = int(_os.environ["E14_TOTAL_GLOBAL"]), "$E14_TOTAL_GLOBAL"
             else:
-                prev = load_universe_snapshot()
+                prev = load_universe_snapshot(uni_path)
                 if prev and prev.get("total_global"):
                     tg, src = int(prev["total_global"]), (prev.get("total_global_source") or "heredado")
-            snap = write_universe_snapshot(recs, total_global=tg, total_global_source=src)
+            snap = write_universe_snapshot(recs, uni_path, total_global=tg, total_global_source=src)
             tg_txt = f"{snap['total_global']:,}" if snap["total_global"] is not None else "—"
             print(f"[sync] universo: total_global={tg_txt} informadas={snap['mesas_informadas']:,}",
                   flush=True)
@@ -326,7 +335,7 @@ def do_run(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
 
             # Lock-aware: don't even upload over a locked round unless told to.
             if not allow_locked:
-                lock = read_db_lock(bucket=bucket)
+                lock = read_db_lock(bucket=bucket, round=round)
                 if lock.get("locked"):
                     print(f"[sync] ronda BLOQUEADA{(' (' + lock['reason'] + ')') if lock.get('reason') else ''}"
                           f" — sin publicar. Usa --allow-locked para forzar.", flush=True)
@@ -336,11 +345,12 @@ def do_run(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
                     continue
 
             crops = publish_crops(output_dir, bucket=bucket, workers=workers,
-                                  limit=upload_limit, department=department, verbose=False)
+                                  limit=upload_limit, department=department, round=round, verbose=False)
             db_note = "db no toca"
             if once or (time.time() - last_db) >= db_interval:
                 info = publish_db(output_dir, bucket=bucket, only_uploaded=True,
-                                  allow_locked=allow_locked, allow_shrink=allow_shrink, verbose=False)
+                                  allow_locked=allow_locked, allow_shrink=allow_shrink,
+                                  round=round, verbose=False)
                 if info is None:
                     db_note = "frontera vacía"
                 elif info.get("locked"):
@@ -362,4 +372,4 @@ def do_run(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
         time.sleep(interval)
 
     # verify-before-lock: a one-shot run ends by re-checking the invariant chain.
-    return do_verify(output_dir, bucket=bucket, cdn_base=cdn_base)
+    return do_verify(output_dir, bucket=bucket, cdn_base=cdn_base, round=round)

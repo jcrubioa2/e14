@@ -27,14 +27,50 @@ import time
 import urllib.request
 from pathlib import Path
 
+from . import config
+
 DB_PREFIX = "db"
-POINTER_KEY = f"{DB_PREFIX}/latest.json"
-# Publish lock: a small bucket object that, when present and locked, makes every
-# (current-code) publisher refuse to flip the live pointer. Set it once the served DB is
-# "done" (e.g. 100% of actas) so a stray publish-loop or a partial run can't overwrite it;
-# only an admin toggle (or E14_DB_ALLOW_LOCKED=1) lifts it. The bucket is the shared source
-# of truth, so the lock holds across machines.
-LOCK_KEY = f"{DB_PREFIX}/lock.json"
+
+
+def _round_prefix(round: str | None = None) -> str:
+    """Bucket-key sub-prefix for a round, under ``DB_PREFIX``.
+
+    ``r1`` (the default) returns ``""`` so the live first-round data keeps its LEGACY
+    un-prefixed keys (``db/latest.json`` etc.) and never has to move; any other round nests
+    under ``{round}/`` (``db/r2/latest.json``). One special-case helper threaded everywhere,
+    so R1 stays byte-identical while R2 is fully isolated in the same bucket.
+    """
+    r = (round or config.ELECTION_ROUND or "r1").strip().lower()
+    return "" if r == "r1" else f"{r}/"
+
+
+def pointer_key(round: str | None = None) -> str:
+    """``db/latest.json`` (r1) or ``db/<round>/latest.json`` — the live snapshot pointer."""
+    return f"{DB_PREFIX}/{_round_prefix(round)}latest.json"
+
+
+def lock_key(round: str | None = None) -> str:
+    """``db/lock.json`` (r1) or ``db/<round>/lock.json`` — the publish lock object.
+
+    Publish lock: a small bucket object that, when present and locked, makes every
+    (current-code) publisher refuse to flip the live pointer. Set it once the served DB is
+    "done" (e.g. 100% of actas) so a stray publish-loop or a partial run can't overwrite it;
+    only an admin toggle (or E14_DB_ALLOW_LOCKED=1) lifts it. The bucket is the shared source
+    of truth, so the lock holds across machines. Per-round, so freezing R1 never blocks R2.
+    """
+    return f"{DB_PREFIX}/{_round_prefix(round)}lock.json"
+
+
+def snapshot_key(digest: str, round: str | None = None) -> str:
+    """Content-addressed, immutable snapshot object key for ``digest`` in ``round``."""
+    return f"{DB_PREFIX}/{_round_prefix(round)}results-{digest[:16]}.sqlite.gz"
+
+
+# Legacy module constants == the r1 (first-round) keys. Kept as aliases so importers/tests that
+# predate round-scoping keep meaning "the live first-round keys" (R1 byte-identical). New code
+# calls the helpers above with an explicit round.
+POINTER_KEY = pointer_key("r1")
+LOCK_KEY = lock_key("r1")
 
 
 def _sha256(path: Path) -> str:
@@ -158,7 +194,7 @@ def _s3_client():
     return boto3.client("s3", endpoint_url=endpoint)
 
 
-def _prune_to_uploaded(work_db: Path, uploaded: set[str]) -> tuple[int, int]:
+def _prune_to_uploaded(work_db: Path, uploaded: set[str], round: str | None = None) -> tuple[int, int]:
     """Drop documents whose candidate crops aren't all uploaded yet (the safe frontier).
 
     Returns (kept_documents, dropped_documents). Lets the publisher run continuously
@@ -176,7 +212,7 @@ def _prune_to_uploaded(work_db: Path, uploaded: set[str]) -> tuple[int, int]:
             "SELECT document_id, raw_crop_path FROM vote_fields "
             "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL"
         ):
-            by_doc[r["document_id"]].append(crop_key(r["raw_crop_path"]))
+            by_doc[r["document_id"]].append(crop_key(r["raw_crop_path"], round))
         incomplete = [d for d, keys in by_doc.items() if any(k not in uploaded for k in keys)]
         kept = len(by_doc) - len(incomplete)
         if incomplete:
@@ -254,6 +290,7 @@ def compute_reconciliation(
     universe_path: Path | None = None,
     manifest_db: Path | None = None,
     missing_sample: int = 50,
+    round: str | None = None,
 ) -> dict:
     """Build the count-model reconciliation block stamped into the pointer.
 
@@ -268,9 +305,9 @@ def compute_reconciliation(
     # External truth (the count model's E1/E2) from the universe snapshot.
     snap = None
     try:
-        from e14.universe import SNAPSHOT_PATH, load_universe_snapshot
+        from e14.universe import load_universe_snapshot, snapshot_path
 
-        snap = load_universe_snapshot(universe_path or SNAPSHOT_PATH)
+        snap = load_universe_snapshot(universe_path or snapshot_path(round))
     except Exception:  # noqa: BLE001 — snapshot optional; absence just leaves the rows blank
         snap = None
     if snap:
@@ -318,7 +355,7 @@ def compute_reconciliation(
     return rec
 
 
-def read_db_lock(*, client=None, bucket: str | None = None) -> dict:
+def read_db_lock(*, client=None, bucket: str | None = None, round: str | None = None) -> dict:
     """Return the publish lock object (``{"locked": bool, ...}``). Best-effort: a missing
     object or any read error reads as unlocked so a flaky bucket never blocks publishing."""
     bucket = _resolve_bucket(bucket)
@@ -327,14 +364,14 @@ def read_db_lock(*, client=None, bucket: str | None = None) -> dict:
     if client is None:
         client = _s3_client()
     try:
-        d = json.loads(client.get_object(Bucket=bucket, Key=LOCK_KEY)["Body"].read())
+        d = json.loads(client.get_object(Bucket=bucket, Key=lock_key(round))["Body"].read())
         return d if isinstance(d, dict) else {"locked": False}
     except Exception:
         return {"locked": False}
 
 
 def set_db_lock(locked: bool, *, reason: str = "", n_docs: int | None = None, by: str = "",
-                client=None, bucket: str | None = None) -> dict:
+                client=None, bucket: str | None = None, round: str | None = None) -> dict:
     """Write the publish lock object. ``locked=False`` records an explicit unlock (kept, not
     deleted, so the admin board can show who/when). Returns the stored body."""
     bucket = _resolve_bucket(bucket)
@@ -345,7 +382,7 @@ def set_db_lock(locked: bool, *, reason: str = "", n_docs: int | None = None, by
     body = {"locked": bool(locked), "reason": reason, "n_docs": n_docs,
             "by": by, "ts": int(time.time())}
     client.put_object(
-        Bucket=bucket, Key=LOCK_KEY, Body=json.dumps(body).encode(),
+        Bucket=bucket, Key=lock_key(round), Body=json.dumps(body).encode(),
         ContentType="application/json", CacheControl="no-store, max-age=0",
     )
     return body
@@ -361,6 +398,7 @@ def publish_db(
     allow_shrink: bool = False,
     allow_locked: bool = False,
     force_pointer: bool = False,
+    round: str | None = None,
     verbose: bool = True,
 ) -> dict | None:
     """Snapshot the local results DB and publish it + the pointer to the bucket.
@@ -394,12 +432,14 @@ def publish_db(
         raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
     if client is None:
         client = _s3_client()
+    round = round or config.ELECTION_ROUND
+    pointer_k = pointer_key(round)
 
     # Publish lock: once the served DB is marked done, refuse to overwrite it. Checked first
     # (before any pull/merge or the expensive slim build) so a locked publisher exits fast.
     # Admin toggle / allow_locked / E14_DB_ALLOW_LOCKED=1 override.
     if not allow_locked and os.environ.get("E14_DB_ALLOW_LOCKED", "").lower() not in ("1", "true", "yes"):
-        lock = read_db_lock(client=client, bucket=bucket)
+        lock = read_db_lock(client=client, bucket=bucket, round=round)
         if lock.get("locked"):
             msg = (f"publish-db: REFUSING — the live DB is LOCKED"
                    f"{' (' + lock['reason'] + ')' if lock.get('reason') else ''}. "
@@ -413,7 +453,7 @@ def publish_db(
     # partial DB get published, so when it IS enabled a failure aborts the publish (no
     # swallowing) rather than shipping a possibly-incomplete snapshot.
     if os.environ.get("E14_DB_MERGE_BEFORE_PUBLISH", "").lower() in ("1", "true", "yes"):
-        pull_db(output_dir, bucket=bucket, client=client, verbose=verbose)
+        pull_db(output_dir, bucket=bucket, client=client, round=round, verbose=verbose)
 
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "snapshot.sqlite"
@@ -423,7 +463,7 @@ def publish_db(
         if only_uploaded:
             manifest = Path(manifest) if manifest else Path(output_dir) / "review" / "uploaded_crops.txt"
             uploaded = set(manifest.read_text(encoding="utf-8").split()) if manifest.exists() else set()
-            kept, dropped = _prune_to_uploaded(snap, uploaded)
+            kept, dropped = _prune_to_uploaded(snap, uploaded, round)
             if verbose:
                 print(f"publish-db: frontier = {kept} fully-uploaded acta(s), {dropped} held back", flush=True)
             if kept == 0:
@@ -447,12 +487,12 @@ def publish_db(
         # here so every return path — published, re-stamped, skipped — carries the same record.
         recon = compute_reconciliation(
             snap, n_docs=n_docs, output_dir=Path(output_dir),
-            kept=(kept if only_uploaded else None), manifest_db=None,
+            kept=(kept if only_uploaded else None), manifest_db=None, round=round,
         )
-        key = f"{DB_PREFIX}/results-{digest[:16]}.sqlite.gz"
+        key = snapshot_key(digest, round)
         # Inspect the currently-published pointer for the unchanged-skip and shrink guard.
         try:
-            cur = json.loads(client.get_object(Bucket=bucket, Key=POINTER_KEY)["Body"].read())
+            cur = json.loads(client.get_object(Bucket=bucket, Key=pointer_k)["Body"].read())
         except Exception:
             cur = None  # no pointer yet, or client without get_object — just publish
         if cur is not None:
@@ -471,7 +511,7 @@ def publish_db(
                     "n_docs": n_docs, "n_browsable": n_browsable,
                     "reconciliation": recon, "ts": int(time.time())})
                 client.put_object(
-                    Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
+                    Bucket=bucket, Key=pointer_k, Body=pointer.encode(),
                     ContentType="application/json", CacheControl="no-store, max-age=0")
                 if verbose:
                     print("publish-db: unchanged DB — re-stamped pointer with fresh "
@@ -527,7 +567,7 @@ def publish_db(
                               "n_browsable": n_browsable, "reconciliation": recon,
                               "ts": int(time.time())})
         client.put_object(
-            Bucket=bucket, Key=POINTER_KEY, Body=pointer.encode(),
+            Bucket=bucket, Key=pointer_k, Body=pointer.encode(),
             ContentType="application/json", CacheControl="no-store, max-age=0",
         )
     return {"key": key, "sha256": digest, "size": gz_size, "n_docs": n_docs,
@@ -674,11 +714,14 @@ def fetch_published_pointer(
     bucket: str | None = None,
     client=None,
     timeout: float = 30.0,
+    round: str | None = None,
 ) -> dict | None:
-    """Return the live ``db/latest.json`` object, or None if unpublished / unreachable."""
+    """Return the live pointer object for ``round`` (``db/latest.json`` for r1), or None if
+    unpublished / unreachable."""
+    pk = pointer_key(round)
     if cdn_base:
-        sep = "&" if "?" in POINTER_KEY else "?"
-        url = f"{cdn_base.rstrip('/')}/{POINTER_KEY}"
+        sep = "&" if "?" in pk else "?"
+        url = f"{cdn_base.rstrip('/')}/{pk}"
         if url.startswith("http"):
             url += f"{sep}t={int(time.time())}"
         try:
@@ -691,7 +734,7 @@ def fetch_published_pointer(
     if client is None:
         client = _s3_client()
     try:
-        return json.loads(client.get_object(Bucket=bucket, Key=POINTER_KEY)["Body"].read())
+        return json.loads(client.get_object(Bucket=bucket, Key=pk)["Body"].read())
     except Exception:
         return None
 
@@ -703,6 +746,7 @@ def backup_published_db(
     bucket: str | None = None,
     client=None,
     timeout: float = 300.0,
+    round: str | None = None,
 ) -> dict | None:
     """Download the live published snapshot to ``dest_dir`` as a DR copy *outside* the bucket.
 
@@ -711,7 +755,8 @@ def backup_published_db(
     an operator can park on another provider / external drive. Returns ``{path, sha256, n_docs}``
     or None when nothing is published yet. The sha is verified on download (raises on mismatch).
     """
-    pointer = fetch_published_pointer(cdn_base=cdn_base or None, bucket=bucket, client=client, timeout=timeout)
+    pointer = fetch_published_pointer(cdn_base=cdn_base or None, bucket=bucket, client=client,
+                                      timeout=timeout, round=round)
     if pointer is None:
         return None
     dest_dir = Path(dest_dir)
@@ -730,6 +775,7 @@ def pull_db(
     bucket: str | None = None,
     client=None,
     timeout: float = 120.0,
+    round: str | None = None,
     verbose: bool = True,
 ) -> dict | None:
     """Download the live published DB and merge it into the local results DB."""
@@ -740,7 +786,8 @@ def pull_db(
 
         DetectorStore(local, None).close()
     cdn_base = cdn_base or os.environ.get("E14_CDN_BASE_URL") or ""
-    pointer = fetch_published_pointer(cdn_base=cdn_base or None, bucket=bucket, client=client, timeout=timeout)
+    pointer = fetch_published_pointer(cdn_base=cdn_base or None, bucket=bucket, client=client,
+                                      timeout=timeout, round=round)
     if pointer is None:
         if verbose:
             print("pull-db: no published pointer (nothing to merge yet)", flush=True)
@@ -757,7 +804,7 @@ def pull_db(
 
 # --- pointer status (reader-side, stdlib) ----------------------------------
 
-def pointer_status(cdn_base: str, *, timeout: float = 10.0) -> dict | None:
+def pointer_status(cdn_base: str, *, timeout: float = 10.0, round: str | None = None) -> dict | None:
     """Fetch the published pointer and return freshness/size info for operator dashboards.
 
     Stdlib-only (no boto3), safe to call from the serve image. Returns None on any failure
@@ -765,8 +812,9 @@ def pointer_status(cdn_base: str, *, timeout: float = 10.0) -> dict | None:
     """
     try:
         base = cdn_base.rstrip("/")
-        sep = "&" if "?" in POINTER_KEY else "?"
-        url = f"{base}/{POINTER_KEY}"
+        pk = pointer_key(round)
+        sep = "&" if "?" in pk else "?"
+        url = f"{base}/{pk}"
         if base.startswith("http"):
             url += f"{sep}t={int(time.time())}"
         p = json.loads(_fetch(url, timeout))
@@ -800,12 +848,13 @@ def _fetch(url: str, timeout: float) -> bytes:
         return resp.read()
 
 
-def _read_lock_via_cdn(base: str, timeout: float) -> dict:
-    """Stdlib read of ``db/lock.json`` through the public CDN (the reader image has no boto3).
-    Best-effort: any failure returns ``{}`` (treated as unlocked) so a flaky read never freezes
-    legitimate updates."""
-    sep = "&" if "?" in LOCK_KEY else "?"
-    url = f"{base}/{LOCK_KEY}"
+def _read_lock_via_cdn(base: str, timeout: float, round: str | None = None) -> dict:
+    """Stdlib read of the round's ``lock.json`` through the public CDN (the reader image has no
+    boto3). Best-effort: any failure returns ``{}`` (treated as unlocked) so a flaky read never
+    freezes legitimate updates."""
+    lk = lock_key(round)
+    sep = "&" if "?" in lk else "?"
+    url = f"{base}/{lk}"
     if base.startswith("http"):
         url += f"{sep}t={int(time.time())}"
     try:
@@ -815,7 +864,8 @@ def _read_lock_via_cdn(base: str, timeout: float) -> dict:
         return {}
 
 
-def refresh_db_once(cdn_base: str, dest_db: Path, *, timeout: float = 60.0) -> str | None:
+def refresh_db_once(cdn_base: str, dest_db: Path, *, timeout: float = 60.0,
+                    round: str | None = None) -> str | None:
     """Pull a newer snapshot if the pointer changed; atomic-swap it in.
 
     Returns the new sha256 if it installed one, else None. Raises only on unexpected I/O
@@ -831,8 +881,9 @@ def refresh_db_once(cdn_base: str, dest_db: Path, *, timeout: float = 60.0) -> s
     """
     base = cdn_base.rstrip("/")
     dest_db = Path(dest_db)
-    sep = "&" if "?" in POINTER_KEY else "?"
-    pointer_url = f"{base}/{POINTER_KEY}"
+    pk = pointer_key(round)
+    sep = "&" if "?" in pk else "?"
+    pointer_url = f"{base}/{pk}"
     if base.startswith("http"):
         pointer_url += f"{sep}t={int(time.time())}"  # cache-bust the pointer (http only)
     pointer = json.loads(_fetch(pointer_url, timeout))
@@ -843,7 +894,7 @@ def refresh_db_once(cdn_base: str, dest_db: Path, *, timeout: float = 60.0) -> s
         return None  # already serving this snapshot
 
     # Lock guard: never let a locked round regress to a smaller/unknown-size published DB.
-    lock = _read_lock_via_cdn(base, timeout)
+    lock = _read_lock_via_cdn(base, timeout, round)
     if lock.get("locked") and dest_db.exists():
         locked_n = lock.get("n_docs")
         new_n = pointer.get("n_docs")

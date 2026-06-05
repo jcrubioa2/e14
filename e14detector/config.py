@@ -59,6 +59,14 @@ SITE_URL = os.environ.get("E14_SITE_URL", "https://veeduria-ciudadana-elecciones
 # ~1.58M files). Unset (the pilot) keeps the baked-in crops served via /crop.
 CDN_BASE_URL = os.environ.get("E14_CDN_BASE_URL", "").rstrip("/")
 
+# Active election round. Names the round this process serves/publishes/crops end-to-end so
+# R1 (first round) and R2 (runoff) never collide on bucket keys, layout geometry, or the vote
+# backend. Default "r1" maps to the LEGACY un-prefixed keys (db/latest.json, crops/<file>) so
+# the live R1 data never moves; any other round (e.g. "r2") nests under a {round}/ prefix
+# (db/r2/latest.json, crops/r2/<file>). One round per process/machine — never both on one box
+# (avoids stacking ~730MB×2 of SQLite in RAM). See e14detector/dbsync.py round-key helpers.
+ELECTION_ROUND = os.environ.get("E14_ELECTION_ROUND", "r1").strip().lower() or "r1"
+
 DEFAULT_DPI = 300
 DEFAULT_WORKERS = 4
 DEFAULT_VLM_MODE = "off"

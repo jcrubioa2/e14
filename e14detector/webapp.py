@@ -381,26 +381,43 @@ def _puestos(
     ).fetchall()
 
 
-def crop_key(raw_crop_path: str) -> str:
-    """Object-store key for a crop: the ``crops/<file>`` suffix of its stored path.
+def crop_prefix(round: str | None = None) -> str:
+    """Bucket-key prefix for crops in a round. ``r1`` (default) keeps the LEGACY ``crops/``
+    prefix so first-round object keys never move; any other round nests under ``crops/<round>/``.
+    Mirrors the ``db/`` round-prefix scheme in ``dbsync._round_prefix``."""
+    r = (round or config.ELECTION_ROUND or "r1").strip().lower()
+    return "crops/" if r == "r1" else f"crops/{r}/"
 
-    All candidate crops live under ``<output_dir>/crops/``, so keying on that suffix
-    lets the uploader and the page agree regardless of whether the stored path is
-    absolute or relative.
+
+def crop_rel(raw_crop_path: str) -> str:
+    """The round-agnostic file part after the local ``crops/`` segment of a stored path.
+
+    The local file always lives at ``<output_dir>/crops/<rel>`` regardless of round (one round
+    per machine, so no on-disk collision); only the bucket object key is round-scoped.
     """
     s = str(raw_crop_path).replace("\\", "/")
     idx = s.find("crops/")
-    return s[idx:] if idx != -1 else s.lstrip("/")
+    return s[idx + len("crops/"):] if idx != -1 else s.lstrip("/")
 
 
-def crop_cdn_url(raw_crop_path: str, cdn_base: str) -> str | None:
+def crop_key(raw_crop_path: str, round: str | None = None) -> str:
+    """Object-store key for a crop. ``r1`` keeps the legacy ``crops/<file>`` key (byte-identical
+    to before round-scoping); any other round nests under ``crops/<round>/<file>``.
+
+    The manifest key == bucket object key == the CDN URL path, so this single function carries
+    crops, the upload cache, the publish frontier (``_prune_to_uploaded``), and CDN URLs together.
+    """
+    return crop_prefix(round) + crop_rel(raw_crop_path)
+
+
+def crop_cdn_url(raw_crop_path: str, cdn_base: str, round: str | None = None) -> str | None:
     """Public URL for a crop on the CDN, or None when no CDN is configured.
 
     None => caller falls back to the in-app /crop endpoint.
     """
     if not cdn_base:
         return None
-    return f"{cdn_base}/{crop_key(raw_crop_path)}"
+    return f"{cdn_base}/{crop_key(raw_crop_path, round)}"
 
 
 def resolve_crop_path(path: str, output_dir: Path) -> Path:

@@ -34,6 +34,15 @@ RESULTS_SUMMARY_URL = "https://resultados.registraduria.gov.co/json/ACT/PR/00.js
 SNAPSHOT_PATH = Path("data") / "universe_snapshot.json"
 
 
+def snapshot_path(round: str | None = None) -> Path:
+    """Per-round local universe-snapshot path. ``r1`` (default) keeps the LEGACY
+    ``data/universe_snapshot.json`` so first-round data never moves; any other round nests under
+    ``data/<round>/universe_snapshot.json``. Mirrors the bucket round-prefix scheme so one round
+    per machine never reads the other's denominator."""
+    r = (round or config.ELECTION_ROUND or "r1").strip().lower()
+    return SNAPSHOT_PATH if r == "r1" else Path("data") / r / "universe_snapshot.json"
+
+
 class UniverseShrinkError(RuntimeError):
     """A freshly-fetched universe is drastically smaller than the last accepted one.
 
@@ -174,9 +183,10 @@ def fetch_results_summary(timeout: float = 30.0) -> dict | None:
     }
 
 
-def load_universe_snapshot(path: Path = SNAPSHOT_PATH) -> dict | None:
-    """Return the last accepted universe snapshot dict, or None if absent/unreadable."""
-    path = Path(path)
+def load_universe_snapshot(path: Path | None = None) -> dict | None:
+    """Return the last accepted universe snapshot dict, or None if absent/unreadable.
+    With no ``path`` it reads the active round's snapshot (see ``snapshot_path``)."""
+    path = Path(path) if path is not None else snapshot_path()
     if not path.exists():
         return None
     try:
@@ -188,7 +198,7 @@ def load_universe_snapshot(path: Path = SNAPSHOT_PATH) -> dict | None:
 
 def write_universe_snapshot(
     records: list[ActaRecord],
-    path: Path = SNAPSHOT_PATH,
+    path: Path | None = None,
     *,
     total_global: int | None = None,
     total_global_source: str | None = None,
@@ -206,7 +216,7 @@ def write_universe_snapshot(
     the ingest backlog. Raises ``UniverseShrinkError`` if informadas (or a supplied total_global)
     collapses below ``shrink_factor`` of the last accepted snapshot, unless ``allow_shrink``.
     """
-    path = Path(path)
+    path = Path(path) if path is not None else snapshot_path()
     mesas_informadas = len(records)
     prev = load_universe_snapshot(path)
     if prev and not allow_shrink:

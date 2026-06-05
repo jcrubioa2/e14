@@ -133,20 +133,28 @@ def _sync_out(args) -> Path:
     return Path(getattr(args, "output_dir", None) or "data/detector")
 
 
+def _sync_round(args) -> str | None:
+    """The active round for a sync command: an explicit --round wins, else None so the sync
+    layer falls back to config.ELECTION_ROUND (env E14_ELECTION_ROUND, default r1)."""
+    return getattr(args, "round", None)
+
+
 def cmd_sync_status(args) -> int:
     from e14detector.sync import do_status
-    return do_status(_sync_out(args), cdn_base=args.cdn_base)
+    return do_status(_sync_out(args), cdn_base=args.cdn_base, round=_sync_round(args))
 
 
 def cmd_sync_verify(args) -> int:
     from e14detector.sync import do_verify
     return do_verify(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
-                     check_crops=args.check_crops, check_content=args.check_content)
+                     check_crops=args.check_crops, check_content=args.check_content,
+                     round=_sync_round(args))
 
 
 def cmd_sync_restore(args) -> int:
     from e14detector.sync import do_restore
-    return do_restore(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base, prefix=args.prefix)
+    return do_restore(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+                      prefix=args.prefix, round=_sync_round(args))
 
 
 def cmd_sync_run(args) -> int:
@@ -156,18 +164,20 @@ def cmd_sync_run(args) -> int:
         refresh_universe=not args.no_universe, workers=args.workers,
         upload_limit=args.upload_limit, interval=args.interval, db_interval=args.db_interval,
         once=args.once, department=args.department, allow_locked=args.allow_locked,
-        allow_shrink=args.allow_shrink,
+        allow_shrink=args.allow_shrink, round=_sync_round(args),
     )
 
 
 def cmd_sync_backup(args) -> int:
     from e14detector.sync import do_backup
-    return do_backup(_sync_out(args), dest=Path(args.dest), bucket=args.bucket, cdn_base=args.cdn_base)
+    return do_backup(_sync_out(args), dest=Path(args.dest), bucket=args.bucket,
+                     cdn_base=args.cdn_base, round=_sync_round(args))
 
 
 def cmd_sync_stamp_pointer(args) -> int:
     from e14detector.sync import do_stamp_pointer
-    return do_stamp_pointer(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base)
+    return do_stamp_pointer(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+                            round=_sync_round(args))
 
 
 def cmd_sync_fleet(args) -> int:
@@ -475,6 +485,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--bucket", help="object-store bucket (default: $BUCKET_NAME)")
         p.add_argument("--cdn-base", default=os.environ.get("E14_CDN_BASE_URL", "") or None,
                        help="published CDN base URL (default: $E14_CDN_BASE_URL)")
+        p.add_argument("--round", default=None,
+                       help="election round to operate on, e.g. r1|r2 (default: "
+                            "$E14_ELECTION_ROUND, then r1). r1 uses the legacy un-prefixed "
+                            "bucket keys; r2 nests under db/r2/ + crops/r2/")
 
     sp = sync_sub.add_parser("status", help="print the count chain + cobertura + backlogs")
     _sync_common(sp)
@@ -490,7 +504,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sync_sub.add_parser("restore", help="resume on a fresh machine (reconcile manifest + pull DB)")
     _sync_common(sp)
-    sp.add_argument("--prefix", default="crops/", help="object key prefix to list")
+    sp.add_argument("--prefix", default=None,
+                    help="object key prefix to list (default: the round's crop prefix — "
+                         "crops/ for r1, crops/<round>/ otherwise)")
     sp.set_defaults(func=cmd_sync_restore)
 
     sp = sync_sub.add_parser("run", help="the one safe publisher loop (universe + crops + frontier DB)")

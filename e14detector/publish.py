@@ -16,7 +16,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from .storage import DetectorStore
-from .webapp import crop_key
+from .webapp import crop_key, crop_prefix, crop_rel
 
 
 def _results_db(output_dir: Path) -> Path:
@@ -28,12 +28,17 @@ def crop_upload_plan(
     skip_keys: set[str] | None = None,
     *,
     department: str | None = None,
+    round: str | None = None,
 ) -> list[tuple[Path, str]]:
     """(local_path, object_key) for candidate crops that need uploading.
 
     ``skip_keys`` (already-uploaded keys) are skipped BEFORE touching the filesystem, so
     enumeration is O(new crops) not O(all crops) — critical once the manifest is large.
     With ``department``, only crops for that department code or name are considered.
+
+    The object key is round-scoped (``crops/<file>`` for r1, ``crops/<round>/<file>`` otherwise),
+    but the local source file always lives under ``<output_dir>/crops/<rel>`` regardless of round
+    (one round per machine), so local-file resolution uses the round-agnostic ``crop_rel``.
     """
     skip_keys = skip_keys or set()
     store = DetectorStore(_results_db(output_dir))
@@ -44,14 +49,15 @@ def crop_upload_plan(
     plan: list[tuple[Path, str]] = []
     out = Path(output_dir)
     for p in paths:
-        key = crop_key(p)
+        key = crop_key(p, round)
         if key in skip_keys:
             continue  # already uploaded — don't even stat it
         local = Path(p)
         if not local.is_absolute():
             local = local if local.exists() else (out / Path(p).name)
         if not local.exists():
-            local = out / key
+            # Round-agnostic on-disk path: <output_dir>/crops/<rel> (NOT the round-prefixed key).
+            local = out / "crops" / crop_rel(p)
         if local.exists():
             plan.append((local, key))
     return plan
@@ -67,10 +73,18 @@ def list_bucket_crop_keys(
     *,
     bucket: str | None = None,
     client=None,
-    prefix: str = "crops/",
+    prefix: str | None = None,
+    round: str | None = None,
     verbose: bool = False,
 ) -> set[str]:
-    """All ``crops/`` object keys in the bucket (Tigris source of truth for uploads)."""
+    """All crop object keys for ``round`` in the bucket (Tigris source of truth for uploads).
+
+    The default prefix is the round's crop prefix (``crops/`` for r1, ``crops/<round>/`` else),
+    so an r2 listing is properly isolated. NB: an r1 (``crops/``) listing also matches nested
+    ``crops/r2/`` keys — harmless because R1 is frozen before R2 starts publishing, but pass an
+    explicit ``prefix`` if you ever need a strict r1-only listing.
+    """
+    prefix = prefix or crop_prefix(round)
     bucket = bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
     if not bucket:
         raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
@@ -94,10 +108,11 @@ def refresh_bucket_upload_cache(
     *,
     bucket: str | None = None,
     client=None,
+    round: str | None = None,
     verbose: bool = False,
 ) -> dict[str, int]:
     """Write every bucket crop key to *cache_path* (for status / cross-host visibility)."""
-    keys = list_bucket_crop_keys(bucket=bucket, client=client, verbose=verbose)
+    keys = list_bucket_crop_keys(bucket=bucket, client=client, round=round, verbose=verbose)
     cache_path = Path(cache_path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
@@ -111,19 +126,22 @@ def reconcile_manifest(
     *,
     bucket: str | None = None,
     client=None,
-    prefix: str = "crops/",
+    prefix: str | None = None,
+    round: str | None = None,
     manifest: Path | None = None,
     verbose: bool = True,
 ) -> dict[str, int]:
-    """Rebuild the upload manifest from the *bucket* (the source of truth).
+    """Rebuild the upload manifest from the *bucket* (the source of truth) for ``round``.
 
-    Lets any machine resume incremental publishing: it lists every ``crops/`` object already
-    in the store and writes their keys to the manifest, so a later ``publish-crops`` /
-    ``publish-loop`` only sends the delta instead of re-uploading everything. The object key
-    is exactly the manifest key (``crops/<file>`` — see ``webapp.crop_key``), so no mapping is
-    needed. Unions with any existing manifest, so a just-uploaded key is never forgotten.
+    Lets any machine resume incremental publishing: it lists every crop object already in the
+    store (under the round's crop prefix) and writes their keys to the manifest, so a later
+    ``publish-crops`` / ``publish-loop`` only sends the delta instead of re-uploading everything.
+    The object key is exactly the manifest key (``crops/<file>`` for r1 — see ``webapp.crop_key``),
+    so no mapping is needed. Unions with any existing manifest, so a just-uploaded key is never
+    forgotten.
     """
     output_dir = Path(output_dir)
+    prefix = prefix or crop_prefix(round)
     bucket = bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
     if not bucket:
         raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
@@ -176,10 +194,11 @@ def publish_crops(
     limit: int | None = None,
     workers: int = 16,
     department: str | None = None,
+    round: str | None = None,
     dry_run: bool = False,
     verbose: bool = True,
 ) -> dict[str, int]:
-    """Upload new candidate crops to ``bucket``. Returns counts."""
+    """Upload new candidate crops to ``bucket`` under the round's crop prefix. Returns counts."""
     output_dir = Path(output_dir)
     bucket = bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
     if not bucket and not dry_run:
@@ -187,7 +206,7 @@ def publish_crops(
     manifest = manifest or (output_dir / "review" / "uploaded_crops.txt")
 
     done = _load_manifest(manifest)
-    pending = crop_upload_plan(output_dir, skip_keys=done, department=department)
+    pending = crop_upload_plan(output_dir, skip_keys=done, department=department, round=round)
     if limit is not None:
         pending = pending[:limit]
     totals = {"uploaded": 0, "skipped": len(done), "failed": 0}

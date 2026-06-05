@@ -10,6 +10,12 @@ from __future__ import annotations
 
 import os
 
+# Active election round (mirror of e14detector.config.ELECTION_ROUND, read from the same env so
+# the two packages agree). Names the round this process operates on so R1 and R2 never collide on
+# local snapshot paths / bucket keys. "r1" (default) = legacy un-prefixed paths so first-round data
+# never moves; any other round (e.g. "r2") nests under a {round}/ sub-path.
+ELECTION_ROUND = os.environ.get("E14_ELECTION_ROUND", "r1").strip().lower() or "r1"
+
 # --- Host (Akamai CDN; serves the SPA, the divipol JSON, and the acta PDFs) ---
 HOST = "divulgacione14presidente.registraduria.gov.co"
 BASE = f"https://{HOST}"

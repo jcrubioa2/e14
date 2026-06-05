@@ -33,6 +33,15 @@ publish = [
     "boto3>=1.34",
 ]
 
+[tool.pytest.ini_options]
+# Scope collection to tests/ ONLY. Without this, a bare `pytest` walks the entire project
+# tree during collection — including data/ (~1.5M acta crop files), which takes minutes and
+# can segfault under the memory pressure. testpaths fixes the common case; norecursedirs is a
+# belt-and-suspenders guard so an explicit path can never wander into the heavy dirs either.
+testpaths = ["tests"]
+norecursedirs = ["data", ".venv", ".git", "infra", "*.egg-info", "__pycache__"]
+addopts = "-p no:cacheprovider"
+
 [tool.setuptools]
 packages = ["e14", "e14detector"]
 
