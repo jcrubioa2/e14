@@ -293,8 +293,11 @@ def compute_reconciliation(
         except Exception:  # noqa: BLE001 — enumeration is a diagnostic; arithmetic stands alone
             pass
     # Internal frontier (I1/I2). Best-effort; only present when the local files are here.
+    # Only trust the manifest's downloaded count when it's >= served: you cannot serve an acta
+    # you didn't download, so a lower reading means a stale/partial manifest on THIS machine, not
+    # fewer real downloads — omit it (unknown) rather than stamp a phantom chain inversion.
     dl = _manifest_done_count(manifest_db)
-    if dl is not None:
+    if dl is not None and dl >= int(n_docs):
         rec["downloaded"] = dl
     # crops_uploaded as an *acta* count is the published frontier itself: we never serve an
     # acta whose crops aren't all uploaded, so for any published snapshot it equals the kept
