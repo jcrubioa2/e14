@@ -370,11 +370,22 @@ class DetectorStore:
             params,
         ).fetchall()
 
-    def candidate_crop_paths(self) -> list[str]:
+    def candidate_crop_paths(self, department: str | None = None) -> list[str]:
         """Distinct raw crop paths for candidate rows (the public crops to publish)."""
+        if not department:
+            rows = self.conn.execute(
+                "SELECT DISTINCT raw_crop_path FROM vote_fields "
+                "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL AND raw_crop_path != ''"
+            ).fetchall()
+            return [r["raw_crop_path"] for r in rows]
+        dep = department.strip()
+        code = dep.zfill(2) if dep.isdigit() else dep
         rows = self.conn.execute(
-            "SELECT DISTINCT raw_crop_path FROM vote_fields "
-            "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL"
+            "SELECT DISTINCT vf.raw_crop_path FROM vote_fields vf "
+            "JOIN documents d ON d.document_id = vf.document_id "
+            "WHERE vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL AND vf.raw_crop_path != '' "
+            "AND (d.department_code=? OR d.department_name=? OR d.department_code=? OR d.department_name=?)",
+            (code, code, dep, dep),
         ).fetchall()
         return [r["raw_crop_path"] for r in rows]
 

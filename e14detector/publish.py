@@ -23,16 +23,22 @@ def _results_db(output_dir: Path) -> Path:
     return Path(output_dir) / "results" / "results.sqlite"
 
 
-def crop_upload_plan(output_dir: Path, skip_keys: set[str] | None = None) -> list[tuple[Path, str]]:
+def crop_upload_plan(
+    output_dir: Path,
+    skip_keys: set[str] | None = None,
+    *,
+    department: str | None = None,
+) -> list[tuple[Path, str]]:
     """(local_path, object_key) for candidate crops that need uploading.
 
     ``skip_keys`` (already-uploaded keys) are skipped BEFORE touching the filesystem, so
     enumeration is O(new crops) not O(all crops) — critical once the manifest is large.
+    With ``department``, only crops for that department code or name are considered.
     """
     skip_keys = skip_keys or set()
     store = DetectorStore(_results_db(output_dir))
     try:
-        paths = store.candidate_crop_paths()
+        paths = store.candidate_crop_paths(department)
     finally:
         store.close()
     plan: list[tuple[Path, str]] = []
@@ -55,6 +61,49 @@ def _load_manifest(manifest: Path) -> set[str]:
     if manifest and manifest.exists():
         return set(manifest.read_text(encoding="utf-8").split())
     return set()
+
+
+def list_bucket_crop_keys(
+    *,
+    bucket: str | None = None,
+    client=None,
+    prefix: str = "crops/",
+    verbose: bool = False,
+) -> set[str]:
+    """All ``crops/`` object keys in the bucket (Tigris source of truth for uploads)."""
+    bucket = bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
+    if not bucket:
+        raise ValueError("no bucket: set BUCKET_NAME or pass --bucket")
+    if client is None:
+        client = _default_client()
+    keys: set[str] = set()
+    listed = 0
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.add(obj["Key"])
+            listed += 1
+        if verbose:
+            print(f"list-bucket: {listed} object(s)…", end="\r", flush=True)
+    if verbose:
+        print(f"\nlist-bucket: {len(keys)} crop key(s) in {bucket}", flush=True)
+    return keys
+
+
+def refresh_bucket_upload_cache(
+    cache_path: Path,
+    *,
+    bucket: str | None = None,
+    client=None,
+    verbose: bool = False,
+) -> dict[str, int]:
+    """Write every bucket crop key to *cache_path* (for status / cross-host visibility)."""
+    keys = list_bucket_crop_keys(bucket=bucket, client=client, verbose=verbose)
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text("\n".join(sorted(keys)) + "\n", encoding="utf-8")
+    tmp.replace(cache_path)
+    return {"listed": len(keys)}
 
 
 def reconcile_manifest(
@@ -126,6 +175,7 @@ def publish_crops(
     manifest: Path | None = None,
     limit: int | None = None,
     workers: int = 16,
+    department: str | None = None,
     dry_run: bool = False,
     verbose: bool = True,
 ) -> dict[str, int]:
@@ -137,14 +187,15 @@ def publish_crops(
     manifest = manifest or (output_dir / "review" / "uploaded_crops.txt")
 
     done = _load_manifest(manifest)
-    pending = crop_upload_plan(output_dir, skip_keys=done)  # only crops not yet uploaded
+    pending = crop_upload_plan(output_dir, skip_keys=done, department=department)
     if limit is not None:
         pending = pending[:limit]
     totals = {"uploaded": 0, "skipped": len(done), "failed": 0}
 
     if verbose:
+        dept_note = f" dept={department}" if department else ""
         print(
-            f"publish-crops: {len(pending)} new crop(s) "
+            f"publish-crops: {len(pending)} new crop(s){dept_note} "
             f"-> bucket={bucket or '(dry-run)'}{' [dry-run]' if dry_run else ''}",
             flush=True,
         )

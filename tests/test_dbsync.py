@@ -239,6 +239,23 @@ def test_publish_db_refuses_to_shrink_live_db(tmp_path: Path) -> None:
     assert info2 is not None and not info2.get("guarded")
 
 
+def test_merge_results_db_union_without_overwriting_local(tmp_path: Path) -> None:
+    """Remote actas are merged in; local actas are kept; vote_fields follow new docs only."""
+    local = tmp_path / "local" / "results.sqlite"
+    remote = tmp_path / "remote" / "results.sqlite"
+    _make_db(local, 2)  # d0, d1
+    _make_db(remote, 3)  # d2, d3, d4 (cumulative ids after local's 2 rows)
+
+    stats = dbsync.merge_results_db(local, remote, verbose=False)
+    assert stats["docs_added"] == 1  # remote d2 only (d0,d1 already local)
+    assert stats["fields_added"] == 1
+    con = sqlite3.connect(local)
+    docs = {r[0] for r in con.execute("SELECT document_id FROM documents")}
+    assert docs == {"d0", "d1", "d2"}
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 3
+    con.close()
+
+
 def test_publish_db_allows_smaller_bytes_when_acta_count_holds(tmp_path: Path) -> None:
     """Regression: a slimmer-but-complete snapshot (fewer bytes, same/more actas) must
     publish. The guard keys on acta count, not raw bytes, so a schema slim-down never trips it."""

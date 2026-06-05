@@ -85,6 +85,8 @@ e14detector publish-crops --output-dir <OUTPUT_DIR>
 
 - Incremental: uploads only crops not in the manifest; appends each success to the manifest.
 - `--workers N` (default 16) upload concurrency; `--limit N` caps a run; `--dry-run` counts only.
+- `--department 16` restricts the plan to one department (divide-and-conquer across machines).
+  Convenience: `bash scripts/publish_dept_crops.sh 16`.
 - Idempotent: re-uploading an existing key just overwrites identical bytes — safe, only wasteful.
 
 ---

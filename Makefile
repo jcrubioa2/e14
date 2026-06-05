@@ -24,7 +24,7 @@ DL_FLAGS = --concurrency $(CONCURRENCY) --rate $(RATE) --auto-retry $(RETRY)
 LOG      = | tee logs/run_$$(date +%Y%m%d_%H%M%S).log
 
 .DEFAULT_GOAL := help
-.PHONY: help setup universe run resume fresh retry stats dictionary package verify clean distclean detector-sample detector-vlm detector-add detector-serve
+.PHONY: help setup universe run resume fresh retry stats dictionary package verify clean distclean detector-sample detector-vlm detector-add detector-serve detector-crop-progress
 
 help: ## Show this help
 	@echo "E-14 Acta Scraper — targets:"
@@ -110,6 +110,9 @@ detector-serve: ## Serve the Spanish anomaly review report
 # Cropping runs on ALL files (fast: no CV analysis); Gemma pre-screens only
 # LLM_SAMPLE_RATE of documents. The crowd poll + live Gemma do the rest.
 LLM_SAMPLE_RATE ?= 0.05
+
+detector-crop-progress: ## Crop progress + per-dept %% (CROP_PROGRESS_BY_DEPT=0, DEPT_LIMIT=N)
+	@DETECTOR_OUTPUT=$(DETECTOR_OUTPUT) bash scripts/crop_progress.sh
 
 detector-crop-all: ## Crop-only pass over ALL actas (no CV) — fast national first pass
 	$(DETECTOR) process --input-dir data/actas --output-dir $(DETECTOR_OUTPUT) --workers 8 --crop-only --force

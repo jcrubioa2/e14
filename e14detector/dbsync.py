@@ -266,9 +266,9 @@ def publish_db(
     if client is None:
         client = _s3_client()
 
-    # Publish lock: once the served DB is marked done, refuse to overwrite it. Checked before
-    # the (expensive) slim build so a locked publisher exits fast. Admin toggle / allow_locked
-    # / E14_DB_ALLOW_LOCKED=1 override.
+    # Publish lock: once the served DB is marked done, refuse to overwrite it. Checked first
+    # (before any pull/merge or the expensive slim build) so a locked publisher exits fast.
+    # Admin toggle / allow_locked / E14_DB_ALLOW_LOCKED=1 override.
     if not allow_locked and os.environ.get("E14_DB_ALLOW_LOCKED", "").lower() not in ("1", "true", "yes"):
         lock = read_db_lock(client=client, bucket=bucket)
         if lock.get("locked"):
@@ -278,6 +278,13 @@ def publish_db(
             if verbose:
                 print(msg, flush=True)
             return {"locked": True, "lock": lock}
+
+    # Auto-merge before publish is OPT-IN (default OFF). Explicit `pull-db` /
+    # `fleet-schedule --pull-db` own merging; a silently-skipped auto-merge is what let a
+    # partial DB get published, so when it IS enabled a failure aborts the publish (no
+    # swallowing) rather than shipping a possibly-incomplete snapshot.
+    if os.environ.get("E14_DB_MERGE_BEFORE_PUBLISH", "").lower() in ("1", "true", "yes"):
+        pull_db(output_dir, bucket=bucket, client=client, verbose=verbose)
 
     with tempfile.TemporaryDirectory() as td:
         snap = Path(td) / "snapshot.sqlite"
@@ -363,6 +370,199 @@ def publish_db(
         )
     return {"key": key, "sha256": digest, "size": gz_size, "n_docs": n_docs,
             "kept": kept if only_uploaded else None}
+
+
+# --- multi-writer merge (local crop machines) --------------------------------
+
+def _table_columns(con: sqlite3.Connection, table: str, *, alias: str = "") -> list[str]:
+    """Bare column names of ``table`` (excludes AUTOINCREMENT ``id``), preserving table order.
+
+    ``alias`` reads an attached DB (e.g. ``remote``) via ``PRAGMA <alias>.table_info(<table>)``.
+    """
+    pragma = f"PRAGMA {alias}.table_info({table})" if alias else f"PRAGMA table_info({table})"
+    return [r[1] for r in con.execute(pragma) if r[1] != "id"]
+
+
+def _shared_columns(con: sqlite3.Connection, table: str) -> list[str]:
+    """Columns present in BOTH ``main.<table>`` and the attached ``remote.<table>``.
+
+    Merging on the intersection (not ``SELECT *`` / the local column list) is what lets a
+    *fat* local writer DB ingest a *slim* published serving snapshot — and vice versa —
+    without an ``OperationalError: no such column`` or a positional column misalignment.
+    Local column order is preserved so INSERT and SELECT lists line up.
+    """
+    remote_cols = set(_table_columns(con, table, alias="remote"))
+    return [c for c in _table_columns(con, table) if c in remote_cols]
+
+
+def merge_results_db(local_db: Path, remote_db: Path, *, verbose: bool = True) -> dict:
+    """Merge a published remote snapshot into the local writer DB.
+
+    Coordination rule: **local wins** on document_id conflicts (this machine's in-progress
+    work is kept). Rows from remote are copied only for actas this machine has never
+    recorded — so after ``pull-db`` every PC skips actas another PC already finished.
+
+    Merges ``documents`` and ``vote_fields`` (enough for crop resume + publish frontier).
+    """
+    local_db = Path(local_db)
+    remote_db = Path(remote_db)
+    if not remote_db.exists():
+        raise FileNotFoundError(remote_db)
+    con = sqlite3.connect(local_db, timeout=120.0)
+    con.execute("PRAGMA busy_timeout=30000")
+    try:
+        docs_before = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        con.execute("ATTACH DATABASE ? AS remote", (str(remote_db.resolve()),))
+        pending = {
+            r[0]
+            for r in con.execute(
+                "SELECT document_id FROM remote.documents "
+                "WHERE document_id NOT IN (SELECT document_id FROM main.documents)"
+            )
+        }
+        # Explicit shared-column list (never SELECT *): local and remote may differ in shape
+        # (fat writer DB vs slim serving snapshot), so a positional copy would misalign.
+        doc_cols = _shared_columns(con, "documents")
+        doc_list = ", ".join(doc_cols)
+        con.execute(
+            f"INSERT OR IGNORE INTO main.documents ({doc_list}) "
+            f"SELECT {doc_list} FROM remote.documents"
+        )
+        docs_added = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0] - docs_before
+        # vote_fields: same intersection rule. Unqualified SELECT names resolve against
+        # remote.vote_fields per the FROM clause.
+        vf_cols = _shared_columns(con, "vote_fields")
+        vf_list = ", ".join(vf_cols)
+        fields_added = 0
+        if pending and vf_cols:
+            before_vf = con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0]
+            placeholders = ", ".join("?" for _ in pending)
+            con.execute(
+                f"INSERT INTO main.vote_fields ({vf_list}) "
+                f"SELECT {vf_list} FROM remote.vote_fields "
+                f"WHERE document_id IN ({placeholders})",
+                tuple(pending),
+            )
+            fields_added = con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] - before_vf
+        con.commit()
+        docs_total = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        if verbose:
+            print(
+                f"merge-db: +{docs_added} actas, +{fields_added} vote_fields "
+                f"({docs_total:,} total documents)",
+                flush=True,
+            )
+        return {
+            "docs_added": docs_added,
+            "fields_added": fields_added,
+            "docs_total": docs_total,
+            "remote_pending": len(pending),
+        }
+    finally:
+        try:
+            con.execute("DETACH DATABASE remote")
+        except sqlite3.Error:
+            pass
+        con.close()
+
+
+def _download_snapshot_file(
+    pointer: dict,
+    dest: Path,
+    *,
+    cdn_base: str | None,
+    bucket: str | None,
+    client,
+    timeout: float,
+) -> None:
+    key = pointer["key"]
+    want = pointer["sha256"]
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if cdn_base:
+        with urllib.request.urlopen(
+            urllib.request.Request(f"{cdn_base.rstrip('/')}/{key}"), timeout=timeout
+        ) as resp:
+            stream = gzip.GzipFile(fileobj=resp) if key.endswith(".gz") else resp
+            with open(dest, "wb") as out:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    out.write(chunk)
+    else:
+        if client is None:
+            client = _s3_client()
+        if not bucket:
+            raise ValueError("no bucket for pull-db")
+        obj = client.get_object(Bucket=bucket, Key=key)
+        body = obj["Body"]
+        if key.endswith(".gz"):
+            with gzip.GzipFile(fileobj=body) as gz, open(dest, "wb") as out:
+                shutil.copyfileobj(gz, out, 1 << 20)
+        else:
+            with open(dest, "wb") as out:
+                shutil.copyfileobj(body, out, 1 << 20)
+    got = _sha256(dest)
+    if got != want:
+        raise ValueError(f"snapshot sha mismatch: got {got[:12]} want {want[:12]}")
+
+
+def fetch_published_pointer(
+    *,
+    cdn_base: str | None = None,
+    bucket: str | None = None,
+    client=None,
+    timeout: float = 30.0,
+) -> dict | None:
+    """Return the live ``db/latest.json`` object, or None if unpublished / unreachable."""
+    if cdn_base:
+        sep = "&" if "?" in POINTER_KEY else "?"
+        url = f"{cdn_base.rstrip('/')}/{POINTER_KEY}"
+        if url.startswith("http"):
+            url += f"{sep}t={int(time.time())}"
+        try:
+            return json.loads(_fetch(url, timeout))
+        except Exception:
+            return None
+    bucket = bucket or os.environ.get("BUCKET_NAME") or os.environ.get("E14_TIGRIS_BUCKET")
+    if not bucket:
+        return None
+    if client is None:
+        client = _s3_client()
+    try:
+        return json.loads(client.get_object(Bucket=bucket, Key=POINTER_KEY)["Body"].read())
+    except Exception:
+        return None
+
+
+def pull_db(
+    output_dir: Path,
+    *,
+    cdn_base: str | None = None,
+    bucket: str | None = None,
+    client=None,
+    timeout: float = 120.0,
+    verbose: bool = True,
+) -> dict | None:
+    """Download the live published DB and merge it into the local results DB."""
+    local = Path(output_dir) / "results" / "results.sqlite"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    if not local.exists():
+        from .storage import DetectorStore
+
+        DetectorStore(local, None).close()
+    cdn_base = cdn_base or os.environ.get("E14_CDN_BASE_URL") or ""
+    pointer = fetch_published_pointer(cdn_base=cdn_base or None, bucket=bucket, client=client, timeout=timeout)
+    if pointer is None:
+        if verbose:
+            print("pull-db: no published pointer (nothing to merge yet)", flush=True)
+        return None
+    with tempfile.TemporaryDirectory() as td:
+        remote = Path(td) / "remote.sqlite"
+        _download_snapshot_file(
+            pointer, remote, cdn_base=cdn_base or None, bucket=bucket, client=client, timeout=timeout
+        )
+        stats = merge_results_db(local, remote, verbose=verbose)
+    stats["sha256"] = pointer.get("sha256", "")[:12]
+    return stats
 
 
 # --- pointer status (reader-side, stdlib) ----------------------------------

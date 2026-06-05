@@ -1,7 +1,7 @@
 """Processing pipeline for local PDFs (sequential and multiprocess)."""
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +23,53 @@ from .storage import DetectorStore
 from .utils import enrich_metadata_from_index, parse_document_metadata, sha256_file
 
 
-def iter_pdfs(input_dir: Path, limit: int | None = None) -> list[Path]:
-    pdfs = sorted(Path(input_dir).rglob("*.pdf"))
+def _department_from_pdf(pdf: Path, input_dir: Path) -> str | None:
+    """DIVIPOL department code from ``{input_dir}/{dep}/…`` layout."""
+    try:
+        return Path(pdf).relative_to(Path(input_dir)).parts[0].zfill(2)
+    except ValueError:
+        return None
+
+
+def _department_in_range(
+    dep: str | None,
+    *,
+    depto: str | None,
+    dept_from: str | None,
+    dept_to: str | None,
+) -> bool:
+    if not dep:
+        return depto is None and dept_from is None and dept_to is None
+    if depto is not None and dep != str(depto).zfill(2):
+        return False
+    if dept_from is not None and dep < str(dept_from).zfill(2):
+        return False
+    if dept_to is not None and dep > str(dept_to).zfill(2):
+        return False
+    return True
+
+
+def iter_pdfs(
+    input_dir: Path,
+    limit: int | None = None,
+    *,
+    depto: str | None = None,
+    dept_from: str | None = None,
+    dept_to: str | None = None,
+) -> list[Path]:
+    input_dir = Path(input_dir)
+    pdfs = sorted(input_dir.rglob("*.pdf"))
+    if depto is not None or dept_from is not None or dept_to is not None:
+        pdfs = [
+            p
+            for p in pdfs
+            if _department_in_range(
+                _department_from_pdf(p, input_dir),
+                depto=depto,
+                dept_from=dept_from,
+                dept_to=dept_to,
+            )
+        ]
     return pdfs[:limit] if limit else pdfs
 
 
@@ -227,6 +272,69 @@ def _compute_worker(args: tuple[str, str, int, bool, bool]) -> PdfComputeResult:
     return compute_pdf(Path(pdf_path), Path(output_dir), dpi=dpi, debug=debug, crop_only=crop_only)
 
 
+def _max_inflight(workers: int) -> int:
+    """Cap queued PDF jobs so we never materialize tens of thousands of Futures at once.
+
+    The old path submitted the entire national ``todo`` list up front (~80k+ pending
+    tasks). That ballooned parent RAM and made the pool fragile under memory pressure
+    (workers dying → CPU \"winding down\"). Keep a small sliding window instead.
+    """
+    import os
+
+    if env := os.environ.get("E14_MAX_INFLIGHT"):
+        return max(workers, int(env))
+    # Keep the submit window near pool size — large PDFs can use multi-GB per worker.
+    return min(128, max(workers, workers * 2))
+
+
+def _run_pool_bounded(
+    executor: ProcessPoolExecutor,
+    todo: list[Path],
+    output_dir: Path,
+    store: DetectorStore,
+    dpi: int,
+    debug: bool,
+    crop_only: bool,
+    totals: dict[str, int],
+    max_inflight: int,
+) -> None:
+    pdf_iter = iter(todo)
+    inflight: dict = {}
+    done = 0
+
+    def submit_more() -> None:
+        while len(inflight) < max_inflight:
+            try:
+                pdf = next(pdf_iter)
+            except StopIteration:
+                return
+            fut = executor.submit(
+                _compute_worker,
+                (str(pdf), str(output_dir), dpi, debug, crop_only),
+            )
+            inflight[fut] = pdf
+
+    submit_more()
+    while inflight:
+        finished, _ = wait(inflight, return_when=FIRST_COMPLETED)
+        for fut in finished:
+            inflight.pop(fut, None)
+            result = fut.result()
+            _persist(store, result)
+            counts = _counts(result)
+            for key in totals:
+                totals[key] += counts[key]
+            done += 1
+            if done % 50 == 0:
+                store.commit()
+                print(
+                    f"  processed {done}/{len(todo)} (skipped {totals['skipped']})",
+                    flush=True,
+                )
+        submit_more()
+    store.commit()
+
+
 def run_process(
     input_dir: Path,
     output_dir: Path,
@@ -236,11 +344,19 @@ def run_process(
     force: bool = False,
     workers: int = 1,
     crop_only: bool = False,
+    depto: str | None = None,
+    dept_from: str | None = None,
+    dept_to: str | None = None,
 ) -> dict[str, int]:
     config.ensure_output_dirs(output_dir)
     store = DetectorStore(Path(output_dir) / "results" / "results.sqlite", Path(output_dir) / "results" / "results.jsonl")
     totals = {"done": 0, "skipped": 0, "failed": 0, "fields": 0}
-    pdfs = iter_pdfs(input_dir, limit=limit)
+    pdfs = iter_pdfs(
+        input_dir, limit=limit, depto=depto, dept_from=dept_from, dept_to=dept_to
+    )
+    if depto is not None or dept_from is not None or dept_to is not None:
+        span = depto or f"{dept_from or '00'}-{dept_to or '99'}"
+        print(f"  dept filter: {span} ({len(pdfs)} PDFs in slice)", flush=True)
 
     try:
         if workers and workers > 1:
@@ -257,23 +373,24 @@ def run_process(
                 else:
                     todo.append(pdf)
 
-            done = 0
+            inflight_cap = _max_inflight(workers)
+            print(
+                f"  pool: {workers} workers, max {inflight_cap} in-flight "
+                f"({len(todo)} actas to process)",
+                flush=True,
+            )
             with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(_compute_worker, (str(pdf), str(output_dir), dpi, debug, crop_only)): pdf
-                    for pdf in todo
-                }
-                for future in as_completed(futures):
-                    result = future.result()
-                    _persist(store, result)
-                    counts = _counts(result)
-                    for key in totals:
-                        totals[key] += counts[key]
-                    done += 1
-                    if done % 50 == 0:
-                        store.commit()
-                        print(f"  processed {done}/{len(todo)} (skipped {totals['skipped']})", flush=True)
-            store.commit()
+                _run_pool_bounded(
+                    executor,
+                    todo,
+                    output_dir,
+                    store,
+                    dpi,
+                    debug,
+                    crop_only,
+                    totals,
+                    inflight_cap,
+                )
         else:
             for pdf in pdfs:
                 result = process_pdf(pdf, output_dir, store, dpi=dpi, debug=debug, force=force, crop_only=crop_only)

@@ -70,3 +70,37 @@ def test_dry_run_uploads_nothing(tmp_path: Path) -> None:
     s3 = _FakeS3()
     totals = publish_crops(output_dir, bucket="b", client=s3, dry_run=True, verbose=False)
     assert totals["uploaded"] == 0 and s3.uploaded == []
+
+
+def test_crop_upload_plan_department_filter(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crops = output_dir / "crops"
+    crops.mkdir(parents=True, exist_ok=True)
+    store = DetectorStore(db)
+    for dep, doc in (("16", "doc-a"), ("17", "doc-b")):
+        cp = crops / f"{dep}_{doc}.png"
+        Image.new("RGB", (8, 8), (255, 255, 255)).save(cp)
+        store.upsert_document(
+            DocumentMetadata(
+                document_id=doc,
+                source_path=f"{doc}.pdf",
+                department_code=dep,
+            )
+        )
+        store.insert_vote_field(
+            VoteField(
+                document_id=doc,
+                page_number=1,
+                row_type="candidate",
+                row_number=1,
+                candidate_name="A",
+                raw_crop_path=str(cp),
+            )
+        )
+    store.commit()
+    store.close()
+    plan = crop_upload_plan(output_dir, department="16")
+    keys = {k for _, k in plan}
+    assert keys == {"crops/16_doc-a.png"}
+    assert "crops/17_doc-b.png" not in keys
