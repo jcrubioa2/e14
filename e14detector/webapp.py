@@ -640,8 +640,8 @@ def build_public_counts(recon: dict | None, served_total: int) -> dict:
          "sub": "El total nacional, según la Registraduría."},
         {"key": "escaneadas", "label": "Mesas escaneadas", "value_label": lab(esc),
          "sub": "Mesas cuyo resultado ya procesó la Registraduría."},
-        {"key": "acta", "label": "Mesas con su acta (foto) publicada", "value_label": lab(inf),
-         "sub": "La Registraduría ya publicó la imagen del formulario E-14."},
+        {"key": "acta", "label": "Mesas con su acta (PDF) publicada", "value_label": lab(inf),
+         "sub": "La Registraduría ya publicó el PDF del formulario E-14."},
         {"key": "sistema", "label": "Mesas disponibles en nuestro sistema", "value_label": lab(served_total),
          "sub": "Listas para consultar, revisar y comparar aquí.", "highlight": True},
     ]
