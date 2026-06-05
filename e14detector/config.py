@@ -219,7 +219,11 @@ VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
 # and no faster than FORM_MIN_SECONDS after load. Reuses the voter salt as the HMAC key
 # so no new secret is needed (it is already set in production).
 FORM_TOKEN_SECRET = os.environ.get("E14_FORM_TOKEN_SECRET", "") or VOTER_SALT
-FORM_MIN_SECONDS = float(os.environ.get("E14_FORM_MIN_SECONDS", "2"))
+# Min token age default 0: the old 2s "too fast = bot" gate bounced a freshly-minted token (the
+# client now flushes a queued vote within ms of solving Turnstile / minting at /api/session),
+# which forced a needless re-verify loop. Turnstile is the real bot gate now; raise this only on
+# the no-Turnstile honeypot path if you want the timing heuristic back.
+FORM_MIN_SECONDS = float(os.environ.get("E14_FORM_MIN_SECONDS", "0"))
 FORM_MAX_SECONDS = float(os.environ.get("E14_FORM_MAX_SECONDS", "3600"))
 
 

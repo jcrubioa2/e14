@@ -430,7 +430,10 @@
         });
         const data = await res.json().catch(() => ({}));
         if (data && data.ok && data.form_token) window.__formToken = data.form_token;
-      } catch (e) {} finally { establishing = false; _settleSession(!!window.__formToken); }
+      } catch (e) {} finally {
+        establishing = false; _settleSession(!!window.__formToken);
+        if (window.__formToken) flushOutbox();  // a fresh token immediately drains anything queued
+      }
     }
     function voteReady() { return !turnstileOn || !!window.__formToken; }
 
@@ -593,30 +596,65 @@
       } finally { loading = false; }
     }
 
-    function sendBatch(strange, good) {
-      const hp = document.getElementById('hp-website');
-      return fetch('/api/vote-batch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strange: strange, good: good,
-                               form_token: window.__formToken, website: hp ? hp.value : '' }),
-      }).then(async (res) => {
-        if (res.status === 429) { showToast('Vas muy rápido, espera un momento…', true); return; }
-        const data = await res.json().catch(() => ({}));
-        if (!(data && data.ok) && turnstileOn) { window.__formToken = ''; ensureSession(); }
-      }).catch(() => {});
+    // --- Outbox: votes are queued locally and delivered in the BACKGROUND so the user never waits
+    // on the bot-gate token. Persisted to localStorage, so a slow solve (or closing the tab) still
+    // delivers them later; the server dedups, so at-least-once retries are safe. ---
+    const OUTBOX_KEY = 'e14_outbox_v1';
+    let outbox = [];
+    try { outbox = JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]') || []; } catch (e) { outbox = []; }
+    let flushing = false;
+    function saveOutbox() { try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox)); } catch (e) {} }
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    function enqueueVotes(strange, good) {
+      if (!strange.length && !good.length) return;
+      outbox.push({ strange: strange, good: good });
+      if (outbox.length > 300) outbox = outbox.slice(-300);  // bound memory if delivery is stuck
+      saveOutbox();
+      flushOutbox();
     }
 
-    async function submitDeck() {
+    async function flushOutbox() {
+      if (flushing) return;
+      flushing = true;
+      let reauths = 0;  // cap re-establish cycles so a persistent reject can't hot-loop (burning solves)
+      try {
+        const hp = document.getElementById('hp-website');
+        while (outbox.length) {
+          if (!voteReady()) {
+            if (reauths++ > 3) return;          // bail; the next vote / page load retries
+            const ok = await ensureSession();   // runs in the background; the user keeps voting
+            if (!ok || !voteReady()) return;
+          }
+          const item = outbox[0];
+          let res;
+          try {
+            res = await fetch('/api/vote-batch', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ strange: item.strange, good: item.good,
+                                     form_token: window.__formToken, website: hp ? hp.value : '' }),
+            });
+          } catch (e) { return; }               // offline: leave it queued, retry on the next vote
+          if (res.status === 429) { await sleep(1500); continue; }   // backoff, keep the item
+          const data = await res.json().catch(() => ({}));
+          if (data && data.ok) { outbox.shift(); saveOutbox(); reauths = 0; continue; }  // delivered
+          // Rejected (token expired/invalid): re-establish and retry the SAME item, but bounded.
+          if (turnstileOn && reauths++ <= 3) {
+            window.__formToken = '';
+            const ok = await ensureSession();
+            if (!ok) return;
+          } else { return; }                    // give up for now (queue persists for a later retry)
+        }
+      } finally { flushing = false; }
+    }
+
+    function submitDeck() {
       if (sending) return;
       sending = true;
       try {
-        // If the bot-gate token isn't ready yet (first submit, or it expired), establish it and
-        // then continue THIS submit — don't make the user click again.
-        if (!voteReady()) {
-          showToast('Verificando…', true);
-          const ok = await ensureSession();
-          if (!ok || !voteReady()) { showToast('No se pudo verificar, intenta de nuevo', true); return; }
-        }
+        // Never block on verification: queue the votes and advance immediately. The outbox
+        // delivers them in the background once a session token exists (and reuses the token from
+        // any later solve), so the user just keeps swiping — no "Verificando" gate per submit.
         const strange = deck.map((it) => it.cid).filter((c) => marked.has(c));
         const good = deck.map((it) => it.cid).filter((c) => !marked.has(c));
         reviewed++;
@@ -627,7 +665,7 @@
         const r = rankFor(reviewed);
         if (r && r.at > lastRankAt) { lastRankAt = r.at; celebrateRank(r); }
         else { showToast(thanks()); }
-        sendBatch(strange, good);          // optimistic: don't block the next mesa on the response
+        enqueueVotes(strange, good);       // queued + flushed in the background; never blocks voting
         board.innerHTML = skeleton();
         bar.hidden = true;
         loadDeck();
@@ -639,6 +677,7 @@
 
     board.innerHTML = skeleton();   // initial shimmer; loadDeck reconciles it into the real mesa
     loadDeck();
+    flushOutbox();                  // deliver any votes left queued from a previous visit / tab close
   </script>
 </body>
 </html>
