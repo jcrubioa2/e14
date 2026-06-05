@@ -125,22 +125,28 @@ def voter_token(salt: str, client_ip: str, day: str | None = None) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def issue_form_token(secret: str, sid: str, now: float | None = None) -> str:
+def issue_form_token(secret: str, sid: str, ip: str = "", now: float | None = None) -> str:
     """Mint a signed, timestamped token embedded in the acta page.
 
     No-domain replacement for a CAPTCHA: the token proves the submit came from a real
     page load of ours (HMAC, un-forgeable) and carries the issue time so the server can
     reject submits that arrive impossibly fast (scripts) — a timing + anti-forgery check.
+
+    When ``ip`` is bound (the caller passes the trusted client IP), the token only verifies
+    from that same IP — so a Turnstile-minted token can't be solved once and replayed across a
+    proxy pool; each Sybil identity then needs its own solve. ``ip=""`` leaves it unbound.
     """
     ts = int(time.time() if now is None else now)
-    sig = hmac.new(secret.encode("utf-8"), f"{sid}|{ts}".encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(secret.encode("utf-8"), f"{sid}|{ip}|{ts}".encode("utf-8"), hashlib.sha256).hexdigest()[:16]
     return f"{ts}.{sig}"
 
 
 def verify_form_token(
-    secret: str, sid: str, token: str | None, min_age: float, max_age: float, now: float | None = None
+    secret: str, sid: str, token: str | None, min_age: float, max_age: float,
+    now: float | None = None, ip: str = "",
 ) -> bool:
-    """True iff ``token`` is our un-tampered token for ``sid`` and aged within bounds."""
+    """True iff ``token`` is our un-tampered token for ``sid`` (and ``ip``, if bound) and aged
+    within bounds."""
     if not token or "." not in token:
         return False
     ts_str, _, sig = token.partition(".")
@@ -148,9 +154,9 @@ def verify_form_token(
         ts = int(ts_str)
     except ValueError:
         return False
-    expected = hmac.new(secret.encode("utf-8"), f"{sid}|{ts}".encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    expected = hmac.new(secret.encode("utf-8"), f"{sid}|{ip}|{ts}".encode("utf-8"), hashlib.sha256).hexdigest()[:16]
     if not hmac.compare_digest(sig, expected):
-        return False  # forged or wrong session
+        return False  # forged, wrong session, or wrong IP
     age = (time.time() if now is None else now) - ts
     return min_age <= age <= max_age
 

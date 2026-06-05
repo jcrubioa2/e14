@@ -862,6 +862,9 @@ def create_app(
     app.state.started_at = time.time()
     app.state.err_5xx = 0
     app.state.recent_errors: collections.deque = collections.deque(maxlen=20)
+    # Client-reported outbox health (vote-loss signal): how many times a browser couldn't deliver
+    # queued votes. Best-effort, in-memory (per machine, resets on deploy) — watch it in /health.
+    app.state.telemetry: collections.Counter = collections.Counter()
 
     def conn() -> sqlite3.Connection:
         if not results_db.exists():
@@ -919,9 +922,24 @@ def create_app(
 
         ok = await asyncio.to_thread(_ready)
         return JSONResponse(
-            {"status": "ok" if ok else "unavailable", "db": ok},
+            {"status": "ok" if ok else "unavailable", "db": ok,
+             # Vote-loss signal: client outbox stalls reported since this machine booted.
+             "outbox_stalled": app.state.telemetry.get("outbox_stalled", 0)},
             status_code=200 if ok else 503,
         )
+
+    @app.post("/api/telemetry")
+    async def api_telemetry(request: Request, payload: dict = Body(...)):
+        # Tiny, unauthenticated client telemetry (vote-loss signal). Rate-limited per IP so it
+        # can't be spammed to skew the counter; never errors (best-effort, returns 200 always).
+        if _feed_allow("tlm:" + _voter_ip(request)):
+            event = str(payload.get("event", "") or "")[:40]
+            if event:
+                app.state.telemetry[event] += 1
+                if event == "outbox_stalled":
+                    queued = int(payload.get("queued", 0) or 0)
+                    print(f"telemetry outbox_stalled queued={queued} ip={_voter_ip(request)}", flush=True)
+        return JSONResponse({"ok": True}, status_code=200)
 
     def _admin_health(votes_ok: bool, pipeline: dict) -> dict:
         """At-a-glance status for the operator board: serving DB, votes backend, queue backlog,
@@ -1370,7 +1388,7 @@ def create_app(
         form_token = (
             ""
             if turnstile_on
-            else (issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else "")
+            else (issue_form_token(poll_cfg.form_token_secret, sid, _voter_ip(request)) if poll_cfg.form_token_secret else "")
         )
         response = templates.TemplateResponse(
             request,
@@ -1753,7 +1771,8 @@ def create_app(
         ):
             return _flag_response({"ok": False, "error": "challenge_failed"}, 403, sid, new_sid)
         form_token = (
-            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
+            issue_form_token(poll_cfg.form_token_secret, sid, _voter_ip(request))
+            if poll_cfg.form_token_secret else ""
         )
         return _flag_response({"ok": True, "form_token": form_token}, 200, sid, new_sid)
 
@@ -1787,7 +1806,7 @@ def create_app(
             community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
         ):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        bot = bot_check(payload, sid, poll_cfg)
+        bot = bot_check(payload, sid, _voter_ip(request), poll_cfg)
         if bot == "honeypot":
             return _flag_response({"ok": True}, 200, sid, new_sid)  # shadow-drop the bot
         if bot:
@@ -1859,7 +1878,7 @@ def create_app(
                 community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
             ):
                 return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        bot = bot_check(payload, sid, poll_cfg)
+        bot = bot_check(payload, sid, _voter_ip(request), poll_cfg)
         if bot == "honeypot":
             return _flag_response({"ok": True, "strange": 0, "good": 0}, 200, sid, new_sid)
         if bot:
@@ -1895,14 +1914,15 @@ def create_app(
     return app
 
 
-def bot_check(payload: dict, sid: str, poll: PollConfig) -> str:
+def bot_check(payload: dict, sid: str, ip: str, poll: PollConfig) -> str:
     """In-app bot screen. Returns '' to proceed, 'honeypot' (silently drop a bot), or
-    'bad_token' (forged/missing/too-fast submit). Skipped when no form-token secret."""
+    'bad_token' (forged/missing/too-fast/wrong-IP submit). Skipped when no form-token secret.
+    ``ip`` binds the token to the client IP so a solved token can't be replayed from elsewhere."""
     if str(payload.get("website", "")).strip():
         return "honeypot"  # a hidden field only bots fill
     if poll.form_token_secret and not verify_form_token(
         poll.form_token_secret, sid, payload.get("form_token"),
-        poll.form_min_seconds, poll.form_max_seconds,
+        poll.form_min_seconds, poll.form_max_seconds, ip=ip,
     ):
         return "bad_token"
     return ""

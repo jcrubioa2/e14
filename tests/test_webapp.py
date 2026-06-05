@@ -931,3 +931,44 @@ def test_vote_succeeds_with_session_token_when_turnstile_enabled(tmp_path: Path,
     n = cs.counts_among([fk])[fk]["strange"]
     cs.close()
     assert n == 1  # the vote was actually recorded, not silently 403'd
+
+
+def test_form_token_is_bound_to_client_ip(tmp_path: Path, monkeypatch) -> None:
+    """A session form token minted for one IP must be rejected from another — so a solved token
+    can't be replayed across a proxy pool (each Sybil identity needs its own Turnstile solve)."""
+    import dataclasses
+    from e14detector import webapp as wa
+    from e14detector.community import CommunityStore, PollConfig, field_key_of
+
+    output_dir, db = _one_crop_db(tmp_path)
+    community_db = tmp_path / "community.sqlite"
+    cfg = dataclasses.replace(
+        PollConfig.from_config(), turnstile_enabled=True,
+        turnstile_sitekey="0xSITE", turnstile_secret="sekret", form_min_seconds=0.0)
+    monkeypatch.setattr(wa, "verify_turnstile", lambda secret, token, ip=None: bool(token))
+    fk = field_key_of("doc-x", 1, 1, None)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db, poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            cid = (await client.get("/api/acta-deck", headers={"fly-client-ip": "10.0.0.1"})
+                   ).json()["items"][0]["cid"]
+            ft = (await client.post("/api/session", json={"turnstile_token": "x"},
+                  headers={"fly-client-ip": "10.0.0.1"})).json()["form_token"]
+            # Same token, DIFFERENT IP -> rejected (the replay we want to stop).
+            r_other = await client.post(
+                "/api/vote", json={"cid": cid, "value": "strange", "form_token": ft},
+                headers={"fly-client-ip": "203.0.113.99"})
+            # Same token, SAME IP -> accepted.
+            r_same = await client.post(
+                "/api/vote", json={"cid": cid, "value": "strange", "form_token": ft},
+                headers={"fly-client-ip": "10.0.0.1"})
+            return r_other.status_code, r_same.status_code
+
+    other, same = asyncio.run(run())
+    assert other == 403 and same == 200
+    cs = CommunityStore(community_db)
+    n = cs.counts_among([fk])[fk]["strange"]
+    cs.close()
+    assert n == 1  # only the same-IP vote landed

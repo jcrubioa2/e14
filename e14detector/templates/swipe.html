@@ -403,9 +403,9 @@
           'expired-callback': function () { window.__formToken = ''; ensureSession(); },
           'error-callback': function () { establishing = false; _settleSession(false); },
         });
-        // Pre-warm the token so the first submit doesn't have to wait (invisible widgets usually
-        // auto-run on render; kick it if nothing has arrived shortly after).
-        setTimeout(function () { if (!window.__formToken) ensureSession(); }, 1500);
+        // Pre-warm the token so the first vote delivers immediately (invisible widgets usually
+        // auto-run on render; kick it quickly if nothing has arrived yet, shrinking the cold window).
+        setTimeout(function () { if (!window.__formToken) ensureSession(); }, 600);
       } catch (e) {}
     };
     // Resolves true once a usable form token exists (false if we couldn't get one). Idempotent:
@@ -622,9 +622,9 @@
         const hp = document.getElementById('hp-website');
         while (outbox.length) {
           if (!voteReady()) {
-            if (reauths++ > 3) return;          // bail; the next vote / page load retries
+            if (reauths++ > 3) { telemetry('outbox_stalled'); return; }   // bail; next vote/load retries
             const ok = await ensureSession();   // runs in the background; the user keeps voting
-            if (!ok || !voteReady()) return;
+            if (!ok || !voteReady()) { telemetry('outbox_stalled'); return; }
           }
           const item = outbox[0];
           let res;
@@ -634,18 +634,47 @@
               body: JSON.stringify({ strange: item.strange, good: item.good,
                                      form_token: window.__formToken, website: hp ? hp.value : '' }),
             });
-          } catch (e) { return; }               // offline: leave it queued, retry on the next vote
+          } catch (e) { return; }               // offline: transient, leave queued, retry later
           if (res.status === 429) { await sleep(1500); continue; }   // backoff, keep the item
           const data = await res.json().catch(() => ({}));
           if (data && data.ok) { outbox.shift(); saveOutbox(); reauths = 0; continue; }  // delivered
-          // Rejected (token expired/invalid): re-establish and retry the SAME item, but bounded.
+          // Rejected (token expired/invalid/wrong-IP): re-establish and retry the SAME item, bounded.
           if (turnstileOn && reauths++ <= 3) {
             window.__formToken = '';
             const ok = await ensureSession();
-            if (!ok) return;
-          } else { return; }                    // give up for now (queue persists for a later retry)
+            if (!ok) { telemetry('outbox_stalled'); return; }
+          } else { telemetry('outbox_stalled'); return; }   // give up for now (queue persists)
         }
       } finally { flushing = false; }
+    }
+
+    let lastTlm = 0;
+    function telemetry(event) {
+      const now = Date.now();
+      if (now - lastTlm < 60000) return;   // throttle: at most once/min, so it can't spam
+      lastTlm = now;
+      try {
+        navigator.sendBeacon('/api/telemetry',
+          new Blob([JSON.stringify({ event: event, queued: outbox.length })], { type: 'application/json' }));
+      } catch (e) {}
+    }
+
+    // Last-resort delivery when the tab is hidden/closed: sendBeacon survives unload (a normal
+    // fetch may be cancelled). Each queued batch goes as its own beacon; the server dedups, so
+    // it's safe even if a regular flush also delivered it.
+    function flushBeacon() {
+      if (!window.__formToken || !outbox.length) return;
+      const hp = document.getElementById('hp-website');
+      const remaining = [];
+      for (const it of outbox) {
+        const body = JSON.stringify({ strange: it.strange, good: it.good,
+                                      form_token: window.__formToken, website: hp ? hp.value : '' });
+        let sent = false;
+        try { sent = navigator.sendBeacon('/api/vote-batch', new Blob([body], { type: 'application/json' })); }
+        catch (e) {}
+        if (!sent) remaining.push(it);   // couldn't queue (size/limit) — keep for a later retry
+      }
+      outbox = remaining; saveOutbox();
     }
 
     function submitDeck() {
@@ -674,6 +703,9 @@
 
     sendBtn.addEventListener('click', submitDeck);
     skipBtn.addEventListener('click', () => { showToast('Mesa saltada', true); board.innerHTML = skeleton(); bar.hidden = true; loadDeck(); });
+    // Deliver anything still queued when the user leaves/backgrounds the tab (beacon survives unload).
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushBeacon(); });
+    window.addEventListener('pagehide', flushBeacon);
 
     board.innerHTML = skeleton();   // initial shimmer; loadDeck reconciles it into the real mesa
     loadDeck();

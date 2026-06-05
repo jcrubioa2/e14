@@ -253,8 +253,9 @@ def test_vote_requires_form_token_and_honeypot_drops_bots(tmp_path: Path) -> Non
     assert r.status_code == 403 and r.json()["error"] == "invalid_request"
     assert community.strange_count(community.resolve_cid(cid)["field_key"]) == 0
 
-    # The /votar page issues a valid token; voting with it works.
-    page = client.get("/votar").text
+    # The /votar page issues a valid token; voting with it works (token is bound to the client IP,
+    # so the page load and the vote must come from the same IP — as a real browser does).
+    page = client.get("/votar", headers={"x-forwarded-for": "1.1.1.1"}).text
     tok = re.search(r'__formToken = "([^"]+)"', page).group(1)
     assert tok
     ok = client.post("/api/vote", json={"cid": cid, "value": "strange", "form_token": tok},
