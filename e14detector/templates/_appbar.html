@@ -9,9 +9,18 @@
   .appbar-inner { max-width:980px; margin:0 auto; padding:0 20px; }
 
   /* National-load progress: findable but understated — one line of label + count, a 4px bar.
-     Kept above the tabs so it informs without being protagonist. */
-  .appbar-progress { padding:9px 0 8px; }
+     Kept above the tabs so it informs without being protagonist. Doubles as the doorway to
+     /transparencia (the page that explains this very number), so the whole strip is a link
+     except on /transparencia itself, where it renders as a plain block (no self-link). */
+  .appbar-progress { display:block; padding:9px 0 8px; color:inherit; text-decoration:none; }
+  a.appbar-progress { cursor:pointer; }
+  a.appbar-progress:hover { text-decoration:none; }
+  a.appbar-progress:hover .appbar-progress-label { color:var(--ink); }
   .appbar-progress-top { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+  .appbar-progress-lead { display:inline-flex; align-items:baseline; gap:6px; min-width:0; flex:0 1 auto; }
+  .appbar-progress-go { flex:0 0 auto; color:var(--link); font-weight:800; font-size:14px; line-height:1;
+                        transition:transform .14s; }
+  a.appbar-progress:hover .appbar-progress-go { transform:translateX(2px); }
   .appbar-progress-label { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
                            font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-soft); }
   /* Community impact: total mesas reviewed. Subtle, tabular, always in view (on every page). */
@@ -51,9 +60,13 @@
 <div class="appbar-wrap">
   <div class="appbar-inner">
     {% if progress or total_reviews %}
-    <div class="appbar-progress {% if progress and progress.complete %}done{% endif %}" aria-live="polite">
+    {% set strip_link = active != 'transparencia' %}
+    <{{ 'a' if strip_link else 'div' }} class="appbar-progress {% if progress and progress.complete %}done{% endif %}"{% if strip_link %} href="/transparencia" aria-label="Ver c&oacute;mo cuadran los conteos de actas"{% endif %} aria-live="polite">
       <div class="appbar-progress-top">
-        <span class="appbar-progress-label">{% if progress %}{% if progress.complete %}Todas las actas est&aacute;n disponibles{% else %}Cargando las actas a nivel nacional &middot; {{ progress.pct }}%{% endif %}{% endif %}</span>
+        <span class="appbar-progress-lead">
+          <span class="appbar-progress-label">{% if progress %}{% if progress.complete %}Todas las actas est&aacute;n disponibles{% else %}Cargando las actas a nivel nacional &middot; {{ progress.pct }}%{% endif %}{% endif %}</span>
+          {% if strip_link %}<span class="appbar-progress-go" aria-hidden="true">&rsaquo;</span>{% endif %}
+        </span>
         {% if total_reviews %}
         <span class="appbar-reviews" title="Mesas revisadas por la comunidad en total">
           <span class="appbar-reviews-tick" aria-hidden="true"></span>
@@ -62,7 +75,7 @@
         {% endif %}
       </div>
       {% if progress %}<div class="appbar-progress-bar"><span style="width: {{ progress.pct }}%"></span></div>{% endif %}
-    </div>
+    </{{ 'a' if strip_link else 'div' }}>
     {% endif %}
     <nav class="appbar-tabs" aria-label="Secciones">
       <a class="appbar-tab {% if active == 'revisar' %}is-active{% endif %}" href="/votar"{% if active == 'revisar' %} aria-current="page"{% endif %}><span class="appbar-tab-dot" aria-hidden="true"></span>Revisar</a>

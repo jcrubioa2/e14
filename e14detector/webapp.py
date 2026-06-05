@@ -1552,7 +1552,7 @@ def create_app(
                 "backlog": backlog,
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
-                "active": "",
+                "active": "transparencia",
                 "site_url": config.SITE_URL,
                 "canonical": config.SITE_URL + "/transparencia",
                 "page_title": "Transparencia — conteo de actas E-14 | Veeduría ciudadana 2026",
