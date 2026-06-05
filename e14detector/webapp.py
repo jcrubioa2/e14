@@ -561,15 +561,18 @@ def build_count_chain(recon: dict | None, served_total: int) -> dict:
     """
     recon = recon or {}
     total_global = recon.get("total_global")
+    escrutadas = recon.get("mesas_escrutadas")
     informadas = recon.get("mesas_informadas")
     downloaded = recon.get("downloaded")
     crops_uploaded = recon.get("crops_uploaded")
     published = recon.get("sqlite_served")  # the pointer's claim of what it shipped
     rows = [
-        {"key": "total_global", "label": "Total nacional (mesas)", "count": total_global,
-         "source": "Registraduría · allTransmissionCodes.json (todos los nodos)"},
-        {"key": "informadas", "label": "Mesas informadas", "count": informadas,
-         "source": "Registraduría · nodos con expectedName"},
+        {"key": "total_global", "label": "Total nacional de mesas", "count": total_global,
+         "source": "Resultados oficiales · ACT/PR/00.json (metota)"},
+        {"key": "mesas_escrutadas", "label": "Mesas escrutadas", "count": escrutadas,
+         "source": "Resultados oficiales · ACT/PR/00.json (mesesc)"},
+        {"key": "informadas", "label": "Actas con imagen publicada", "count": informadas,
+         "source": "Divulgador · allTransmissionCodes.json"},
         {"key": "downloaded", "label": "Actas descargadas", "count": downloaded,
          "source": "manifest · status=done"},
         {"key": "crops_uploaded", "label": "Recortes subidos (frontera)", "count": crops_uploaded,

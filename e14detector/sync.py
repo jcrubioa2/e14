@@ -27,8 +27,9 @@ from pathlib import Path
 # The canonical, non-increasing order of the count-model chain. Kept here (not imported from
 # webapp, which pulls FastAPI) so the CLI stays light.
 CHAIN_ORDER = [
-    ("total_global", "Total nacional (mesas)"),
-    ("mesas_informadas", "Mesas informadas"),
+    ("total_global", "Total nacional de mesas"),
+    ("mesas_escrutadas", "Mesas escrutadas (resultados)"),
+    ("mesas_informadas", "Actas con imagen (divulgador)"),
     ("downloaded", "Actas descargadas"),
     ("crops_uploaded", "Recortes subidos (frontera)"),
     ("sqlite_served", "En la DB servida"),
@@ -243,11 +244,26 @@ def do_run(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
 
     def _refresh_universe() -> None:
         try:
-            from e14.universe import fetch_universe_counts, write_universe_snapshot
-            recs, total_global = fetch_universe_counts()
-            snap = write_universe_snapshot(recs, total_global)
-            print(f"[sync] universo: total_global={snap['total_global']:,} "
-                  f"informadas={snap['mesas_informadas']:,}", flush=True)
+            import os as _os
+
+            from e14.universe import (
+                fetch_universe_counts, load_universe_snapshot, write_universe_snapshot,
+            )
+            recs, _nodes = fetch_universe_counts()
+            # total_global (installed mesas) is from the bot-protected results portal, so it can't
+            # be scraped here: take $E14_TOTAL_GLOBAL, else carry forward the last snapshot's value.
+            tg = None
+            src = None
+            if _os.environ.get("E14_TOTAL_GLOBAL", "").isdigit():
+                tg, src = int(_os.environ["E14_TOTAL_GLOBAL"]), "$E14_TOTAL_GLOBAL"
+            else:
+                prev = load_universe_snapshot()
+                if prev and prev.get("total_global"):
+                    tg, src = int(prev["total_global"]), (prev.get("total_global_source") or "heredado")
+            snap = write_universe_snapshot(recs, total_global=tg, total_global_source=src)
+            tg_txt = f"{snap['total_global']:,}" if snap["total_global"] is not None else "—"
+            print(f"[sync] universo: total_global={tg_txt} informadas={snap['mesas_informadas']:,}",
+                  flush=True)
         except Exception as exc:  # noqa: BLE001 — a failed refresh must never stop publishing
             print(f"[sync] universo: refresh omitido ({type(exc).__name__}: {exc})", flush=True)
 

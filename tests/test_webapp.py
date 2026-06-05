@@ -543,19 +543,19 @@ def test_build_count_chain_orders_and_derives() -> None:
     from e14detector.webapp import build_count_chain
 
     recon = {
-        "total_global": 122020, "mesas_informadas": 122020,
+        "total_global": 122020, "mesas_escrutadas": 122020, "mesas_informadas": 122016,
         "downloaded": 122010, "crops_uploaded": 122007,
-        "sqlite_served": 122007, "missing_count": 13,
+        "sqlite_served": 122007, "missing_count": 9,
     }
     chain = build_count_chain(recon, served_total=122007)
     by_key = {r["key"]: r for r in chain["rows"]}
-    assert [r["status"] for r in chain["rows"]] == ["ok"] * 6  # monotone, nothing inverted
+    assert [r["status"] for r in chain["rows"]] == ["ok"] * 7  # monotone, nothing inverted
     assert by_key["published"]["count"] == 122007
     assert chain["served_eq_published"] is True
-    assert chain["cobertura"] == round(122007 * 100 / 122020, 2)  # 99.99
-    assert chain["cobertura_label"] == "99,99"  # Colombian decimal comma
-    assert chain["backlog_ingesta"] == 13
-    assert chain["backlog_reporte"] == 0
+    # cobertura = served / informadas (acta images), not / total_global.
+    assert chain["cobertura"] == round(122007 * 100 / 122016, 2)
+    assert chain["backlog_ingesta"] == 9    # informadas − served (ours)
+    assert chain["backlog_reporte"] == 4    # total_global − informadas (registraduría's)
 
 
 def test_build_count_chain_flags_inversion_and_divergence() -> None:

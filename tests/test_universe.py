@@ -67,8 +67,9 @@ def test_shrink_guard_allows_growth_and_small_dips(tmp_path: Path) -> None:
     assert write_universe_snapshot(dip, total_global=109, path=path)["mesas_informadas"] == 90
 
 
-def test_fetch_universe_counts_splits_total_from_informed(monkeypatch) -> None:
-    """total_global counts every node; informed records keep only those with expectedName."""
+def test_fetch_universe_counts_returns_informed_and_node_total(monkeypatch) -> None:
+    """nodes_total counts every node; informed records keep only those with expectedName.
+    (allTransmissionCodes enumerates mesas_informadas; total_global is operator-supplied.)"""
     payload = {"data": {"block": {"nodes": [
         {"idDepartmentCode": "1", "municipalityCode": "1", "idZoneCode": "1", "standCode": "1",
          "numberStand": "1", "idCorporationCode": "001", "expectedName": "a.pdf",
@@ -86,6 +87,18 @@ def test_fetch_universe_counts_splits_total_from_informed(monkeypatch) -> None:
         def get_json(self, url):  # noqa: ARG002
             return payload
 
-    recs, total_global = universe.fetch_universe_counts(session=_Session())
-    assert total_global == 3
-    assert len(recs) == 2  # only the two with expectedName are "informed"
+    recs, nodes_total = universe.fetch_universe_counts(session=_Session())
+    assert nodes_total == 3
+    assert len(recs) == 2  # only the two with expectedName are "informed" (mesas_informadas)
+
+
+def test_snapshot_total_global_optional_and_carried_as_none(tmp_path: Path) -> None:
+    """total_global is operator-supplied: omitted -> stored None (chain row '—', not a false 0)."""
+    path = tmp_path / "universe_snapshot.json"
+    recs = [_rec("01", "001", "001", "01", str(i).zfill(3)) for i in range(4)]
+    snap = write_universe_snapshot(recs, path=path)  # no total_global
+    assert snap["total_global"] is None
+    assert snap["mesas_informadas"] == 4
+    snap2 = write_universe_snapshot(recs, path=path, total_global=10,
+                                    total_global_source="results portal (operador)")
+    assert snap2["total_global"] == 10 and snap2["total_global_source"].startswith("results portal")

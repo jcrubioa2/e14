@@ -74,26 +74,58 @@ def cmd_build_universe(args) -> int:
 
 
 def cmd_refresh_universe(args) -> int:
-    """Refresh the external source of truth for the count model.
+    """Refresh the count-model snapshot from the divulgador's allTransmissionCodes.json.
 
-    Re-fetches allTransmissionCodes.json, records total_global + mesas_informadas into
-    data/universe_snapshot.json (the freshness anchor that replaces the old hardcoded
-    NATIONAL_TOTAL), and keeps the legacy mesa_universe.csv current for existing consumers.
-    The shrink-guard refuses a truncated fetch unless --allow-shrink.
+    That JSON enumerates the **mesas_informadas** (mesas with a downloadable acta). The election's
+    **total_global** (installed mesas) lives on the results portal (resultados.registraduria.gov.co),
+    which is bot-protected, so it's supplied via --total-global / $E14_TOTAL_GLOBAL (read off the
+    portal) and carried forward across refreshes until changed. The shrink-guard refuses a
+    truncated fetch unless --allow-shrink.
     """
-    recs, total_global = fetch_universe_counts()
+    from .universe import fetch_results_summary, load_universe_snapshot
+
+    recs, nodes_total = fetch_universe_counts()
     write_universe_csv(recs, UNIVERSE_CSV)
+
+    # Resolve total_global (+ mesas_escrutadas): explicit flag > env > results-portal API >
+    # carried forward from the last snapshot > unknown. The portal JSON is the preferred automatic
+    # source (metota = installed mesas, mesesc = counted); the flag/env stay as manual overrides.
+    total_global = source = mesas_escrutadas = None
+    if getattr(args, "total_global", None):
+        total_global, source = int(args.total_global), "results portal (--total-global)"
+    elif os.environ.get("E14_TOTAL_GLOBAL", "").isdigit():
+        total_global, source = int(os.environ["E14_TOTAL_GLOBAL"]), "results portal ($E14_TOTAL_GLOBAL)"
+    summary = fetch_results_summary()
+    if summary:
+        mesas_escrutadas = summary.get("mesas_escrutadas")
+        if total_global is None:
+            total_global, source = summary["total_mesas"], "results portal (ACT/PR/00.json)"
+    if total_global is None:
+        prev = load_universe_snapshot(SNAPSHOT_PATH)
+        if prev and prev.get("total_global"):
+            total_global, source = int(prev["total_global"]), (prev.get("total_global_source") or "heredado")
+            mesas_escrutadas = mesas_escrutadas or prev.get("mesas_escrutadas")
+
     try:
-        snap = write_universe_snapshot(recs, total_global, allow_shrink=args.allow_shrink)
+        snap = write_universe_snapshot(
+            recs, total_global=total_global, total_global_source=source,
+            mesas_escrutadas=mesas_escrutadas, allow_shrink=args.allow_shrink)
     except UniverseShrinkError as exc:
         print(f"✗ {exc}")
         return 1
     informadas = snap["mesas_informadas"]
-    backlog_reporte = max(0, snap["total_global"] - informadas)
     print(f"Universe snapshot -> {SNAPSHOT_PATH}")
-    print(f"  total_global      = {snap['total_global']:,}")
-    print(f"  mesas_informadas  = {informadas:,}  (backlog de reporte: {backlog_reporte:,})")
-    print(f"  fetched_at        = {snap['fetched_at']}")
+    if snap["total_global"] is not None:
+        print(f"  total_global       = {snap['total_global']:,}  ({source})")
+    else:
+        print(f"  total_global       = — (sin dato del portal; pasa --total-global N)")
+    if snap["mesas_escrutadas"] is not None:
+        print(f"  mesas_escrutadas   = {snap['mesas_escrutadas']:,}  (results portal · mesesc)")
+    print(f"  mesas_informadas   = {informadas:,}  (allTransmissionCodes · acta images)")
+    if snap["total_global"] is not None:
+        print(f"  backlog de reporte = {max(0, snap['total_global'] - informadas):,}  "
+              f"(total_global − informadas)")
+    print(f"  fetched_at         = {snap['fetched_at']}")
     return 0
 
 
@@ -399,7 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_build_universe)
 
     sp = sub.add_parser("refresh-universe",
-                        help="refresh the universe snapshot (total_global + mesas_informadas)")
+                        help="refresh the universe snapshot (mesas_informadas from the divulgador; "
+                             "total_global from the results portal via --total-global)")
+    sp.add_argument("--total-global", type=int,
+                    help="installed-mesa total read off resultados.registraduria.gov.co "
+                         "(bot-protected, so supplied here); carried forward until changed")
     sp.add_argument("--allow-shrink", action="store_true",
                     help="accept a snapshot smaller than the last (override the shrink-guard)")
     sp.set_defaults(func=cmd_refresh_universe)

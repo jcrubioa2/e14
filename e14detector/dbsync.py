@@ -277,6 +277,7 @@ def compute_reconciliation(
         tg = snap.get("total_global")
         inf = snap.get("mesas_informadas")
         rec["total_global"] = tg
+        rec["mesas_escrutadas"] = snap.get("mesas_escrutadas")
         rec["mesas_informadas"] = inf
         rec["universe_fetched_at"] = snap.get("fetched_at")
         if isinstance(inf, int):
