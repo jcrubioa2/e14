@@ -4,10 +4,13 @@ from __future__ import annotations
 import asyncio
 import collections
 import functools
+import hmac
+import ipaddress
 import math
 import os
 import random
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -577,12 +580,97 @@ def lookup_candidate_appeal(conn: sqlite3.Connection, field_key: str) -> tuple[s
     return row_["raw_crop_path"], bool(row_["algo_flagged"])
 
 
+_CF_NETS = []
+for _c in config.CF_IP_RANGES:
+    try:
+        _CF_NETS.append(ipaddress.ip_network(_c))
+    except ValueError:
+        pass
+
+
+def _ip_in_cloudflare(ip: str) -> bool:
+    """True if ``ip`` is within Cloudflare's published edge ranges."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _CF_NETS)
+
+
 def _client_ip(request: Request) -> str:
-    """Best-effort client IP, honoring a single proxy hop (Fly/Cloudflare)."""
+    """Real client IP — un-spoofable, and correct whether or not Cloudflare is in front.
+
+    ``Fly-Client-IP`` is set by Fly's edge to whoever opened the connection, and a client cannot
+    forge it. If that connector is a Cloudflare IP, the request came through Cloudflare and the real
+    visitor is in ``cf-connecting-ip`` — which we trust ONLY in that case, so a direct-to-Fly
+    attacker can't forge ``cf-connecting-ip`` (their Fly-Client-IP wouldn't be a Cloudflare IP).
+    Otherwise (direct to Fly, or mid-DNS-propagation) Fly-Client-IP IS the real client. We never
+    trust the first ``X-Forwarded-For`` hop (attacker-controlled); the XFF/peer fallbacks are only
+    for local/dev where no Fly header exists."""
+    fly = request.headers.get("fly-client-ip")
+    if fly:
+        fly = fly.strip()
+        if _ip_in_cloudflare(fly):
+            cf = request.headers.get("cf-connecting-ip")
+            if cf:
+                return cf.strip()
+        return fly
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
-        return fwd.split(",")[0].strip()
+        return fwd.split(",")[-1].strip()
     return request.client.host if request.client else "0.0.0.0"
+
+
+def _voter_ip(request: Request) -> str:
+    """Client IP normalized for the voter identity: an IPv6 address is collapsed to its **/64**
+    so one allocation (which can hand out billions of addresses) maps to a SINGLE identity, not
+    unlimited ones. IPv4 (and any non-IP fallback string) is returned unchanged. Used only for
+    ``voter_token`` / rate limiting; Turnstile still gets the raw ``_client_ip`` as remoteip."""
+    ip = _client_ip(request)
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False).network_address)
+    return ip
+
+
+# In-process per-IP token bucket for the read/deck endpoints. Best-effort and per-machine (not
+# shared across Fly machines) — that's fine: its only job is to stop one client from driving
+# unbounded cid_index writes / Aurora cost by hammering /api/feed. The authoritative anti-Sybil
+# controls (dedup, the vote rate limiter, Turnstile) all live on the write path. Keyed by
+# _voter_ip; costs zero DB round-trips so it doesn't add load to the hot read path.
+_feed_buckets: dict[str, tuple[float, float]] = {}
+_feed_lock = threading.Lock()
+
+
+def _feed_allow(ip: str) -> bool:
+    refill = config.FEED_RATE_REFILL_PER_MIN / 60.0
+    cap = config.FEED_RATE_BUCKET
+    now = time.time()
+    with _feed_lock:
+        if len(_feed_buckets) > 50000:
+            _feed_buckets.clear()  # crude memory bound under an IP-spray; best-effort anyway
+        tokens, last = _feed_buckets.get(ip, (cap, now))
+        tokens = min(cap, tokens + (now - last) * refill)
+        if tokens < 1.0:
+            _feed_buckets[ip] = (tokens, now)
+            return False
+        _feed_buckets[ip] = (tokens - 1.0, now)
+        return True
+
+
+def _require_admin(request: Request, key: str) -> None:
+    """Gate the operator-only /admin routes. 404 when no token is configured (feature off);
+    403 unless the supplied token matches. The token may come from an ``X-Admin-Token`` header
+    (preferred — keeps it out of URLs/logs/Referer) or the ``?key=`` query param (browser
+    convenience). Compared in constant time to avoid leaking it via response timing."""
+    if not config.ADMIN_TOKEN:
+        raise HTTPException(status_code=404, detail="not found")
+    supplied = request.headers.get("x-admin-token") or key or ""
+    if not hmac.compare_digest(supplied, config.ADMIN_TOKEN):
+        raise HTTPException(status_code=403, detail="forbidden")
 
 
 def create_app(
@@ -768,6 +856,15 @@ def create_app(
         """Baseline hardening headers on every response. Deliberately NO restrictive
         ``default-src`` CSP (would break the inline JS/Turnstile widget); only frame-ancestors
         (anti-clickjacking) plus the cheap, universally-safe headers."""
+        # Edge-bypass guard: when E14_REQUIRE_CF is on, a mutating API call is only accepted if it
+        # reached Fly THROUGH Cloudflare — i.e. the un-spoofable Fly-Client-IP is a Cloudflare IP.
+        # This blocks an attacker who hits the Fly origin directly to skip Cloudflare's edge
+        # protections. Fail-OPEN when off. Only POST /api/* is gated; GET pages and /health (Fly's
+        # own internal check, which does NOT come via Cloudflare) are never affected.
+        if config.REQUIRE_CF_ORIGIN and request.method == "POST" and request.url.path.startswith("/api/"):
+            _fly = request.headers.get("fly-client-ip", "")
+            if not (_fly and _ip_in_cloudflare(_fly)):
+                return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
         try:
             resp = await call_next(request)
         except Exception as exc:  # noqa: BLE001 — record + page, then let the 500 propagate
@@ -798,6 +895,9 @@ def create_app(
     app.state.started_at = time.time()
     app.state.err_5xx = 0
     app.state.recent_errors: collections.deque = collections.deque(maxlen=20)
+    # Client-reported outbox health (vote-loss signal): how many times a browser couldn't deliver
+    # queued votes. Best-effort, in-memory (per machine, resets on deploy) — watch it in /health.
+    app.state.telemetry: collections.Counter = collections.Counter()
 
     def conn() -> sqlite3.Connection:
         if not results_db.exists():
@@ -855,9 +955,24 @@ def create_app(
 
         ok = await asyncio.to_thread(_ready)
         return JSONResponse(
-            {"status": "ok" if ok else "unavailable", "db": ok},
+            {"status": "ok" if ok else "unavailable", "db": ok,
+             # Vote-loss signal: client outbox stalls reported since this machine booted.
+             "outbox_stalled": app.state.telemetry.get("outbox_stalled", 0)},
             status_code=200 if ok else 503,
         )
+
+    @app.post("/api/telemetry")
+    async def api_telemetry(request: Request, payload: dict = Body(...)):
+        # Tiny, unauthenticated client telemetry (vote-loss signal). Rate-limited per IP so it
+        # can't be spammed to skew the counter; never errors (best-effort, returns 200 always).
+        if _feed_allow("tlm:" + _voter_ip(request)):
+            event = str(payload.get("event", "") or "")[:40]
+            if event:
+                app.state.telemetry[event] += 1
+                if event == "outbox_stalled":
+                    queued = int(payload.get("queued", 0) or 0)
+                    print(f"telemetry outbox_stalled queued={queued} ip={_voter_ip(request)}", flush=True)
+        return JSONResponse({"ok": True}, status_code=200)
 
     def _admin_health(votes_ok: bool, pipeline: dict) -> dict:
         """At-a-glance status for the operator board: serving DB, votes backend, queue backlog,
@@ -897,10 +1012,7 @@ def create_app(
     @app.get("/admin/poll")
     async def admin_poll(request: Request, key: str = ""):
         # Operator-only: DB/publishing management + health. Off unless a token is configured.
-        if not config.ADMIN_TOKEN:
-            raise HTTPException(status_code=404, detail="not found")
-        if key != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=403, detail="forbidden")
+        _require_admin(request, key)
         votes_ok = await asyncio.to_thread(_votes_backend_ok)
         # Pipeline health: what the served DB holds vs what the publisher last shipped.
         # A large pointer age, or a served count far below the published frontier, means
@@ -928,13 +1040,10 @@ def create_app(
         )
 
     @app.post("/admin/db-lock")
-    async def admin_db_lock(key: str = "", locked: str = ""):
+    async def admin_db_lock(request: Request, key: str = "", locked: str = ""):
         # Toggle the publish lock (freezes the served DB so no publisher can overwrite it).
         # POST with query params (?key=...&locked=on|off) — no form body, so no multipart dep.
-        if not config.ADMIN_TOKEN:
-            raise HTTPException(status_code=404, detail="not found")
-        if key != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=403, detail="forbidden")
+        _require_admin(request, key)
         from .dbsync import set_db_lock
         want = locked.strip().lower() in ("1", "true", "on", "yes", "lock")
         n_docs = None
@@ -1312,7 +1421,7 @@ def create_app(
         form_token = (
             ""
             if turnstile_on
-            else (issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else "")
+            else (issue_form_token(poll_cfg.form_token_secret, sid, _voter_ip(request)) if poll_cfg.form_token_secret else "")
         )
         response = templates.TemplateResponse(
             request,
@@ -1400,10 +1509,12 @@ def create_app(
         return out
 
     @app.get("/api/feed")
-    async def api_feed(n: int = Query(12, ge=1, le=50), exclude: str = ""):
+    async def api_feed(request: Request, n: int = Query(12, ge=1, le=50), exclude: str = ""):
         # Anonymized random deck. ``exclude`` is a comma-separated list of cids the client
         # has already swiped this session (best-effort de-dup; the vote tables ignore true
         # repeats anyway). No acta id / location / path ever appears in the response.
+        if not _feed_allow(_voter_ip(request)):
+            raise HTTPException(status_code=429, detail="slow down")
         skip = {c for c in exclude.split(",") if c}
         return {"items": _feed_payload(n, skip)}
 
@@ -1457,8 +1568,10 @@ def create_app(
         return items
 
     @app.get("/api/acta-deck")
-    async def api_acta_deck():
+    async def api_acta_deck(request: Request):
         # One random anonymized acta as a grid of casillas. No acta id / location ever leaks.
+        if not _feed_allow(_voter_ip(request)):
+            raise HTTPException(status_code=429, detail="slow down")
         return {"items": _acta_deck_payload()}
 
     def _hot_crops_payload() -> list[dict]:
@@ -1469,7 +1582,15 @@ def create_app(
         voting act stays anonymous (no per-voter identity is ever exposed). Each item carries
         the crop image, its acta ``document_id`` + a location label, and the public tallies.
         """
-        hot = community.hot_crops(HOTLIST_SIZE)
+        # Promotion floor: a crop only headlines the public billboard once >= MIN_PROMOTE_VOTERS
+        # distinct voters flagged it (post /64-bucketing, ~distinct networks) — one identity can't
+        # manufacture a "hot" crop. Over-fetch then filter+truncate so the floor doesn't under-fill.
+        floor = config.MIN_PROMOTE_VOTERS
+        if floor > 1:
+            hot = [h for h in community.hot_crops(HOTLIST_SIZE * 4)
+                   if h["strange"] >= floor][:HOTLIST_SIZE]
+        else:
+            hot = community.hot_crops(HOTLIST_SIZE)
         if not hot:
             return []
         keys = [h["field_key"] for h in hot]
@@ -1598,7 +1719,12 @@ def create_app(
         on the requested page. Only a page's worth of cards is built (each costs a vote_fields +
         counts_among round-trip), and the ranked list comes from the cached popularity dict."""
         pop = _agg_cached("popularity", community.acta_popularity)
-        ranked = sorted(pop.items(), key=lambda kv: kv[1], reverse=True) if pop else []
+        # Promotion floor: only rank actas reported by >= MIN_PROMOTE_VOTERS distinct voters, so a
+        # single identity can't push an acta onto the public "most reported" board (see _hot_crops_payload).
+        floor = config.MIN_PROMOTE_VOTERS
+        ranked = sorted(
+            ((d, r) for d, r in pop.items() if r >= floor), key=lambda kv: kv[1], reverse=True
+        ) if pop else []
         total = len(ranked)
         pages = max(1, math.ceil(total / REPORTES_PER_PAGE))
         page = max(1, min(page, pages))
@@ -1678,7 +1804,8 @@ def create_app(
         ):
             return _flag_response({"ok": False, "error": "challenge_failed"}, 403, sid, new_sid)
         form_token = (
-            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
+            issue_form_token(poll_cfg.form_token_secret, sid, _voter_ip(request))
+            if poll_cfg.form_token_secret else ""
         )
         return _flag_response({"ok": True, "form_token": form_token}, 200, sid, new_sid)
 
@@ -1701,7 +1828,7 @@ def create_app(
         # Reject cross-site browser vote casting (see _origin_allowed). Cheap, before any DB work.
         if not _origin_allowed(request):
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
+        token = voter_token(poll_cfg.voter_salt, _voter_ip(request))
 
         # The store calls below are blocking boto3 (Aurora Data API) / SQS round-trips. In an
         # async handler they must run in a thread or they stall the event loop, serializing the
@@ -1712,15 +1839,15 @@ def create_app(
             community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
         ):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        bot = bot_check(payload, sid, poll_cfg)
+        bot = bot_check(payload, sid, _voter_ip(request), poll_cfg)
         if bot == "honeypot":
             return _flag_response({"ok": True}, 200, sid, new_sid)  # shadow-drop the bot
         if bot:
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        if poll_cfg.turnstile_enabled and not verify_turnstile(
-            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
-        ):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        # No per-vote Turnstile check: Turnstile is a SESSION gate. The client solves it once and
+        # exchanges it at /api/session for the signed form token, which bot_check verifies above.
+        # Votes carry only that form token (single-use ~300s Turnstile tokens wouldn't survive a
+        # whole deck), so re-verifying a Turnstile token here rejected every vote when it was on.
 
         row = await asyncio.to_thread(resolve_cid_cached, cid)  # cache hit => no Data API call
         if not row:
@@ -1773,21 +1900,26 @@ def create_app(
 
         if not _origin_allowed(request):
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
-        # One rate charge per submit (not per crop): a full-acta batch is one contribution.
-        if not await asyncio.to_thread(
-            community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
-        ):
-            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        bot = bot_check(payload, sid, poll_cfg)
+        token = voter_token(poll_cfg.voter_salt, _voter_ip(request))
+        # Charge the limiter proportionally: a normal full-acta batch (~10-20 crops) costs ~1
+        # token, but an oversized submit is charged ceil(n / BATCH_VOTES_PER_TOKEN) so one identity
+        # can't enqueue an outsized amount of work per submit. Consuming a token on a rejected
+        # oversized batch is intended (it's rate limiting).
+        charges = max(1, math.ceil((len(strange) + len(good)) / config.BATCH_VOTES_PER_TOKEN))
+        for _ in range(charges):
+            if not await asyncio.to_thread(
+                community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
+            ):
+                return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        bot = bot_check(payload, sid, _voter_ip(request), poll_cfg)
         if bot == "honeypot":
             return _flag_response({"ok": True, "strange": 0, "good": 0}, 200, sid, new_sid)
         if bot:
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        if poll_cfg.turnstile_enabled and not verify_turnstile(
-            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
-        ):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        # No per-vote Turnstile check: Turnstile is a SESSION gate. The client solves it once and
+        # exchanges it at /api/session for the signed form token, which bot_check verifies above.
+        # Votes carry only that form token (single-use ~300s Turnstile tokens wouldn't survive a
+        # whole deck), so re-verifying a Turnstile token here rejected every vote when it was on.
 
         async def record(cid: str, value: str) -> bool:
             row = await asyncio.to_thread(resolve_cid_cached, cid)
@@ -1815,14 +1947,15 @@ def create_app(
     return app
 
 
-def bot_check(payload: dict, sid: str, poll: PollConfig) -> str:
+def bot_check(payload: dict, sid: str, ip: str, poll: PollConfig) -> str:
     """In-app bot screen. Returns '' to proceed, 'honeypot' (silently drop a bot), or
-    'bad_token' (forged/missing/too-fast submit). Skipped when no form-token secret."""
+    'bad_token' (forged/missing/too-fast/wrong-IP submit). Skipped when no form-token secret.
+    ``ip`` binds the token to the client IP so a solved token can't be replayed from elsewhere."""
     if str(payload.get("website", "")).strip():
         return "honeypot"  # a hidden field only bots fill
     if poll.form_token_secret and not verify_form_token(
         poll.form_token_secret, sid, payload.get("form_token"),
-        poll.form_min_seconds, poll.form_max_seconds,
+        poll.form_min_seconds, poll.form_max_seconds, ip=ip,
     ):
         return "bad_token"
     return ""

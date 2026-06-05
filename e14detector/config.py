@@ -187,6 +187,43 @@ ADMIN_TOKEN = os.environ.get("E14_ADMIN_TOKEN", "")
 # visitor's session. Empty => not enforced (local dev / tests). A request with NO Origin (a
 # non-browser client) is left to the rate-limit / Turnstile controls, not blocked here.
 ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.environ.get("E14_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+# Real client IP resolution (see webapp._client_ip). Fly sets the un-spoofable ``Fly-Client-IP``
+# to whoever connected to Fly's edge. When Cloudflare proxies us, that connector is Cloudflare, so
+# the real visitor is in ``cf-connecting-ip`` — but we only trust that header when Fly-Client-IP is
+# actually a Cloudflare IP (else a direct-to-Fly attacker could forge cf-connecting-ip). These are
+# Cloudflare's published ranges (https://www.cloudflare.com/ips-v4|v6 — refresh rarely); override
+# with E14_CF_IP_RANGES (comma-separated CIDRs) if they change. Empty/none => never trust CF header.
+_CF_DEFAULT_RANGES = (
+    "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,"
+    "108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,"
+    "162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,"
+    "2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,"
+    "2a06:98c0::/29,2c0f:f248::/32"
+)
+CF_IP_RANGES = [c.strip() for c in os.environ.get("E14_CF_IP_RANGES", _CF_DEFAULT_RANGES).split(",") if c.strip()]
+# Edge-bypass guard (Cloudflare's "only allow Cloudflare IPs at your origin", done in-app since Fly
+# has no origin firewall): when on, POST /api/* is rejected unless the connection reached Fly FROM a
+# Cloudflare IP (the un-spoofable Fly-Client-IP is within CF_IP_RANGES). Forces all vote traffic
+# through Cloudflare's edge — an attacker hitting the Fly origin directly is blocked. Off by default
+# (fail-open); enable with E14_REQUIRE_CF=1 once the domain is served through Cloudflare. /health and
+# GET pages are never gated. Needs CF_IP_RANGES current (override via E14_CF_IP_RANGES if CF changes).
+REQUIRE_CF_ORIGIN = os.environ.get("E14_REQUIRE_CF", "").lower() in ("1", "true", "yes")
+# Minimum distinct voters before a crop/acta surfaces on the PUBLIC "most reported" billboard
+# / ranking. With IPv6 collapsed to a /64 in the voter identity, distinct voters ~= distinct
+# networks, so this is a cheap anti-manufacture floor (one attacker can't make a crop "hot"
+# alone). Default 1 = no floor (unchanged behaviour: a single report still surfaces). Set
+# E14_MIN_PROMOTE_VOTERS=3 (or 2) in production to require a small crowd before promotion. Does
+# NOT hide tallies on an acta a visitor opens directly.
+MIN_PROMOTE_VOTERS = int(os.environ.get("E14_MIN_PROMOTE_VOTERS", "1"))
+# Per-IP read limit for the deck/feed endpoints (in-process token bucket, separate from the
+# vote limiter) so a script can't drive unbounded cid_index writes / Aurora cost by hammering
+# /api/feed. Generous — real scrollers poll often. refill/min and burst capacity.
+FEED_RATE_REFILL_PER_MIN = float(os.environ.get("E14_FEED_RATE_REFILL_PER_MIN", "120"))
+FEED_RATE_BUCKET = float(os.environ.get("E14_FEED_RATE_BUCKET", "240"))
+# Votes charged per rate-token on the batch endpoint: a normal full-acta submit (~10-20 crops)
+# costs ~1 token; a giant batch is charged ceil(n / this). Keeps normal UX free while bounding
+# how much one identity can enqueue per submit.
+BATCH_VOTES_PER_TOKEN = int(os.environ.get("E14_BATCH_VOTES_PER_TOKEN", "20"))
 # Interactive API docs (/docs, /redoc, /openapi.json) publish the full route+schema surface.
 # Off by default (prod); set E14_EXPOSE_DOCS=1 for local exploration.
 EXPOSE_DOCS = os.environ.get("E14_EXPOSE_DOCS", "").lower() in ("1", "true", "yes")
@@ -197,7 +234,11 @@ VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
 # and no faster than FORM_MIN_SECONDS after load. Reuses the voter salt as the HMAC key
 # so no new secret is needed (it is already set in production).
 FORM_TOKEN_SECRET = os.environ.get("E14_FORM_TOKEN_SECRET", "") or VOTER_SALT
-FORM_MIN_SECONDS = float(os.environ.get("E14_FORM_MIN_SECONDS", "2"))
+# Min token age default 0: the old 2s "too fast = bot" gate bounced a freshly-minted token (the
+# client now flushes a queued vote within ms of solving Turnstile / minting at /api/session),
+# which forced a needless re-verify loop. Turnstile is the real bot gate now; raise this only on
+# the no-Turnstile honeypot path if you want the timing heuristic back.
+FORM_MIN_SECONDS = float(os.environ.get("E14_FORM_MIN_SECONDS", "0"))
 FORM_MAX_SECONDS = float(os.environ.get("E14_FORM_MAX_SECONDS", "3600"))
 
 

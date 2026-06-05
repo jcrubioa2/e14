@@ -253,8 +253,9 @@ def test_vote_requires_form_token_and_honeypot_drops_bots(tmp_path: Path) -> Non
     assert r.status_code == 403 and r.json()["error"] == "invalid_request"
     assert community.strange_count(community.resolve_cid(cid)["field_key"]) == 0
 
-    # The /votar page issues a valid token; voting with it works.
-    page = client.get("/votar").text
+    # The /votar page issues a valid token; voting with it works (token is bound to the client IP,
+    # so the page load and the vote must come from the same IP — as a real browser does).
+    page = client.get("/votar", headers={"x-forwarded-for": "1.1.1.1"}).text
     tok = re.search(r'__formToken = "([^"]+)"', page).group(1)
     assert tok
     ok = client.post("/api/vote", json={"cid": cid, "value": "strange", "form_token": tok},
@@ -269,8 +270,11 @@ def test_vote_requires_form_token_and_honeypot_drops_bots(tmp_path: Path) -> Non
     assert community.strange_count(fkey) == 1  # unchanged
 
 
-def test_vote_turnstile_enabled_rejects_missing_token(tmp_path: Path) -> None:
-    app = _build_app(tmp_path, turnstile_secret="x", turnstile_enabled=True)
+def test_vote_turnstile_enabled_requires_session_form_token(tmp_path: Path) -> None:
+    """Turnstile is a SESSION gate: with it on (and the prod form-token secret set), a vote with no
+    form token is rejected by bot_check. The legit path mints that token via /api/session after a
+    solve; votes never carry a per-vote Turnstile token (see test_webapp's success case)."""
+    app = _build_app(tmp_path, form_secret="s", turnstile_secret="x", turnstile_enabled=True)
     client = TestClient(app)
     cid = _feed_cid(client)
     r = client.post("/api/vote", json={"cid": cid, "value": "good"}, headers={"x-forwarded-for": "9.9.9.9"})
