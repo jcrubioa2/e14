@@ -19,6 +19,63 @@ def _served_db(output_dir: Path, n: int) -> None:
     con.commit(); con.close()
 
 
+def _served_db_with_crops(output_dir: Path, crop_paths: list[str]) -> None:
+    db = output_dir / "results" / "results.sqlite"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT)")
+    con.execute("CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, page_number INTEGER, "
+                "row_number INTEGER, row_type TEXT, raw_crop_path TEXT)")
+    for i, p in enumerate(crop_paths):
+        con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                    "VALUES (?,1,?,?,?)", (f"d{i}", i, "candidate", p))
+    con.commit(); con.close()
+
+
+def test_audit_served_crops_clean_when_all_present(tmp_path: Path, monkeypatch) -> None:
+    from e14detector import cropaudit, publish
+
+    out = tmp_path / "out"
+    _served_db_with_crops(out, ["data/x/crops/a.png", "data/x/crops/b.png"])
+    monkeypatch.setattr(publish, "list_bucket_crop_keys",
+                        lambda **kw: {"crops/a.png", "crops/b.png"})
+    assert cropaudit.audit_served_crops(out, bucket="b") == []
+
+
+def test_audit_served_crops_flags_orphans(tmp_path: Path, monkeypatch) -> None:
+    from e14detector import cropaudit, publish
+
+    out = tmp_path / "out"
+    _served_db_with_crops(out, ["data/x/crops/a.png", "data/x/crops/b.png", "data/x/crops/c.png"])
+    monkeypatch.setattr(publish, "list_bucket_crop_keys", lambda **kw: {"crops/a.png"})
+    problems = cropaudit.audit_served_crops(out, bucket="b")
+    assert len(problems) == 1 and "2 recorte" in problems[0]  # b.png + c.png missing
+
+
+def test_content_summary_parses_latest_report(tmp_path: Path) -> None:
+    from e14detector import contentcheck
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    # Older report (should be ignored in favour of the newest by filename sort).
+    (reports / "content_verify_20260601T000000Z.csv").write_text(
+        "key,verdict\nk1,match\n")
+    (reports / "content_verify_20260605T000000Z.csv").write_text(
+        "key,verdict\nk1,match\nk2,content_changed\nk3,content_changed\nk4,no_baseline\n")
+    s = contentcheck.latest_content_summary(reports)
+    assert s["report"] == "content_verify_20260605T000000Z.csv"
+    assert s["checked"] == 4 and s["content_changed"] == 2
+    assert s["changed_pct"] == 50.0
+    note = contentcheck.content_note(reports)
+    assert "no edición probada" in note
+
+
+def test_content_summary_none_when_no_reports(tmp_path: Path) -> None:
+    from e14detector import contentcheck
+    assert contentcheck.latest_content_summary(tmp_path / "nope") is None
+    assert contentcheck.content_note(tmp_path / "nope") is None
+
+
 def test_verify_chain_passes_on_consistent_counts() -> None:
     recon = {"total_global": 122020, "mesas_informadas": 122020, "downloaded": 122010,
              "crops_uploaded": 122007, "sqlite_served": 122007, "backlog_ingesta": 13}

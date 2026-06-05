@@ -177,6 +177,14 @@
         <div class="card">tamaño publicado<b>{% if pipeline.pointer_raw_mb %}{{ pipeline.pointer_raw_mb }} MB{% else %}&mdash;{% endif %}</b></div>
         <div class="card">sha<b>{% if pipeline.pointer_sha %}{{ pipeline.pointer_sha }}{% else %}&mdash;{% endif %}</b></div>
       </div>
+      {% if chain.content %}
+      <div class="muted" style="margin-top:10px; font-size:12px;">
+        <b>Integridad de contenido</b> (eje paralelo, informativo):
+        {{ chain.content.content_changed }} de {{ chain.content.checked }} actas re-emitidas
+        ({{ chain.content.changed_pct }}%) — re-emisión de PDF bajo el mismo hash, <b>no edición de tally
+        probada</b>. Informe: {{ chain.content.report }}.
+      </div>
+      {% endif %}
       {% else %}
       <div class="muted" style="font-size:13px; padding:8px 0;">
         El puntero publicado aún no trae el bloque de reconciliación. Ejecuta

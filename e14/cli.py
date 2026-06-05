@@ -128,6 +128,11 @@ def cmd_sync_run(args) -> int:
     )
 
 
+def cmd_sync_backup(args) -> int:
+    from e14detector.sync import do_backup
+    return do_backup(_sync_out(args), dest=Path(args.dest), bucket=args.bucket, cdn_base=args.cdn_base)
+
+
 def cmd_sync_fleet(args) -> int:
     # Multi-machine orchestration still lives in the detector CLI (fleet-init/status/schedule/
     # complete/pull-fleet/publish-fleet). Point operators there rather than duplicate it.
@@ -459,6 +464,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--allow-locked", action="store_true", help="publish even over a locked round")
     sp.add_argument("--allow-shrink", action="store_true", help="override the shrink-guard")
     sp.set_defaults(func=cmd_sync_run)
+
+    sp = sync_sub.add_parser("backup", help="write one off-Tigris DR copy of the published snapshot")
+    _sync_common(sp)
+    sp.add_argument("--dest", required=True, help="destination directory for the DR copy")
+    sp.set_defaults(func=cmd_sync_backup)
 
     sp = sync_sub.add_parser("fleet", help="multi-machine orchestration (points to the detector CLI)")
     sp.set_defaults(func=cmd_sync_fleet)

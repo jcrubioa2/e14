@@ -608,6 +608,8 @@ def build_count_chain(recon: dict | None, served_total: int) -> dict:
         "served_eq_published": served_eq_published,
         "missing_count": recon.get("missing_count"),
         "universe_fetched_at": recon.get("universe_fetched_at"),
+        # Content-integrity axis (parallel, informational): latest content-report summary.
+        "content": recon.get("content"),
         "has_reconciliation": bool(recon),
     }
 

@@ -178,7 +178,10 @@ def do_verify(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
         else:
             rep.problems.extend(audit_served_crops(output_dir, bucket=bucket))
     if check_content:
-        rep.notes.append("verificación de contenido: ver `scripts/verify_acta_content.py` (P1.C)")
+        from .contentcheck import content_note
+        note = content_note()
+        rep.notes.append(note or "integridad de contenido: sin informe aún "
+                                 "(genera uno con scripts/verify_acta_content.py --sample N)")
 
     print(format_chain(recon, source))
     for n in rep.notes:
@@ -206,6 +209,18 @@ def do_restore(output_dir: Path, *, bucket: str | None, cdn_base: str | None,
         print("restore: no hay puntero publicado aún (nada que fusionar)")
     else:
         print(f"restore: DB fusionada (sha {pulled.get('sha256', '?')})")
+    return 0
+
+
+def do_backup(output_dir: Path, *, dest: Path, bucket: str | None, cdn_base: str | None) -> int:
+    """Write one off-Tigris DR copy of the live published snapshot (R1 is the permanent record)."""
+    from .dbsync import backup_published_db
+
+    info = backup_published_db(Path(dest), cdn_base=cdn_base, bucket=bucket)
+    if info is None:
+        print("backup: no hay puntero publicado (nada que respaldar)")
+        return 1
+    print(f"backup: {info.get('n_docs', '?')} actas -> {info['path']} (sha {info['sha256'][:12]})")
     return 0
 
 

@@ -300,6 +300,17 @@ def compute_reconciliation(
     # frontier (only_uploaded mode) and otherwise sqlite_served. Recording it keeps the chain
     # explicit even though I2==I3==I4 holds by construction.
     rec["crops_uploaded"] = int(kept) if kept is not None else int(n_docs)
+    # Content-integrity axis (parallel to coverage, NOT part of the monotone chain): the latest
+    # content report's summary, if one exists locally. Best-effort; absent on a publisher with no
+    # report. Surfaced as its own line on the admin board / transparencia.
+    try:
+        from .contentcheck import latest_content_summary
+
+        content = latest_content_summary()
+        if content:
+            rec["content"] = content
+    except Exception:  # noqa: BLE001 — content axis is informational; never blocks a publish
+        pass
     return rec
 
 
@@ -679,6 +690,33 @@ def fetch_published_pointer(
         return json.loads(client.get_object(Bucket=bucket, Key=POINTER_KEY)["Body"].read())
     except Exception:
         return None
+
+
+def backup_published_db(
+    dest_dir: Path,
+    *,
+    cdn_base: str | None = None,
+    bucket: str | None = None,
+    client=None,
+    timeout: float = 300.0,
+) -> dict | None:
+    """Download the live published snapshot to ``dest_dir`` as a DR copy *outside* the bucket.
+
+    R1 is the permanent historical record but today lives in a single Tigris bucket; this writes
+    one cheap off-Tigris copy (the decompressed, sha-verified DB + the pointer JSON sidecar) that
+    an operator can park on another provider / external drive. Returns ``{path, sha256, n_docs}``
+    or None when nothing is published yet. The sha is verified on download (raises on mismatch).
+    """
+    pointer = fetch_published_pointer(cdn_base=cdn_base or None, bucket=bucket, client=client, timeout=timeout)
+    if pointer is None:
+        return None
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    sha = pointer.get("sha256", "")
+    dest = dest_dir / f"results-{sha[:16]}.sqlite"
+    _download_snapshot_file(pointer, dest, cdn_base=cdn_base or None, bucket=bucket, client=client, timeout=timeout)
+    (dest_dir / "latest.json").write_text(json.dumps(pointer), encoding="utf-8")
+    return {"path": str(dest), "sha256": sha, "n_docs": pointer.get("n_docs")}
 
 
 def pull_db(
