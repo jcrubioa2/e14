@@ -5,7 +5,6 @@ from PIL import Image
 from e14detector.publish import crop_upload_plan, publish_crops
 from e14detector.schemas import DocumentMetadata, VoteField
 from e14detector.storage import DetectorStore
-from e14detector.webapp import crop_key  # object keys are the OPAQUE crop_key, not readable paths
 
 
 class _FakeS3:
@@ -42,12 +41,10 @@ def _seed(tmp_path: Path) -> Path:
 
 def test_plan_keys_are_crops_suffix_and_candidate_only(tmp_path: Path) -> None:
     output_dir = _seed(tmp_path)
-    crops = output_dir / "crops"
     plan = crop_upload_plan(output_dir)
     keys = sorted(k for _, k in plan)
-    assert keys == sorted(crop_key(str(crops / f"c{i}_candidate_field.png")) for i in range(3))
-    # Opaque: the readable, mesa-identifying filename never appears in the object key.
-    assert all(k.startswith("crops/") and "candidate_field" not in k for k in keys)
+    assert keys == ["crops/c0_candidate_field.png", "crops/c1_candidate_field.png",
+                    "crops/c2_candidate_field.png"]
     assert all(local.exists() for local, _ in plan)
 
 
@@ -55,11 +52,10 @@ def test_publish_is_incremental_via_manifest(tmp_path: Path) -> None:
     output_dir = _seed(tmp_path)
     s3 = _FakeS3()
 
-    crops = output_dir / "crops"
     first = publish_crops(output_dir, bucket="b", client=s3, verbose=False)
     assert first == {"uploaded": 3, "skipped": 0, "failed": 0}
     assert {k for _, k in s3.uploaded} == {
-        crop_key(str(crops / f"c{i}_candidate_field.png")) for i in range(3)
+        "crops/c0_candidate_field.png", "crops/c1_candidate_field.png", "crops/c2_candidate_field.png",
     }
 
     # Second run: all in the manifest -> nothing re-uploaded.
@@ -106,5 +102,5 @@ def test_crop_upload_plan_department_filter(tmp_path: Path) -> None:
     store.close()
     plan = crop_upload_plan(output_dir, department="16")
     keys = {k for _, k in plan}
-    assert keys == {crop_key(str(crops / "16_doc-a.png"))}
-    assert crop_key(str(crops / "17_doc-b.png")) not in keys
+    assert keys == {"crops/16_doc-a.png"}
+    assert "crops/17_doc-b.png" not in keys

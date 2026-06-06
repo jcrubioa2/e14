@@ -50,9 +50,8 @@ and a **slim DB snapshot** (→ object store + pointer the Fly app swaps in).
 ## The upload manifest (why sync is incremental)
 
 `publish-crops` records every uploaded crop's key in `review/uploaded_crops.txt`. A key is
-exactly the object-store key: `crops/<hmac>.png` (see `webapp.crop_key` / `crop_obj_name`) — an
-**opaque HMAC of the crop path** (see [Opaque crop keys](#opaque-crop-keys-anonymization)), so
-**the same crop has the same key on every machine** (portable) while leaking no acta identity.
+exactly the object-store key: `crops/<filename>` (see `webapp.crop_key`) — derived from the
+acta-identity filename, so **the same crop has the same key on every machine** (portable).
 
 On the next run, the uploader builds its plan as *(all candidate crops) − (keys in the
 manifest)*, so it only sends what's new. The DB publisher reads the **same** manifest to decide
@@ -79,50 +78,6 @@ e14detector publish-reconcile --output-dir <OUTPUT_DIR>
 - It also fixes the DB side automatically, since the frontier is computed from the same manifest.
 
 Flags: `--bucket` (default `$BUCKET_NAME`), `--prefix` (default `crops/`).
-
----
-
-## Opaque crop keys (anonymization)
-
-The crop object key **is** the public CDN URL path (`<CDN>/crops/<key>`). If that key were the
-readable filename (`E14_PRE_<dept>_<mun>_<zone>_<puesto>_<mesa>_..._candidate_field.png`), then
-opening a swipe-feed crop in a new tab would reveal exactly which mesa it is — defeating the
-anonymized review. So the key's file part is an **HMAC-SHA256 of the round-agnostic crop path**,
-truncated to 24 hex chars + `.png` (`webapp.crop_obj_name`). A plain hash would be reversible
-(the path namespace is small and fully structured → rainbow-tableable), so the HMAC **must** be
-secret-keyed.
-
-**`E14_CROP_KEY_SECRET` must be identical on the webapp AND every upload/publish machine.**
-The uploader computes the key when it PUTs the object; the webapp computes the same key when it
-builds the feed URL. If the secrets differ, the served URL won't match any uploaded object and
-crops 404. It falls back to `E14_FORM_TOKEN_SECRET` → `E14_VOTER_SALT`, so a single-secret deploy
-works without a new var — just make sure that fallback value is set the same in both places.
-
-The whole pipeline is **forward-only** (path → key, never key → path): upload, the manifest, the
-publish frontier (`_prune_to_uploaded`), reconcile, and `cropaudit` all *compute* the key from a
-known local/DB path, so the one-way HMAC needs no reverse index. The feed serves the opaque CDN
-URL directly (no `/c/{cid}` redirect hop); `/c/{cid}` remains only as the no-CDN/local fallback.
-
-### Migrating an existing bucket (one-time re-key)
-
-A bucket published before this change holds readable keys and still leaks. Re-key it in place with
-`scripts/rekey_crops.py` (server-side `CopyObject` — no egress, ~$10 of object ops for ~1.6M
-crops). Run with the **same `E14_CROP_KEY_SECRET`** the webapp uses.
-
-```bash
-# 0. set E14_CROP_KEY_SECRET identically on the webapp (fly secret) AND publish machines
-python -m scripts.rekey_crops --dry-run            # report how many keys would move
-python -m scripts.rekey_crops --workers 32         # copy readable -> opaque (both coexist)
-e14detector publish-reconcile --output-dir <OUTPUT_DIR>   # rebuild manifest from the bucket
-# verify the app serves opaque /crops/<hmac>.png URLs and a new-tab open shows no mesa id, then:
-python -m scripts.rekey_crops --delete-old         # remove the old readable (leaking) keys
-e14detector publish-reconcile --output-dir <OUTPUT_DIR>   # clean opaque-only manifest
-```
-
-Both phases are idempotent and skip already-opaque keys; `--delete-old` only deletes an original
-after confirming its opaque copy exists. Deploy the code to the webapp **and** publish machines
-together (shared `crop_key`) so new uploads also land at opaque keys. R1 is frozen — apply the
-same re-key to the R1 archive bucket as a follow-up, or keep that app offline.
 
 ---
 

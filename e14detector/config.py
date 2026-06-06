@@ -252,12 +252,6 @@ VOTER_SALT = os.environ.get("E14_VOTER_SALT", "e14-dev-salt")
 # and no faster than FORM_MIN_SECONDS after load. Reuses the voter salt as the HMAC key
 # so no new secret is needed (it is already set in production).
 FORM_TOKEN_SECRET = os.environ.get("E14_FORM_TOKEN_SECRET", "") or VOTER_SALT
-# Secret keying the OPAQUE crop object key (an HMAC over the crop path — see webapp.crop_key).
-# A plain hash of the structured crop path is trivially reversed back to the mesa, so the key
-# must be secret-keyed. It MUST be identical on the webapp AND every upload/publish machine,
-# or uploaded object keys and served URLs diverge and crops 404. Falls back to FORM_TOKEN_SECRET
-# so an existing single-secret deploy keeps working without a new env var.
-CROP_KEY_SECRET = os.environ.get("E14_CROP_KEY_SECRET", "") or FORM_TOKEN_SECRET
 # Min token age default 0: the old 2s "too fast = bot" gate bounced a freshly-minted token (the
 # client now flushes a queued vote within ms of solving Turnstile / minting at /api/session),
 # which forced a needless re-verify loop. Turnstile is the real bot gate now; raise this only on

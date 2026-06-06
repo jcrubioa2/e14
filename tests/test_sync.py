@@ -35,24 +35,19 @@ def _served_db_with_crops(output_dir: Path, crop_paths: list[str]) -> None:
 def test_audit_served_crops_clean_when_all_present(tmp_path: Path, monkeypatch) -> None:
     from e14detector import cropaudit, publish
 
-    from e14detector.webapp import crop_key
-
     out = tmp_path / "out"
     _served_db_with_crops(out, ["data/x/crops/a.png", "data/x/crops/b.png"])
-    # The bucket holds OPAQUE keys; the audit recomputes them the same way, so a present crop matches.
     monkeypatch.setattr(publish, "list_bucket_crop_keys",
-                        lambda **kw: {crop_key("data/x/crops/a.png"), crop_key("data/x/crops/b.png")})
+                        lambda **kw: {"crops/a.png", "crops/b.png"})
     assert cropaudit.audit_served_crops(out, bucket="b") == []
 
 
 def test_audit_served_crops_flags_orphans(tmp_path: Path, monkeypatch) -> None:
     from e14detector import cropaudit, publish
 
-    from e14detector.webapp import crop_key
-
     out = tmp_path / "out"
     _served_db_with_crops(out, ["data/x/crops/a.png", "data/x/crops/b.png", "data/x/crops/c.png"])
-    monkeypatch.setattr(publish, "list_bucket_crop_keys", lambda **kw: {crop_key("data/x/crops/a.png")})
+    monkeypatch.setattr(publish, "list_bucket_crop_keys", lambda **kw: {"crops/a.png"})
     problems = cropaudit.audit_served_crops(out, bucket="b")
     assert len(problems) == 1 and "2 recorte" in problems[0]  # b.png + c.png missing
 
