@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import functools
+import hashlib
 import hmac
 import ipaddress
 import math
@@ -106,6 +107,96 @@ def ensure_n_candidates(db_path: Path) -> bool:
         return True
     except sqlite3.Error as exc:  # noqa: BLE001 — never let a migration failure crash boot
         print(f"ensure_n_candidates: backfill failed (serving read-only?): {exc}", flush=True)
+        return False
+    finally:
+        con.close()
+
+
+def ensure_crop_paths(db_path: Path) -> bool:
+    """Self-heal ``candidate`` rows whose ``raw_crop_path`` was dropped by a DB rebuild.
+
+    A rebuild (e.g. the ``recover9`` slim corpus) can leave some candidate rows with a NULL/empty
+    ``raw_crop_path`` even though the crop exists — those casillas then vanish from the swipe feed
+    and the per-acta grid (both filter ``raw_crop_path IS NOT NULL``), so an acta silently shows
+    11/13 instead of 13. The path is deterministic (see ``cropper.save_field_crops``), so we
+    reconstruct it from the basename + the crops directory of a sibling non-null row in the SAME
+    document — but only when the crop file is actually present on disk.
+
+    Why the file check: a NULL crop path is ambiguous — it may be a *dropped* path (crop exists,
+    recoverable) or a *genuine* gap (no crop at all, must stay filtered out so it isn't served as a
+    broken card). We can only safely fabricate the former. So this guard self-heals where crops are
+    local (the build/repair machine) and is a deliberate no-op on the serve volume (crops live on
+    the CDN, not the disk) — which is fine, because a snapshot published after the repair script
+    has no NULLs to heal anyway. The authoritative fix (file verification + CDN upload + dedupe) is
+    ``scripts.repair_crop_integrity``; this is just belt-and-suspenders against a rebuild re-dropping
+    the column on a machine that still has the crops.
+
+    Runs BEFORE ``ensure_n_candidates`` so the count reflects the heal; also recomputes
+    ``n_candidates`` for the touched documents itself (ensure_n_candidates short-circuits when the
+    column already exists and would not pick up the change). Idempotent + best-effort: a no-op when
+    there are no NULL paths, and a read-only file just logs and returns False.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(db_path, timeout=60.0)
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_crop_paths: open failed: {exc}", flush=True)
+        return False
+    try:
+        null_rows = con.execute(
+            "SELECT id, document_id, page_number, row_number FROM vote_fields "
+            "WHERE row_type='candidate' AND (raw_crop_path IS NULL OR raw_crop_path='')"
+        ).fetchall()
+        # Surface (but never auto-delete) duplicate rows — a regression we want visible.
+        dups = con.execute(
+            "SELECT COUNT(*) FROM vote_fields v WHERE EXISTS ("
+            "SELECT 1 FROM vote_fields v2 WHERE v2.document_id=v.document_id "
+            "AND v2.page_number=v.page_number AND v2.row_number=v.row_number "
+            "AND v2.row_type=v.row_type AND IFNULL(v2.section,'')=IFNULL(v.section,'') "
+            "AND v2.id < v.id)"
+        ).fetchone()[0]
+        if dups:
+            print(f"ensure_crop_paths: WARN {dups} duplicate vote_fields row(s) on {db_path} "
+                  "(run scripts.repair_crop_integrity --apply to dedupe)", flush=True)
+        if not null_rows:
+            return True
+        dir_cache: dict[str, str | None] = {}
+        updates: list[tuple[str, int]] = []
+        touched: set[str] = set()
+        for vid, did, page, row in null_rows:
+            if did not in dir_cache:
+                sib = con.execute(
+                    "SELECT raw_crop_path FROM vote_fields WHERE document_id=? AND row_type='candidate' "
+                    "AND raw_crop_path IS NOT NULL AND raw_crop_path != '' LIMIT 1",
+                    (did,),
+                ).fetchone()
+                dir_cache[did] = (sib[0].rsplit("/", 1)[0] if sib and "/" in sib[0] else None)
+            crops_dir = dir_cache[did]
+            if not crops_dir:
+                continue  # no sibling to anchor the path; leave NULL
+            raw = f"{crops_dir}/{did}_p{page}_row{row}_candidate_field.png"
+            if not os.path.exists(raw):
+                continue  # genuine gap (or crops not local) — don't fabricate a 404 card
+            updates.append((raw, vid))
+            touched.add(did)
+        if not updates:
+            return True
+        con.executemany("UPDATE vote_fields SET raw_crop_path=? WHERE id=?", updates)
+        # Bump n_candidates for just the touched actas (column already exists -> recompute here).
+        con.executemany(
+            "UPDATE documents SET n_candidates = COALESCE("
+            "(SELECT COUNT(*) FROM vote_fields vf WHERE vf.document_id = documents.document_id "
+            "AND vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL AND vf.raw_crop_path != ''), 0) "
+            "WHERE document_id=?",
+            [(d,) for d in touched],
+        )
+        con.commit()
+        print(f"ensure_crop_paths: backfilled {len(updates)} crop path(s) across {len(touched)} "
+              f"acta(s) on {db_path}", flush=True)
+        return True
+    except sqlite3.Error as exc:  # noqa: BLE001 — a self-heal must never crash boot
+        print(f"ensure_crop_paths: backfill failed (serving read-only?): {exc}", flush=True)
         return False
     finally:
         con.close()
@@ -400,14 +491,34 @@ def crop_rel(raw_crop_path: str) -> str:
     return s[idx + len("crops/"):] if idx != -1 else s.lstrip("/")
 
 
-def crop_key(raw_crop_path: str, round: str | None = None) -> str:
-    """Object-store key for a crop. ``r1`` keeps the legacy ``crops/<file>`` key (byte-identical
-    to before round-scoping); any other round nests under ``crops/<round>/<file>``.
+def crop_obj_name(crop_rel_path: str, secret: str | None = None) -> str:
+    """OPAQUE file part of a crop's object key: ``<hmac(crop_rel)>.png``.
 
-    The manifest key == bucket object key == the CDN URL path, so this single function carries
-    crops, the upload cache, the publish frontier (``_prune_to_uploaded``), and CDN URLs together.
+    The readable crop path (``E14_PRE_<dept>_<mun>_<zone>_<puesto>_<mesa>_..._candidate_field.png``)
+    fully identifies the mesa, so exposing it as the public CDN URL de-anonymizes the acta. A
+    secret-keyed HMAC over the *round-agnostic* ``crop_rel`` gives a name that (a) reveals nothing
+    about the acta and can't be rainbow-tabled back (the path namespace is small + structured, so a
+    plain hash would be reversible — the secret is what resists that), and (b) is deterministic, so
+    the uploader and the feed compute the identical name from the same path without any lookup.
+
+    24 hex chars (96 bits) keeps collisions negligible across the ~1.58M-crop national set. The
+    secret MUST match on the webapp and every upload machine (see config.CROP_KEY_SECRET).
     """
-    return crop_prefix(round) + crop_rel(raw_crop_path)
+    secret = config.CROP_KEY_SECRET if secret is None else secret
+    digest = hmac.new(secret.encode("utf-8"), crop_rel_path.encode("utf-8"), hashlib.sha256)
+    return digest.hexdigest()[:24] + ".png"
+
+
+def crop_key(raw_crop_path: str, round: str | None = None) -> str:
+    """Object-store key for a crop: ``crops/<hmac>.png`` (r1) or ``crops/<round>/<hmac>.png``.
+
+    The file part is an OPAQUE HMAC of the path (see ``crop_obj_name``) so the CDN URL never leaks
+    the mesa; round-scoping (the ``crops/`` vs ``crops/<round>/`` prefix) is unchanged. The manifest
+    key == bucket object key == the CDN URL path, so this single function carries crops, the upload
+    cache, the publish frontier (``_prune_to_uploaded``), and CDN URLs together. The whole pipeline
+    is forward-only (path -> key), so the one-way HMAC needs no reverse index.
+    """
+    return crop_prefix(round) + crop_obj_name(crop_rel(raw_crop_path))
 
 
 def crop_cdn_url(raw_crop_path: str, cdn_base: str, round: str | None = None) -> str | None:
@@ -947,6 +1058,9 @@ def create_app(
 ) -> FastAPI:
     results_db = Path(results_db)
     output_dir = Path(output_dir).resolve()
+    # Self-heal any candidate rows a rebuild left without a crop path (so no acta silently shows
+    # <13 casillas); runs first so the n_candidates backfill below counts the restored rows.
+    ensure_crop_paths(results_db)
     # Backfill the precomputed n_candidates column if this snapshot lacks it, so /browse never
     # 500s on `no such column`. No-op for an up-to-date DB; runs again after each db-sync swap.
     ensure_n_candidates(results_db)
@@ -1075,6 +1189,8 @@ def create_app(
                     # A freshly pulled snapshot might predate the n_candidates column — backfill
                     # it before serving so /browse stays on the fast precomputed path. (Geo names
                     # need no per-swap work: they resolve from the in-memory lookup at render.)
+                    # Heal dropped crop paths first so the n_candidates backfill counts them.
+                    await asyncio.to_thread(ensure_crop_paths, results_db)
                     await asyncio.to_thread(ensure_n_candidates, results_db)
                     await asyncio.to_thread(ensure_browse_indexes, results_db)
                 return sha
@@ -1930,7 +2046,9 @@ def create_app(
                         continue
                     seen.add(cid)
                     reg.append((cid, fkey, r["raw_crop_path"], r["document_id"]))
-                    out.append({"cid": cid, "img_url": f"/c/{cid}"})
+                    # Opaque CDN URL straight from the path (no /c redirect hop); the key is an
+                    # HMAC so it leaks no acta identity. Falls back to /c/{cid} when no CDN is set.
+                    out.append({"cid": cid, "img_url": crop_cdn_url(r["raw_crop_path"], config.CDN_BASE_URL) or f"/c/{cid}"})
                     if len(out) >= n:
                         break
         community.register_cids(reg)
@@ -1990,7 +2108,7 @@ def create_app(
             fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
             cid = crop_id(poll_cfg.form_token_secret, fkey)
             reg.append((cid, fkey, fr["raw_crop_path"], document_id))
-            items.append({"cid": cid, "img_url": f"/c/{cid}"})
+            items.append({"cid": cid, "img_url": crop_cdn_url(fr["raw_crop_path"], config.CDN_BASE_URL) or f"/c/{cid}"})
         community.register_cids(reg)
         random.shuffle(items)  # break ballot order so position can't hint the candidate
         return items
@@ -2201,11 +2319,11 @@ def create_app(
             fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
             scid = crop_id(poll_cfg.form_token_secret, fkey)
             reg.append((scid, fkey, fr["raw_crop_path"], document_id))
-            siblings.append({"field_key": fkey, "cid": scid})
+            siblings.append({"field_key": fkey, "cid": scid, "crop": fr["raw_crop_path"]})
         community.register_cids(reg)
         counts = counts_among_cached([s["field_key"] for s in siblings])
         items = [
-            {"cid": s["cid"], "img_url": f"/c/{s['cid']}",
+            {"cid": s["cid"], "img_url": crop_cdn_url(s["crop"], config.CDN_BASE_URL) or f"/c/{s['cid']}",
              "good": counts[s["field_key"]]["good"], "strange": counts[s["field_key"]]["strange"]}
             for s in siblings
         ]
