@@ -1,0 +1,74 @@
+# fly.toml for e14-r1-archive — the FROZEN first-round (R1) archive app.
+#
+# Phase 2 / WS-D. At cutover the live `e14-poll` app is repurposed to the R2 (runoff) primary;
+# this separate app keeps the first round as a permanent, read-only public record at a stable
+# URL. It is deliberately MINIMAL and dependency-free:
+#   * loads ONLY the R1 results DB from the LEGACY db/latest.json bucket keys (E14_ELECTION_ROUND=r1)
+#     — never the R2 DB, so one round's ~730MB SQLite is never stacked on the other's machine;
+#   * scale-to-ZERO (min_machines_running=0 + auto_stop): an archive tolerates a cold start, and
+#     idle cost is ~$0;
+#   * NO Aurora / SQS / Turnstile / OpenRouter secrets at all — R1 community voting is CLOSED at
+#     cutover and its verdicts are BAKED into the read-only snapshot, so the archive has zero live
+#     vote-backend dependencies and an R2 deploy/incident can never break it.
+#
+# Deploy: `fly deploy -c fly.r1-archive.toml` (creates the app + volume the first time; see
+# docs/CUTOVER.md). The custom subdomain (e.g. primera-vuelta.<domain>) is attached as a cutover
+# step; until then it serves on https://e14-r1-archive.fly.dev.
+
+app = 'e14-r1-archive'
+primary_region = 'dfw'
+
+[build]
+
+[env]
+  # Read the legacy (un-prefixed) R1 keys: db/latest.json, crops/<file>. Explicit for clarity.
+  E14_ELECTION_ROUND = 'r1'
+  # Serve the R1 results DB from the volume (pulled from Tigris) + crops from the public CDN.
+  E14_DB_SYNC = '1'
+  E14_RESULTS_DB = '/data/results.sqlite'
+  E14_OUTPUT_DIR = '/data'
+  E14_CDN_BASE_URL = 'https://e14-crops.fly.storage.tigris.dev'
+  # Canonical archive URL. Swap to the primera-vuelta subdomain once its cert/DNS is attached.
+  E14_SITE_URL = 'https://e14-r1-archive.fly.dev'
+  # No vote backend, no Turnstile, no VLM: this is a read-only record. Votes cannot be committed
+  # (no AURORA_*/SQS_QUEUE_URL secrets), so the UI's vote paths degrade to no-ops by design.
+
+[processes]
+  # Archive traffic is light and read-only; a single worker is plenty. Horizontal scale (if a
+  # results-night retrospective spikes it) is still `fly scale count N -c fly.r1-archive.toml`.
+  web = "uvicorn e14detector.asgi:app --host 0.0.0.0 --port 8000 --workers 1"
+
+# Own volume, R1 DB only. (Distinct app => distinct volume namespace; 'data' is fine.)
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+  processes = ['web']
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Scale-to-zero: stop when idle, cold-start on the next request. Fine for an archive.
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['web']
+
+  [http_service.concurrency]
+    type = 'requests'
+    hard_limit = 200
+    soft_limit = 150
+
+  # Same readiness gate as the primary: /health is 200 only once the R1 DB snapshot is present
+  # and warm, so a cold-started machine never serves before its DB is pulled. Generous grace for
+  # the ~730MB pull on cold boot.
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '4s'
+    grace_period = '180s'
+    method = 'get'
+    path = '/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '2048mb'
+  processes = ['web']

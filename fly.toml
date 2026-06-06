@@ -8,6 +8,12 @@ primary_region = 'dfw'
 
 [build]
 
+# Election round (Phase 2 / WS-D): this app currently serves R1 (first round). E14_ELECTION_ROUND
+# is intentionally NOT pinned here — it is unset, so the app defaults to 'r1' (legacy db/latest.json
+# + crops/ keys) and stays byte-identical until a DELIBERATE cutover. At cutover this same app
+# becomes the R2 (runoff) primary via `fly secrets set E14_ELECTION_ROUND=r2` + the R2 Aurora/SQS
+# secrets (same out-of-band pattern as E14_TURNSTILE_ENABLED), while the frozen first round moves to
+# the separate e14-r1-archive app (fly.r1-archive.toml). One documented step: scripts/deploy.sh.
 [env]
   E14_COMMUNITY_DB = '/data/community.sqlite'
   # Poll adjudication: K=3 self-consistency on gemma-4-31b (replaces Haiku — worst on the
