@@ -200,16 +200,28 @@
     let statsRows = [];
     let view = 'departments';
 
+    // GeoJSON place names are static/trusted DANE data, but escape before injecting into tooltip
+    // HTML so a stray '<' or '&' in a name can never break markup (defensive, not load-bearing).
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    // Fetch JSON, failing loudly on a non-2xx so callers' .catch shows the fallback message
+    // instead of trying to parse an HTML error page as JSON.
+    async function fetchJson(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + url);
+      return r.json();
+    }
+
     function pctColor(pct) {
       const t = Math.max(0, Math.min(100, pct)) / 100;
       const r = Math.round(232 + (217 - 232) * t);
       const g = Math.round(228 + (58 - 228) * t);
       const b = Math.round(218 + (40 - 218) * t);
       return `rgb(${r},${g},${b})`;
-    }
-
-    function statsKey(props) {
-      return view === 'departments' ? props.dep : `${props.dep}:${props.muni}`;
     }
 
     function lookup(props) {
@@ -231,9 +243,9 @@
       const name = feature.properties.name || feature.properties.dep_name || '';
       let html;
       if (!row || !row.total) {
-        html = `<b>${name}</b><br>Sin mesas en la veedur&iacute;a`;
+        html = `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`;
       } else {
-        html = `<b>${name}</b><br>${row.reported} de ${row.total} mesas reportadas (${row.pct}%)`;
+        html = `<b>${esc(name)}</b><br>${row.reported} de ${row.total} mesas reportadas (${row.pct}%)`;
       }
       lyr.bindTooltip(html, { sticky: true });
       lyr.on('click', () => {
@@ -270,8 +282,8 @@
         ? '/geo/colombia_departamentos.geojson'
         : '/geo/colombia_municipios.geojson';
       const [stats, geo] = await Promise.all([
-        fetch(statsUrl).then((r) => r.json()),
-        fetch(geoUrl).then((r) => r.json())
+        fetchJson(statsUrl),
+        fetchJson(geoUrl)
       ]);
       statsRows = view === 'departments' ? stats.departments : stats.municipios;
       renderGeo(geo);
@@ -289,10 +301,10 @@
       if (cur && [...deptSel.options].some((o) => o.value === cur)) deptSel.value = cur;
     }
 
-    fetch('/api/reportes/map').then((r) => r.json()).then((stats) => {
+    fetchJson('/api/reportes/map').then((stats) => {
       fillDeptOptions(stats.departments || []);
-      loadMap().catch(() => { mapEl.textContent = 'No se pudo cargar el mapa.'; });
-    });
+      return loadMap();
+    }).catch(() => { mapEl.textContent = 'No se pudo cargar el mapa.'; });
 
     deptSel.addEventListener('change', () => loadMap().catch(console.error));
     resetBtn.addEventListener('click', () => { deptSel.value = ''; loadMap().catch(console.error); });
