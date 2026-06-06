@@ -92,10 +92,19 @@
     .pager { display:flex; gap:12px; justify-content:flex-end; }
     .pager a { font-weight:700; font-size:14px; }
 
-    /* Reserved slot for future statistics */
-    .stats-soon { border:1px dashed var(--line-strong); border-radius:14px; padding:20px 18px; background:rgba(255,255,255,.4);
-                  color:var(--ink-faint); font-size:13.5px; line-height:1.55; }
-    .stats-soon b { color:var(--ink-soft); font-weight:700; }
+    .stats-note { color:var(--ink-faint); font-size:12.5px; margin:0 0 12px; line-height:1.5; }
+
+    .map-block { margin-top:0; }
+    .map-controls { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:flex-end; margin-bottom:12px; }
+    .map-controls label { display:flex; flex-direction:column; gap:5px; font-size:12px; font-weight:700; color:var(--ink-soft); }
+    .map-controls select { min-width:220px; padding:9px 11px; border:1px solid var(--line); border-radius:10px; font:inherit; background:var(--card); }
+    .map-controls button { padding:9px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; font-weight:700; cursor:pointer; }
+    .map-controls button:hover { border-color:var(--red-line); }
+    #reportes-map { height:min(420px, 55vh); border:1px solid var(--line); border-radius:14px; background:var(--paper-2); box-shadow:var(--shadow); }
+    .map-legend { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--ink-soft); }
+    .map-legend-bar { height:8px; flex:1; min-width:140px; max-width:280px; border-radius:99px;
+      background:linear-gradient(90deg, #e8e4da 0%, #f0b5ab 35%, #d93a28 100%); }
+    .map-foot { color:var(--ink-faint); font-size:12px; line-height:1.5; margin-top:8px; }
 
     .empty { text-align:center; color:var(--ink-soft); padding:48px 18px; font-size:15px; }
     .empty .big { font-family:"Fraunces", serif; font-size:21px; color:var(--ink); display:block; margin-bottom:6px; }
@@ -150,13 +159,157 @@
     </section>
     {% endif %}
 
-    {# Future statistics (participation, per-department reports, trends) land in this section. #}
     <section aria-labelledby="stats-h">
       <div class="sec-head"><h2 id="stats-h">Estad&iacute;sticas</h2></div>
-      <div class="stats-soon"><b>Pr&oacute;ximamente.</b> Aqu&iacute; mostraremos estad&iacute;sticas de la veedur&iacute;a: participaci&oacute;n, reportes por departamento y tendencias a medida que crece la comunidad.</div>
+
+      <div class="map-block" aria-labelledby="map-h">
+        <div class="sec-head"><h3 id="map-h" style="margin:0;font-family:'Fraunces',serif;font-size:19px">Mapa por municipio</h3></div>
+        <p class="stats-note">Mesas con al menos un reporte de la comunidad (&ldquo;se ve extra&ntilde;a&rdquo;), sobre el total de mesas de la veedur&iacute;a en ese municipio. No incluye veredictos del modelo.</p>
+        <div class="map-controls">
+          <label>Vista
+            <select id="map-dept" aria-label="Departamento">
+              <option value="">Colombia (departamentos)</option>
+            </select>
+          </label>
+          <button type="button" id="map-reset">Ver todo el pa&iacute;s</button>
+        </div>
+        <div id="reportes-map" role="img" aria-label="Mapa de reportes por municipio"></div>
+        <div class="map-legend" aria-hidden="true">
+          <span>Menos</span><span class="map-legend-bar"></span><span>M&aacute;s mesas reportadas</span>
+        </div>
+        <p class="map-foot">Los municipios sin mesas en la veedur&iacute;a aparecen en gris. Pasa el cursor para ver cifras; haz clic para buscar actas en ese lugar.</p>
+      </div>
     </section>
   </main>
 
   {% include "_footer.html" %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+  <script>
+  (function () {
+    const mapEl = document.getElementById('reportes-map');
+    const deptSel = document.getElementById('map-dept');
+    const resetBtn = document.getElementById('map-reset');
+    if (!mapEl || !window.L) return;
+
+    const map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true });
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxZoom: 19
+    }).addTo(map);
+    let layer = null;
+    let statsRows = [];
+    let view = 'departments';
+
+    // GeoJSON place names are static/trusted DANE data, but escape before injecting into tooltip
+    // HTML so a stray '<' or '&' in a name can never break markup (defensive, not load-bearing).
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+
+    // Fetch JSON, failing loudly on a non-2xx so callers' .catch shows the fallback message
+    // instead of trying to parse an HTML error page as JSON.
+    async function fetchJson(url) {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + url);
+      return r.json();
+    }
+
+    function pctColor(pct) {
+      const t = Math.max(0, Math.min(100, pct)) / 100;
+      const r = Math.round(232 + (217 - 232) * t);
+      const g = Math.round(228 + (58 - 228) * t);
+      const b = Math.round(218 + (40 - 218) * t);
+      return `rgb(${r},${g},${b})`;
+    }
+
+    function lookup(props) {
+      return statsRows.find((r) =>
+        view === 'departments'
+          ? r.dep === props.dep
+          : r.dep === props.dep && r.muni === props.muni
+      );
+    }
+
+    function styleFeature(props) {
+      const row = lookup(props);
+      if (!row || !row.total) return { fillColor: '#e8e4da', fillOpacity: 0.75, color: '#c8c2b4', weight: 1 };
+      return { fillColor: pctColor(row.pct), fillOpacity: 0.82, color: '#8a8478', weight: 1 };
+    }
+
+    function bindLayer(feature, lyr) {
+      const row = lookup(feature.properties);
+      const name = feature.properties.name || feature.properties.dep_name || '';
+      let html;
+      if (!row || !row.total) {
+        html = `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`;
+      } else {
+        html = `<b>${esc(name)}</b><br>${row.reported} de ${row.total} mesas reportadas (${row.pct}%)`;
+      }
+      lyr.bindTooltip(html, { sticky: true });
+      lyr.on('click', () => {
+        if (view === 'departments') {
+          deptSel.value = feature.properties.dep;
+          loadMap();
+          return;
+        }
+        const q = new URLSearchParams({
+          department: feature.properties.dep,
+          municipality: feature.properties.muni
+        });
+        window.location.href = '/buscar?' + q;
+      });
+    }
+
+    function renderGeo(geo) {
+      if (layer) map.removeLayer(layer);
+      const feats = view === 'municipios'
+        ? geo.features.filter((f) => f.properties.dep === deptSel.value)
+        : geo.features;
+      layer = L.geoJSON({ type: 'FeatureCollection', features: feats }, {
+        style: (f) => styleFeature(f.properties),
+        onEachFeature: bindLayer
+      }).addTo(map);
+      try { map.fitBounds(layer.getBounds(), { padding: [16, 16] }); } catch (e) { map.setView([4.5, -74], 5); }
+    }
+
+    async function loadMap() {
+      const dep = deptSel.value;
+      view = dep ? 'municipios' : 'departments';
+      const statsUrl = '/api/reportes/map' + (dep ? '?department=' + encodeURIComponent(dep) : '');
+      const geoUrl = view === 'departments'
+        ? '/geo/colombia_departamentos.geojson'
+        : '/geo/colombia_municipios.geojson';
+      const [stats, geo] = await Promise.all([
+        fetchJson(statsUrl),
+        fetchJson(geoUrl)
+      ]);
+      statsRows = view === 'departments' ? stats.departments : stats.municipios;
+      renderGeo(geo);
+    }
+
+    function fillDeptOptions(departments) {
+      const cur = deptSel.value;
+      deptSel.innerHTML = '<option value="">Colombia (departamentos)</option>';
+      for (const d of departments) {
+        const opt = document.createElement('option');
+        opt.value = d.dep;
+        opt.textContent = `${d.dep} ${d.name}`;
+        deptSel.appendChild(opt);
+      }
+      if (cur && [...deptSel.options].some((o) => o.value === cur)) deptSel.value = cur;
+    }
+
+    fetchJson('/api/reportes/map').then((stats) => {
+      fillDeptOptions(stats.departments || []);
+      return loadMap();
+    }).catch(() => { mapEl.textContent = 'No se pudo cargar el mapa.'; });
+
+    deptSel.addEventListener('change', () => loadMap().catch(console.error));
+    resetBtn.addEventListener('click', () => { deptSel.value = ''; loadMap().catch(console.error); });
+    setTimeout(() => map.invalidateSize(), 200);
+  })();
+  </script>
 </body>
 </html>

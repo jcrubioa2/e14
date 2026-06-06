@@ -449,6 +449,86 @@ def parse_field_key(field_key: str) -> tuple[str, int, int, str] | None:
         return None
 
 
+GEO_DIR = Path(__file__).resolve().parent / "geo"
+MUNICIPIOS_GEOJSON = GEO_DIR / "colombia_municipios.geojson"
+DEPARTAMENTOS_GEOJSON = GEO_DIR / "colombia_departamentos.geojson"
+
+
+def doc_muni_index(db: sqlite3.Connection) -> dict[str, tuple[str, str]]:
+    """document_id -> (department_code, municipality_code) for browsable actas."""
+    rows = db.execute(
+        """
+        SELECT document_id, department_code, municipality_code
+        FROM documents
+        WHERE n_candidates > 0
+          AND department_code IS NOT NULL AND department_code <> ''
+          AND municipality_code IS NOT NULL AND municipality_code <> ''
+        """
+    ).fetchall()
+    out: dict[str, tuple[str, str]] = {}
+    for r in rows:
+        dep = str(r["department_code"]).strip().zfill(2)
+        muni = str(r["municipality_code"]).strip().zfill(3)
+        out[r["document_id"]] = (dep, muni)
+    return out
+
+
+def municipio_report_stats(
+    doc_index: dict[str, tuple[str, str]],
+    reported_docs: set[str],
+    geo: GeoNames,
+) -> dict[str, Any]:
+    """Per-municipio and per-department mesa counts with crowd-reported mesas."""
+    totals: collections.Counter[tuple[str, str]] = collections.Counter()
+    reported: collections.Counter[tuple[str, str]] = collections.Counter()
+    for doc_id, key in doc_index.items():
+        totals[key] += 1
+        if doc_id in reported_docs:
+            reported[key] += 1
+
+    municipios: list[dict[str, Any]] = []
+    for (dep, muni), total in totals.items():
+        rep = reported.get((dep, muni), 0)
+        municipios.append({
+            "dep": dep,
+            "muni": muni,
+            "name": geo.muni(dep, muni) or muni,
+            "dep_name": geo.dept(dep) or dep,
+            "total": total,
+            "reported": rep,
+            "pct": round(100.0 * rep / total, 1) if total else 0.0,
+        })
+    municipios.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"], r["muni"]))
+
+    dept_totals: collections.Counter[str] = collections.Counter()
+    dept_reported: collections.Counter[str] = collections.Counter()
+    for (dep, _muni), total in totals.items():
+        dept_totals[dep] += total
+        dept_reported[dep] += reported.get((dep, _muni), 0)
+
+    departments: list[dict[str, Any]] = []
+    for dep in sorted(dept_totals.keys()):
+        total = dept_totals[dep]
+        rep = dept_reported[dep]
+        departments.append({
+            "dep": dep,
+            "name": geo.dept(dep) or dep,
+            "total": total,
+            "reported": rep,
+            "pct": round(100.0 * rep / total, 1) if total else 0.0,
+        })
+    departments.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"]))
+
+    return {
+        "municipios": municipios,
+        "departments": departments,
+        "summary": {
+            "total_mesas": sum(dept_totals.values()),
+            "reported_mesas": len(reported_docs & doc_index.keys()),
+        },
+    }
+
+
 def _es_thousands(n: int) -> str:
     """Format an integer with Colombian thousands separators (1234567 -> '1.234.567')."""
     return f"{n:,}".replace(",", ".")
@@ -1550,6 +1630,52 @@ def create_app(
                 ),
             },
         )
+
+    def _map_stats_all() -> dict[str, Any]:
+        pop = _agg_cached("popularity", community.acta_popularity)
+        reported = set(pop.keys())
+
+        def build() -> dict[str, Any]:
+            with conn() as db:
+                idx = doc_muni_index(db)
+            return municipio_report_stats(idx, reported, geo)
+
+        return _agg_cached("map_stats_all", build)
+
+    @app.get("/api/reportes/map")
+    async def api_reportes_map(department: str | None = None):
+        """Choropleth stats: national department rollups or per-municipio drill-down."""
+        stats = _map_stats_all()
+        if department:
+            dep = str(department).strip().zfill(2)
+            munis = [m for m in stats["municipios"] if m["dep"] == dep]
+            depts = [d for d in stats["departments"] if d["dep"] == dep]
+            return {
+                "view": "municipios",
+                "department": dep,
+                "departments": depts,
+                "municipios": munis,
+                "summary": stats["summary"],
+            }
+        return {
+            "view": "departments",
+            "department": None,
+            "departments": stats["departments"],
+            "municipios": stats["municipios"],
+            "summary": stats["summary"],
+        }
+
+    @app.get("/geo/colombia_municipios.geojson")
+    async def geo_municipios():
+        if not MUNICIPIOS_GEOJSON.is_file():
+            raise HTTPException(status_code=404, detail="map data not found")
+        return FileResponse(MUNICIPIOS_GEOJSON, media_type="application/geo+json")
+
+    @app.get("/geo/colombia_departamentos.geojson")
+    async def geo_departamentos():
+        if not DEPARTAMENTOS_GEOJSON.is_file():
+            raise HTTPException(status_code=404, detail="map data not found")
+        return FileResponse(DEPARTAMENTOS_GEOJSON, media_type="application/geo+json")
 
     @app.get("/transparencia")
     async def transparencia(request: Request):
