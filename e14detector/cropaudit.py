@@ -7,6 +7,8 @@ against the bucket's real object keys and flags any orphan.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import sqlite3
 from pathlib import Path
 
@@ -21,12 +23,17 @@ def _crop_prefix(round: str | None = None) -> str:
 
 
 def _crop_key(raw: str, round: str | None = None) -> str:
-    """The round-scoped object key for a stored crop path (mirrors webapp.crop_key, inlined).
-    ``crops/<file>`` for r1; ``crops/<round>/<file>`` otherwise."""
+    """The round-scoped object key for a stored crop path (mirrors webapp.crop_key, inlined so
+    this stays importable without pulling in FastAPI). The file part is the OPAQUE HMAC of the
+    crop_rel — it MUST byte-for-byte match webapp.crop_obj_name (same secret, sha256, 24-hex,
+    ``.png``) or this audit will false-flag every served crop as an orphan."""
+    from . import config
+
     s = str(raw).replace("\\", "/")
     i = s.find("crops/")
     rel = s[i + len("crops/"):] if i != -1 else s.lstrip("/")
-    return _crop_prefix(round) + rel
+    digest = hmac.new(config.CROP_KEY_SECRET.encode("utf-8"), rel.encode("utf-8"), hashlib.sha256)
+    return _crop_prefix(round) + digest.hexdigest()[:24] + ".png"
 
 
 def served_crop_keys(served_db: Path, round: str | None = None) -> set[str]:
