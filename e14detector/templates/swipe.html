@@ -110,12 +110,11 @@
     @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
 
     .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
-    @media (max-width:470px) { .grid { grid-template-columns:repeat(2, 1fr); gap:11px; } }
 
     .tile {
       position:relative; border:1.5px solid var(--line); border-radius:var(--r); background:var(--card);
-      padding:13px 13px 10px; cursor:pointer; box-shadow:var(--shadow); outline:none;
-      display:flex; flex-direction:column; gap:7px; min-height:114px;
+      padding:11px 13px 8px; cursor:pointer; box-shadow:var(--shadow); outline:none;
+      display:flex; flex-direction:column; gap:6px; min-height:114px;
       transition:transform .14s cubic-bezier(.2,.7,.2,1), border-color .14s, box-shadow .14s, background .14s;
     }
     .tile:hover { transform:translateY(-3px); border-color:var(--line-strong); box-shadow:0 2px 2px rgba(28,26,21,.04), 0 14px 28px -12px rgba(28,26,21,.22); }
@@ -125,7 +124,11 @@
        the box letterboxes seamlessly — no tinted band or inner border peeking around the image.
        Loading is told apart from a loaded-blank crop by the shimmer below, not by a frame. */
     .tile .thumb { position:relative; flex:1 1 auto; display:flex; align-items:center; justify-content:center;
-                   min-height:74px; border-radius:9px; overflow:hidden; background:#fff; }
+                   border-radius:9px; overflow:hidden; background:#fff; }
+    /* Desktop-only crop box ratio; on mobile the fitted grid fills each cell instead. */
+    @media (min-width:601px) {
+      .tile .thumb { min-height:74px; aspect-ratio:11/5; }
+    }
     .tile img { max-width:100%; max-height:92px; object-fit:contain; pointer-events:none;
                 user-select:none; -webkit-user-drag:none; opacity:0; transition:opacity .25s ease; }
     .tile .thumb.ready img { opacity:1; }
@@ -151,9 +154,11 @@
                    box-shadow:0 0 0 1px var(--red) inset, 0 2px 2px rgba(168,42,27,.05), 0 12px 26px -12px rgba(168,42,27,.3); }
     .tile.marked .cap { opacity:1; }
 
-    .tile.skeleton { cursor:default; animation:none; border-style:dashed; border-color:var(--line);
+    .tile.skeleton { cursor:default; border-style:dashed; border-color:var(--line); box-shadow:none;
              background:linear-gradient(100deg,#f4f1ea 30%,#fbfaf6 50%,#f4f1ea 70%); background-size:200% 100%;
              animation:sh 1.25s infinite linear; }
+    .tile.skeleton .thumb { background:transparent; }
+    .tile.skeleton .cap { visibility:hidden; }
     @keyframes sh { to { background-position:-200% 0; } }
 
     /* Entrance for tiles that DIDN'T already have a placeholder (deck has more casillas than the
@@ -197,6 +202,50 @@
     .toast.warn { background:var(--red-deep); }
     .toast.win { background:var(--rank, var(--link)); font-weight:700; }
     .toast.win b { font-weight:800; }
+
+    /* Mobile voting: one screen, no scroll — grid stretches to fill the gap above the sticky bar and
+       crops scale up to use every pixel (fitGridLayout picks columns for max readable size). */
+    @media (max-width:600px) {
+      body { height:100dvh; overflow:hidden; padding-bottom:0; display:flex; flex-direction:column; align-items:stretch; }
+      .appbar-wrap { flex:0 0 auto; width:100%; }
+      header { flex:0 0 auto; width:100%; }
+      .eyebrow { display:none; }
+      .head-inner { padding:10px 16px 8px; }
+      header h1 { font-size:22px; }
+      main { width:100%; max-width:none; margin:0; padding:8px 12px 0; flex:1 1 auto; min-height:0; min-width:0;
+              display:flex; flex-direction:column; align-items:stretch; overflow:hidden; box-sizing:border-box; }
+      .meta { margin-bottom:8px; flex:0 0 auto; }
+      .rank .next { display:none; }
+      .note { display:none; }
+      #board { flex:1 1 auto; min-height:0; min-width:0; width:100%; overflow:hidden; }
+      .grid {
+        width:100%;
+        max-width:none;
+        box-sizing:border-box;
+        align-content:stretch;
+        justify-items:stretch;
+        grid-template-columns:repeat(2, minmax(0, 1fr));
+        grid-template-rows:repeat(7, minmax(0, 1fr));
+        gap:8px;
+      }
+      .grid .tile {
+        width:100%;
+        min-width:0;
+        height:100%;
+        min-height:0;
+        padding:var(--tile-pad, 5px) var(--tile-pad, 5px) 3px;
+        gap:2px;
+      }
+      .grid .tile .thumb { flex:1 1 0; width:100%; min-width:0; min-height:0; aspect-ratio:auto; }
+      .grid .tile.skeleton .thumb::before {
+        content:''; flex:1 1 0; width:100%; min-height:0;
+      }
+      .grid .tile img { max-height:100%; max-width:100%; width:auto; height:auto; }
+      .bar { position:fixed; }
+      .bar-inner { padding:13px 16px; padding-bottom:calc(13px + env(safe-area-inset-bottom)); }
+      .spacer { display:none; }
+      .b-skip { margin-left:auto; }
+    }
 
     @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
   </style>
@@ -468,6 +517,81 @@
       updateCount();
     }
 
+    // On phones, fill the viewport between meta and the sticky bar: pick a column count that keeps
+    // every casilla on screen AND maximizes crop size (no tiny 5-up grid floating in empty space).
+    const MOBILE_GRID_MQ = window.matchMedia('(max-width: 600px)');
+    const LAST_DECK_KEY = 'e14_last_deck_n';
+    const DEFAULT_SKELETON_N = 13;
+
+    function guessSkeletonCount() {
+      try {
+        const n = parseInt(sessionStorage.getItem(LAST_DECK_KEY) || '', 10);
+        if (n >= 4 && n <= 40) return n;
+      } catch (e) {}
+      return DEFAULT_SKELETON_N;
+    }
+
+    function fitGridLayout(tileCount) {
+      const grid = board.querySelector('.grid');
+      const n = tileCount || deck.length;
+      if (!grid || !n) return;
+      if (!MOBILE_GRID_MQ.matches) {
+        grid.style.height = '';
+        grid.style.width = '';
+        grid.style.gridTemplateColumns = '';
+        grid.style.gridTemplateRows = '';
+        grid.style.removeProperty('--deck-cols');
+        grid.style.removeProperty('--deck-rows');
+        grid.style.removeProperty('--tile-gap');
+        grid.style.removeProperty('--tile-pad');
+        document.body.style.overflow = '';
+        return;
+      }
+      document.body.style.overflow = 'hidden';
+      const gap = 8;
+      const tilePad = 5;
+      const capH = 13;
+      const overhead = tilePad * 2 + capH + 3;
+      const footGap = 14;
+      void board.offsetWidth;
+      const top = grid.getBoundingClientRect().top;
+      const barH = bar.hidden ? 0 : bar.offsetHeight;
+      const avail = Math.max(140, window.innerHeight - top - barH - footGap);
+      const width = board.getBoundingClientRect().width || board.clientWidth || main.clientWidth;
+
+      let best = null;
+      for (let cols = 2; cols <= 4; cols++) {
+        const rows = Math.ceil(n / cols);
+        const rowBudget = (avail - gap * Math.max(0, rows - 1)) / rows;
+        const colBudget = (width - gap * Math.max(0, cols - 1)) / cols;
+        const score = Math.min(rowBudget - overhead, colBudget - tilePad * 2);
+        if (score < 38) continue;
+        if (!best || score > best.score) {
+          best = { cols, rows, score };
+        }
+      }
+      if (!best) {
+        const cols = n <= 6 ? 2 : 3;
+        best = { cols, rows: Math.ceil(n / cols), score: 38 };
+      }
+      const cols = best.cols;
+      const rows = best.rows;
+      grid.style.width = (width > 0 ? width + 'px' : '100%');
+      grid.style.maxWidth = 'none';
+      grid.style.height = avail + 'px';
+      grid.style.gridTemplateColumns = 'repeat(' + cols + ', minmax(0, 1fr))';
+      grid.style.gridTemplateRows = 'repeat(' + rows + ', minmax(0, 1fr))';
+      grid.style.gap = gap + 'px';
+      grid.style.setProperty('--deck-cols', String(cols));
+      grid.style.setProperty('--deck-rows', String(rows));
+      grid.style.setProperty('--tile-gap', gap + 'px');
+      grid.style.setProperty('--tile-pad', tilePad + 'px');
+    }
+
+    MOBILE_GRID_MQ.addEventListener('change', () => requestAnimationFrame(fitGridLayout));
+    window.addEventListener('resize', () => requestAnimationFrame(fitGridLayout));
+    window.addEventListener('orientationchange', () => setTimeout(fitGridLayout, 120));
+
     // Turn a tile element into a live casilla: load its crop, wire mark/undo. Used both for
     // reused placeholders (filled in place) and brand-new tiles (which also animate in).
     function fillTile(tile, it) {
@@ -535,24 +659,42 @@
       });
 
       deckCountEl.textContent = deck.length;
+      try { sessionStorage.setItem(LAST_DECK_KEY, String(deck.length)); } catch (e) {}
       meta.hidden = false;
       renderReviewed();
       noteEl.hidden = false;
       bar.hidden = false;
       updateCount();
+      requestAnimationFrame(() => requestAnimationFrame(() => fitGridLayout(deck.length)));
     }
 
-    // Dynamic placeholder count (5–13) so the loading state isn't always the same six tiles. The
-    // deck then grows/shrinks this grid into its real size.
-    function randSkel() { return 5 + Math.floor(Math.random() * 9); }
-    function skeleton() {
-      return '<div class="grid" aria-hidden="true">' +
-        '<div class="tile skeleton"></div>'.repeat(randSkel()) + '</div>';
+    function skeletonTileHtml() {
+      return '<div class="tile skeleton"><div class="thumb"></div><span class="cap" aria-hidden="true"></span></div>';
+    }
+
+    function skeleton(count) {
+      const n = count || guessSkeletonCount();
+      return '<div class="grid" aria-hidden="true">' + skeletonTileHtml().repeat(n) + '</div>';
+    }
+
+    // Reserve the same viewport the loaded mesa will use (meta + sticky bar + fitted grid).
+    function showLoadingGrid() {
+      const n = guessSkeletonCount();
+      board.innerHTML = skeleton(n);
+      deckCountEl.textContent = n;
+      meta.hidden = false;
+      noteEl.hidden = true;
+      bar.hidden = false;
+      updateCount();
+      void board.offsetWidth;
+      fitGridLayout(n);
+      requestAnimationFrame(() => fitGridLayout(n));
     }
 
     function renderEmpty(msg) {
       board.innerHTML = '<div class="empty"><span class="big">Gracias por participar</span>' + msg + '</div>';
       meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
+      document.body.style.overflow = '';
     }
 
     // One fetch of a fresh mesa, with a single retry so we don't serve the same mesa twice in a row.
@@ -582,6 +724,7 @@
     async function loadDeck() {
       if (loading) return;
       loading = true;
+      if (!nextDeck || !nextDeck.length) showLoadingGrid();
       try {
         let items;
         if (nextDeck && nextDeck.length) { items = nextDeck; nextDeck = null; }  // use the prefetched mesa
@@ -695,19 +838,18 @@
         if (r && r.at > lastRankAt) { lastRankAt = r.at; celebrateRank(r); }
         else { showToast(thanks()); }
         enqueueVotes(strange, good);       // queued + flushed in the background; never blocks voting
-        board.innerHTML = skeleton();
-        bar.hidden = true;
+        showLoadingGrid();
         loadDeck();
       } finally { sending = false; }
     }
 
     sendBtn.addEventListener('click', submitDeck);
-    skipBtn.addEventListener('click', () => { showToast('Mesa saltada', true); board.innerHTML = skeleton(); bar.hidden = true; loadDeck(); });
+    skipBtn.addEventListener('click', () => { showToast('Mesa saltada', true); showLoadingGrid(); loadDeck(); });
     // Deliver anything still queued when the user leaves/backgrounds the tab (beacon survives unload).
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushBeacon(); });
     window.addEventListener('pagehide', flushBeacon);
 
-    board.innerHTML = skeleton();   // initial shimmer; loadDeck reconciles it into the real mesa
+    showLoadingGrid();
     loadDeck();
     flushOutbox();                  // deliver any votes left queued from a previous visit / tab close
   </script>
