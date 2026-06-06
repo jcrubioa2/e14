@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  <meta name="description" content="{{ meta_description }}">
+  <link rel="canonical" href="{{ canonical }}">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="es_CO">
+  <meta property="og:site_name" content="Veeduría ciudadana E-14 2026">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ meta_description }}">
+  <meta property="og:url" content="{{ canonical }}">
+  <meta name="twitter:card" content="summary">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      --paper:#FBFAF6; --paper-2:#F2EFE6; --card:#FFFFFF;
+      --ink:#1C1A15; --ink-soft:#6E695E; --ink-faint:#9A9488;
+      --line:#E6E1D4; --line-strong:#D8D2C2;
+      --red:#D93A28; --red-deep:#A82A1B; --red-tint:#FCEDE9; --red-line:#F0B5AB;
+      --green:#2F7D52; --link:#0E6E64; --r:15px;
+      --shadow:0 1px 1px rgba(28,26,21,.03), 0 6px 20px -8px rgba(28,26,21,.14);
+    }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html, body { margin:0; }
+    body {
+      font-family:"Hanken Grotesk", system-ui, sans-serif; color:var(--ink);
+      background-color:var(--paper);
+      background-image:
+        radial-gradient(120% 70% at 100% -8%, rgba(217,58,40,.05), transparent 55%),
+        radial-gradient(circle at 1px 1px, rgba(28,26,21,.045) 1px, transparent 0);
+      background-size:auto, 22px 22px; background-attachment:fixed, fixed;
+      -webkit-font-smoothing:antialiased;
+    }
+    a { color:var(--link); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .muted { color:var(--ink-faint); font-size:13px; }
+    header { border-bottom:1px solid var(--line); background:linear-gradient(180deg, rgba(255,255,255,.66), rgba(255,255,255,0)); }
+    header .wrap, main { max-width:1080px; margin:0 auto; padding:0 22px; }
+    header .wrap { padding-top:26px; padding-bottom:24px; }
+    .eyebrow { display:flex; align-items:center; gap:9px; font-size:11.5px; font-weight:700;
+               letter-spacing:.16em; text-transform:uppercase; color:var(--red-deep); }
+    .eyebrow .tick { width:7px; height:7px; border-radius:2px; background:var(--red); transform:rotate(45deg); }
+    h1 { margin:11px 0 0; font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:38px;
+         line-height:1.04; letter-spacing:-.015em; max-width:20ch; }
+    h1 em { font-style:italic; color:var(--red-deep); }
+    .lede { margin:14px 0 0; color:var(--ink-soft); font-size:15.5px; line-height:1.55; max-width:66ch; }
+    main { padding-top:22px; padding-bottom:48px; }
+    h2 { font-family:"Fraunces", Georgia, serif; font-weight:600; font-size:22px; margin:30px 0 6px; }
+
+    /* Hero: the single number that matters most to a citizen — what they can open here. */
+    .hero { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+            box-shadow:var(--shadow); padding:24px 26px; margin:18px 0 8px; display:flex;
+            flex-wrap:wrap; align-items:baseline; gap:6px 18px; }
+    .hero .big { font-family:"Fraunces", Georgia, serif; font-size:52px; font-weight:600;
+                 line-height:1; color:var(--green); letter-spacing:-.02em; }
+    .hero .big-lab { font-size:16px; color:var(--ink); font-weight:600; }
+    .hero .cob { margin-left:auto; text-align:right; }
+    .hero .cob b { font-family:"Fraunces", Georgia, serif; font-size:30px; color:var(--ink); }
+    .hero .cob span { display:block; font-size:12px; color:var(--ink-soft); }
+
+    /* Journey: a vertical timeline that reads as one sentence, país -> tu pantalla. */
+    .journey { margin:10px 0 4px; }
+    .jstep { display:flex; gap:16px; padding-bottom:24px; }
+    .jstep:last-child { padding-bottom:0; }
+    .jmark { position:relative; flex:0 0 18px; }
+    .jdot { width:14px; height:14px; border-radius:50%; margin:7px auto 0; background:#cbd2c9;
+            box-shadow:0 0 0 3px var(--paper), 0 0 0 4px var(--line); }
+    .jstep.is-final .jdot { width:18px; height:18px; background:var(--green);
+            box-shadow:0 0 0 3px var(--paper), 0 0 0 4px #bfe0cb; }
+    .jstep:not(:last-child) .jmark::after { content:""; position:absolute; left:50%;
+            transform:translateX(-50%); top:22px; bottom:-24px; width:2px; background:var(--line); }
+    .jbody { flex:1; min-width:0; padding-bottom:2px; }
+    .jconnector { font-size:13px; color:var(--ink-soft); }
+    .jnum { font-family:"Fraunces", Georgia, serif; font-size:34px; font-weight:600; line-height:1.05;
+            font-variant-numeric:tabular-nums; letter-spacing:-.01em; }
+    .jstep.is-final .jnum { color:var(--green); }
+    .jlabel { font-weight:700; font-size:15px; margin-top:1px; }
+    .jsub { color:var(--ink-faint); font-size:13px; margin-top:4px; line-height:1.45; }
+    .jstep.is-final .jbody { background:linear-gradient(180deg,#F4FBF6,#FFFFFF);
+            border:1px solid #bfe0cb; border-radius:var(--r); padding:12px 16px; margin-top:-6px; }
+
+    .backlog { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+               padding:6px 0; box-shadow:var(--shadow); max-height:320px; overflow:auto; }
+    .backlog table { width:100%; border-collapse:collapse; font-size:13px; }
+    .backlog th, .backlog td { padding:7px 14px; border-bottom:1px solid var(--line); text-align:left; }
+    .note { background:var(--paper-2); border:1px solid var(--line); border-radius:var(--r); padding:14px 18px; margin-top:12px; font-size:14px; line-height:1.55; color:var(--ink-soft); }
+    .note b { color:var(--ink); }
+  </style>
+</head>
+<body>
+  {% include "_appbar.html" %}
+  <header>
+    <div class="wrap">
+      <div class="eyebrow"><span class="tick"></span> Veeduría ciudadana · E-14</div>
+      <h1>Cómo cuadran <em>nuestros conteos</em></h1>
+      <p class="lede">Una sola cadena, de lo que reporta la Registraduría a lo que ve el público.
+        Debe ser <b>no creciente</b> de arriba a abajo, y <b>las actas en nuestra base de datos
+        deben ser exactamente las publicadas</b>. Aquí está, en abierto, para que cualquiera lo verifique.</p>
+    </div>
+  </header>
+
+  <main>
+    {% if public.has_data %}
+    <div class="hero">
+      <div>
+        <div class="big">{{ public.served_label }}</div>
+        <div class="big-lab">mesas disponibles para consultar en nuestro sistema</div>
+      </div>
+      {% if public.cobertura_label is not none %}
+      <div class="cob">
+        <b>{{ public.cobertura_label }}%</b>
+        <span>de las actas con PDF publicado</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <h2>El recorrido de un acta: del país a tu pantalla</h2>
+    <div class="journey">
+      {% for s in public.funnel %}
+      <div class="jstep {{ 'is-final' if s.highlight }}">
+        <div class="jmark"><div class="jdot"></div></div>
+        <div class="jbody">
+          <div class="jconnector">{{ s.connector }}</div>
+          <div class="jnum">{{ s.value_label }}</div>
+          <div class="jlabel">{{ s.label }}</div>
+          <div class="jsub">{{ s.sub }}</div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    {% if public.sin_acta or public.pendientes %}
+    <h2>Por qué algunas mesas todavía no están</h2>
+    <div class="note">
+      {% if public.sin_acta %}
+      <p style="margin:0 0 8px;"><b>{{ public.sin_acta }}</b> mesa(s) ya fueron escaneadas, pero la
+        Registraduría <b>aún no publica el PDF de su acta E-14</b>. Hasta que lo publique, no hay
+        documento que mostrar &mdash; no depende de nosotros.</p>
+      {% endif %}
+      {% if public.pendientes %}
+      <p style="margin:0;"><b>{{ public.pendientes }}</b> acta(s) ya publicadas que todavía estamos
+        incorporando a nuestro sistema. Las añadimos de forma continua.</p>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="note">
+      Ya tienes acceso a <b>todas</b> las mesas cuyo PDF del acta E-14 ha publicado la Registraduría.
+      Las pocas que faltan a nivel nacional son mesas que la propia Registraduría aún no ha publicado.
+    </div>
+    {% endif %}
+
+    {% if backlog and public.pendientes %}
+    <div class="backlog" style="margin-top:12px;">
+      <table>
+        <thead><tr><th>Mesa</th><th>Depto</th><th>Mun.</th><th>Zona</th><th>Puesto</th><th>Mesa #</th></tr></thead>
+        <tbody>
+          {% for b in backlog %}
+          <tr><td>{{ b.key }}</td><td>{{ b.dep }}</td><td>{{ b.muni }}</td><td>{{ b.zona }}</td><td>{{ b.puesto }}</td><td>{{ b.mesa }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {% if public.content %}
+    <h2>Cuidamos que el PDF no cambie</h2>
+    <div class="note">
+      No basta con tener el acta: comprobamos que el PDF que te mostramos siga coincidiendo con
+      el que publica la Registraduría. A veces ellos vuelven a publicar el PDF de una mesa bajo el
+      mismo enlace &mdash; en la última revisión, <b>{{ public.content.content_changed }} de
+      {{ public.content.checked }}</b> ({{ public.content.changed_pct }}%) habían cambiado de PDF.
+      Es <b>una nueva versión del documento, no evidencia de que se haya alterado el conteo</b>; lo
+      seguimos vigilando.
+    </div>
+    {% endif %}
+
+    <p class="muted" style="margin-top:16px;">
+      ¿Buscas una mesa en particular? Ve al <a href="/buscar">buscador</a>.
+      {%- if public.universe_fetched_at %} Cifras actualizadas: {{ public.universe_fetched_at }}.{% endif %}
+    </p>
+
+    {% else %}
+    <div class="note">
+      Estamos preparando estas cifras. Vuelve pronto; mientras tanto, puedes revisar las actas en
+      <a href="/buscar">el buscador</a>.
+    </div>
+    {% endif %}
+  </main>
+
+  {% include "_footer.html" %}
+</body>
+</html>

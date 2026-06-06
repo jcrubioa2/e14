@@ -2,6 +2,7 @@
 
 Subcommands:
   build-universe   Fetch the national acta list -> data/mesa_universe.csv
+  refresh-universe Refresh the count-model snapshot (total_global + mesas_informadas)
   download         Download acta PDFs (resumable; --depto/--muni/--limit filters)
   estimate         Print national volume + runtime projection (no downloads)
   stats            Show manifest status summary
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -18,8 +20,10 @@ from . import config
 from .manifest import Manifest
 from .session import CdnSession
 from .universe import (
-    fetch_names, fetch_universe, filter_records, load_universe_csv,
+    SNAPSHOT_PATH, UniverseShrinkError, fetch_names, fetch_universe,
+    fetch_universe_counts, filter_records, load_universe_csv,
     write_dictionary_csv, write_index_csv, write_universe_csv,
+    write_universe_snapshot,
 )
 
 DICTIONARY_CSV = Path("data") / "divipol_dictionary.csv"
@@ -66,6 +70,122 @@ def cmd_build_universe(args) -> int:
     deps = sorted({r.dep.zfill(2) for r in recs})
     print(f"Universe: {len(recs)} actas across {len(deps)} departments "
           f"-> {UNIVERSE_CSV}")
+    return 0
+
+
+def cmd_refresh_universe(args) -> int:
+    """Refresh the count-model snapshot from the divulgador's allTransmissionCodes.json.
+
+    That JSON enumerates the **mesas_informadas** (mesas with a downloadable acta). The election's
+    **total_global** (installed mesas) lives on the results portal (resultados.registraduria.gov.co),
+    which is bot-protected, so it's supplied via --total-global / $E14_TOTAL_GLOBAL (read off the
+    portal) and carried forward across refreshes until changed. The shrink-guard refuses a
+    truncated fetch unless --allow-shrink.
+    """
+    from .universe import fetch_results_summary, load_universe_snapshot
+
+    recs, nodes_total = fetch_universe_counts()
+    write_universe_csv(recs, UNIVERSE_CSV)
+
+    # Resolve total_global (+ mesas_escrutadas): explicit flag > env > results-portal API >
+    # carried forward from the last snapshot > unknown. The portal JSON is the preferred automatic
+    # source (metota = installed mesas, mesesc = counted); the flag/env stay as manual overrides.
+    total_global = source = mesas_escrutadas = None
+    if getattr(args, "total_global", None):
+        total_global, source = int(args.total_global), "results portal (--total-global)"
+    elif os.environ.get("E14_TOTAL_GLOBAL", "").isdigit():
+        total_global, source = int(os.environ["E14_TOTAL_GLOBAL"]), "results portal ($E14_TOTAL_GLOBAL)"
+    summary = fetch_results_summary()
+    if summary:
+        mesas_escrutadas = summary.get("mesas_escrutadas")
+        if total_global is None:
+            total_global, source = summary["total_mesas"], "results portal (ACT/PR/00.json)"
+    if total_global is None:
+        prev = load_universe_snapshot(SNAPSHOT_PATH)
+        if prev and prev.get("total_global"):
+            total_global, source = int(prev["total_global"]), (prev.get("total_global_source") or "heredado")
+            mesas_escrutadas = mesas_escrutadas or prev.get("mesas_escrutadas")
+
+    try:
+        snap = write_universe_snapshot(
+            recs, total_global=total_global, total_global_source=source,
+            mesas_escrutadas=mesas_escrutadas, allow_shrink=args.allow_shrink)
+    except UniverseShrinkError as exc:
+        print(f"✗ {exc}")
+        return 1
+    informadas = snap["mesas_informadas"]
+    print(f"Universe snapshot -> {SNAPSHOT_PATH}")
+    if snap["total_global"] is not None:
+        print(f"  total_global       = {snap['total_global']:,}  ({source})")
+    else:
+        print(f"  total_global       = — (sin dato del portal; pasa --total-global N)")
+    if snap["mesas_escrutadas"] is not None:
+        print(f"  mesas_escrutadas   = {snap['mesas_escrutadas']:,}  (results portal · mesesc)")
+    print(f"  mesas_informadas   = {informadas:,}  (allTransmissionCodes · acta images)")
+    if snap["total_global"] is not None:
+        print(f"  backlog de reporte = {max(0, snap['total_global'] - informadas):,}  "
+              f"(total_global − informadas)")
+    print(f"  fetched_at         = {snap['fetched_at']}")
+    return 0
+
+
+def _sync_out(args) -> Path:
+    return Path(getattr(args, "output_dir", None) or "data/detector")
+
+
+def _sync_round(args) -> str | None:
+    """The active round for a sync command: an explicit --round wins, else None so the sync
+    layer falls back to config.ELECTION_ROUND (env E14_ELECTION_ROUND, default r1)."""
+    return getattr(args, "round", None)
+
+
+def cmd_sync_status(args) -> int:
+    from e14detector.sync import do_status
+    return do_status(_sync_out(args), cdn_base=args.cdn_base, round=_sync_round(args))
+
+
+def cmd_sync_verify(args) -> int:
+    from e14detector.sync import do_verify
+    return do_verify(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+                     check_crops=args.check_crops, check_content=args.check_content,
+                     round=_sync_round(args))
+
+
+def cmd_sync_restore(args) -> int:
+    from e14detector.sync import do_restore
+    return do_restore(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+                      prefix=args.prefix, round=_sync_round(args))
+
+
+def cmd_sync_run(args) -> int:
+    from e14detector.sync import do_run
+    return do_run(
+        _sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+        refresh_universe=not args.no_universe, workers=args.workers,
+        upload_limit=args.upload_limit, interval=args.interval, db_interval=args.db_interval,
+        once=args.once, department=args.department, allow_locked=args.allow_locked,
+        allow_shrink=args.allow_shrink, round=_sync_round(args),
+    )
+
+
+def cmd_sync_backup(args) -> int:
+    from e14detector.sync import do_backup
+    return do_backup(_sync_out(args), dest=Path(args.dest), bucket=args.bucket,
+                     cdn_base=args.cdn_base, round=_sync_round(args))
+
+
+def cmd_sync_stamp_pointer(args) -> int:
+    from e14detector.sync import do_stamp_pointer
+    return do_stamp_pointer(_sync_out(args), bucket=args.bucket, cdn_base=args.cdn_base,
+                            round=_sync_round(args))
+
+
+def cmd_sync_fleet(args) -> int:
+    # Multi-machine orchestration still lives in the detector CLI (fleet-init/status/schedule/
+    # complete/pull-fleet/publish-fleet). Point operators there rather than duplicate it.
+    print("e14 sync fleet: la orquestación multi-máquina vive en el CLI del detector.")
+    print("  python -m e14detector.cli fleet-init | fleet-status | fleet-schedule | fleet-complete")
+    print("  (pull-fleet / publish-fleet para fusionar/publicar la cola)")
     return 0
 
 
@@ -325,6 +445,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("build-universe", help="fetch national acta list to CSV")
     sp.set_defaults(func=cmd_build_universe)
 
+    sp = sub.add_parser("refresh-universe",
+                        help="refresh the universe snapshot (mesas_informadas from the divulgador; "
+                             "total_global from the results portal via --total-global)")
+    sp.add_argument("--total-global", type=int,
+                    help="installed-mesa total read off resultados.registraduria.gov.co "
+                         "(bot-protected, so supplied here); carried forward until changed")
+    sp.add_argument("--allow-shrink", action="store_true",
+                    help="accept a snapshot smaller than the last (override the shrink-guard)")
+    sp.set_defaults(func=cmd_refresh_universe)
+
     sp = sub.add_parser("estimate", help="print volume + runtime estimate")
     common(sp)
     sp.set_defaults(func=cmd_estimate)
@@ -342,6 +472,70 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("stats", help="show manifest status summary")
     sp.set_defaults(func=cmd_stats)
+
+    # --- Unified sync (consolidation; consistency rules baked in) ---------------------------
+    sync = sub.add_parser(
+        "sync",
+        help="unified incremental sync — one tool with the count-model rules baked in "
+             "(lock-aware, frontier-only, shrink-guard, chain-stamp, verify-first)")
+    sync_sub = sync.add_subparsers(dest="sync_cmd", required=True)
+
+    def _sync_common(p):
+        p.add_argument("--output-dir", default="data/detector")
+        p.add_argument("--bucket", help="object-store bucket (default: $BUCKET_NAME)")
+        p.add_argument("--cdn-base", default=os.environ.get("E14_CDN_BASE_URL", "") or None,
+                       help="published CDN base URL (default: $E14_CDN_BASE_URL)")
+        p.add_argument("--round", default=None,
+                       help="election round to operate on, e.g. r1|r2 (default: "
+                            "$E14_ELECTION_ROUND, then r1). r1 uses the legacy un-prefixed "
+                            "bucket keys; r2 nests under db/r2/ + crops/r2/")
+
+    sp = sync_sub.add_parser("status", help="print the count chain + cobertura + backlogs")
+    _sync_common(sp)
+    sp.set_defaults(func=cmd_sync_status)
+
+    sp = sync_sub.add_parser("verify", help="assert the invariant chain (nonzero exit on inversion)")
+    _sync_common(sp)
+    sp.add_argument("--check-crops", action="store_true",
+                    help="also confirm every served crop exists in the bucket (full sweep)")
+    sp.add_argument("--check-content", action="store_true",
+                    help="also flag served crops whose source PDF drifted (content integrity)")
+    sp.set_defaults(func=cmd_sync_verify)
+
+    sp = sync_sub.add_parser("restore", help="resume on a fresh machine (reconcile manifest + pull DB)")
+    _sync_common(sp)
+    sp.add_argument("--prefix", default=None,
+                    help="object key prefix to list (default: the round's crop prefix — "
+                         "crops/ for r1, crops/<round>/ otherwise)")
+    sp.set_defaults(func=cmd_sync_restore)
+
+    sp = sync_sub.add_parser("run", help="the one safe publisher loop (universe + crops + frontier DB)")
+    _sync_common(sp)
+    sp.add_argument("--once", action="store_true", help="run a single cycle and exit (then verify)")
+    sp.add_argument("--no-universe", action="store_true", help="skip the universe-snapshot refresh")
+    sp.add_argument("--workers", type=int, default=32, help="crop upload concurrency")
+    sp.add_argument("--upload-limit", type=int, default=12000, help="max crops uploaded per cycle")
+    sp.add_argument("--interval", type=int, default=60, help="seconds between crop-upload ticks")
+    sp.add_argument("--db-interval", type=int, default=300, help="seconds between DB publishes")
+    sp.add_argument("--department", help="only upload crops for this department (code or name)")
+    sp.add_argument("--allow-locked", action="store_true", help="publish even over a locked round")
+    sp.add_argument("--allow-shrink", action="store_true", help="override the shrink-guard")
+    sp.set_defaults(func=cmd_sync_run)
+
+    sp = sync_sub.add_parser("backup", help="write one off-Tigris DR copy of the published snapshot")
+    _sync_common(sp)
+    sp.add_argument("--dest", required=True, help="destination directory for the DR copy")
+    sp.set_defaults(func=cmd_sync_backup)
+
+    sp = sync_sub.add_parser(
+        "stamp-pointer",
+        help="add/refresh the reconciliation block on the LIVE pointer without rebuilding the DB "
+             "(safe one-off for a frozen/locked round)")
+    _sync_common(sp)
+    sp.set_defaults(func=cmd_sync_stamp_pointer)
+
+    sp = sync_sub.add_parser("fleet", help="multi-machine orchestration (points to the detector CLI)")
+    sp.set_defaults(func=cmd_sync_fleet)
 
     sp = sub.add_parser("dictionary",
                         help="build human-readable DIVIPOL dictionary + per-acta index")

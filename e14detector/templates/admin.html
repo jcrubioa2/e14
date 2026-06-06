@@ -23,8 +23,26 @@
     .pipeline { margin-top:12px; padding:8px 12px; border-radius:8px; font-size:13px; border:1px solid var(--line); }
     .pipeline.ok { background:#eaf6ec; border-color:#aedcb8; }
     .pipeline.warn { background:#fff8e6; border-color:#e6c34a; }
+    .pipeline.bad { background:#fdeceb; border-color:var(--bad); color:var(--bad); }
     .pipeline .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:#1a7f37; vertical-align:middle; }
     .pipeline.warn .dot { background:#b88200; }
+    .pipeline.bad .dot { background:var(--bad); }
+    .gaplink { margin-left:8px; font-size:12px; color:var(--accent); background:none; border:none; padding:0; cursor:pointer; text-decoration:underline; }
+    .chaintable { margin-top:6px; }
+    .chaintable td.lbl { font-weight:600; }
+    .chaintable .src { color:var(--muted); font-size:12px; }
+    .chaintable tr.chain-bad td { background:#fdeceb; color:var(--bad); }
+    .chaintable tr.chain-na td.num { color:var(--muted); }
+    .chaintable .st-ok { color:#1a7f37; }
+    .chaintable .st-bad { color:var(--bad); font-weight:600; }
+    .chaintable .st-na { color:var(--muted); }
+    .derived { display:flex; flex-wrap:wrap; gap:10px; margin-top:12px; }
+    .derived .card.big b { font-size:22px; }
+    .derived .card.bad { background:#fdeceb; border-color:var(--bad); }
+    .derived .card.bad b { color:var(--bad); }
+    .gapbox { margin-top:10px; }
+    .gapbox .muted { margin-bottom:6px; }
+    .gaptable-wrap { max-height:320px; overflow:auto; border:1px solid var(--line); border-radius:8px; }
     .status { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
     .tile { border:1px solid var(--line); border-left-width:4px; border-radius:6px; padding:6px 10px; font-size:12px; color:var(--muted); min-width:120px; }
     .tile b { display:block; font-size:14px; color:var(--ink); margin-top:2px; }
@@ -52,8 +70,12 @@
     {% if pipeline %}
     <div class="pipeline {{ 'warn' if pipeline.pointer_stale and not pipeline.complete else 'ok' }}">
       <span class="dot"></span>
-      <b>Publicación:</b>
-      {{ pipeline.synced_label }} de {{ pipeline.total_label }} actas servidas ({{ pipeline.pct }}%)
+      <b>Cobertura:</b>
+      {% if pipeline.chain and pipeline.chain.cobertura_label is not none -%}
+        {{ pipeline.synced_label }} de {{ pipeline.total_label }} mesas informadas servidas ({{ pipeline.chain.cobertura_label }}%)
+      {%- else -%}
+        {{ pipeline.synced_label }} actas servidas{% if not pipeline.total_known %} (sin total nacional aún){% endif %}
+      {%- endif %}
       {%- if pipeline.last_sync_text %} &middot; última acta {{ pipeline.last_sync_text }}{% endif %}
       {%- if pipeline.eta_text %} &middot; ETA {{ pipeline.eta_text }}{% endif %}
       {%- if pipeline.pointer_age_min is not none %} &middot;
@@ -62,6 +84,17 @@
         {%- if pipeline.pointer_stale and not pipeline.complete %} <b>&mdash; ¿publicador detenido?</b>{% endif %}
       {%- endif %}
     </div>
+    {% if pipeline.count_divergence %}
+    <div class="pipeline bad">
+      <span class="dot"></span>
+      <b>Divergencia de conteo ({{ pipeline.divergence_kind }}):</b>
+      la DB servida tiene
+      {{ pipeline.served_total_label if pipeline.divergence_kind == 'totales' else pipeline.served_browsable_label }}
+      actas, pero el último puntero publicado declara
+      {{ pipeline.pointer_n_docs if pipeline.divergence_kind == 'totales' else pipeline.pointer_n_browsable }}
+      (diferencia de {{ pipeline.count_divergence }}) &mdash; ¿publicador detenido o lector sin intercambiar?
+    </div>
+    {% endif %}
     {% endif %}
     {% if health %}
     <div class="status">
@@ -110,11 +143,63 @@
           {% endif %}
         </div>
       </div>
-      <div class="dbmeta">
-        <div class="card">actas publicadas<b>{% if pipeline and pipeline.pointer_n_docs %}{{ pipeline.pointer_n_docs }}{% else %}&mdash;{% endif %}</b></div>
-        <div class="card">tamaño publicado<b>{% if pipeline and pipeline.pointer_raw_mb %}{{ pipeline.pointer_raw_mb }} MB{% else %}&mdash;{% endif %}</b></div>
-        <div class="card">sha<b>{% if pipeline and pipeline.pointer_sha %}{{ pipeline.pointer_sha }}{% else %}&mdash;{% endif %}</b></div>
-        <div class="card">última publicación<b>{% if pipeline and pipeline.pointer_age_min is not none %}hace {{ pipeline.pointer_age_min }} min{% else %}&mdash;{% endif %}</b></div>
+      {% set chain = pipeline.chain if pipeline else none %}
+      <h2 style="font-size:15px; margin:16px 0 4px;">Reconciliación de conteos</h2>
+      <div class="muted" style="font-size:12px; margin-bottom:8px;">
+        Una sola cadena, de lo externo (Registraduría) a lo que ve el público. Debe ser
+        <b>no creciente</b> de arriba a abajo; <b>en la DB servida</b> y <b>publicadas</b> deben coincidir.
+        {%- if chain and chain.universe_fetched_at %} Universo actualizado: {{ chain.universe_fetched_at }}.{% endif %}
+      </div>
+      {% if chain and chain.has_reconciliation %}
+      <table class="chaintable">
+        <thead><tr><th>Conteo</th><th class="num">Actas</th><th>Fuente</th><th>Estado</th></tr></thead>
+        <tbody>
+          {% for r in chain.rows %}
+          <tr class="chain-{{ r.status }}">
+            <td class="lbl">{{ r.label }}</td>
+            <td class="num">{{ r.count_label }}</td>
+            <td class="src">{{ r.source }}</td>
+            <td>
+              {%- if r.status == 'ok' %}<span class="st-ok">✓</span>
+              {%- elif r.status == 'bad' %}<span class="st-bad">⚠ inversión</span>
+              {%- else %}<span class="st-na">sin dato</span>{% endif -%}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="derived">
+        <div class="card big">cobertura<b>{% if chain.cobertura_label is not none %}{{ chain.cobertura_label }}%{% else %}&mdash;{% endif %}</b></div>
+        <div class="card big">backlog de ingesta<b>{% if chain.backlog_ingesta_label is not none %}{{ chain.backlog_ingesta_label }}{% else %}&mdash;{% endif %}</b>
+          {%- if chain.backlog_ingesta %}<button class="gaplink" id="gapBtn" type="button">ver detalle</button>{% endif %}</div>
+        <div class="card">backlog de reporte<b>{% if chain.backlog_reporte_label is not none %}{{ chain.backlog_reporte_label }}{% else %}&mdash;{% endif %}</b></div>
+        <div class="card {{ 'bad' if not chain.served_eq_published }}">servida = publicada<b>{{ 'sí' if chain.served_eq_published else 'NO' }}</b></div>
+        <div class="card">tamaño publicado<b>{% if pipeline.pointer_raw_mb %}{{ pipeline.pointer_raw_mb }} MB{% else %}&mdash;{% endif %}</b></div>
+        <div class="card">sha<b>{% if pipeline.pointer_sha %}{{ pipeline.pointer_sha }}{% else %}&mdash;{% endif %}</b></div>
+      </div>
+      {% if chain.content %}
+      <div class="muted" style="margin-top:10px; font-size:12px;">
+        <b>Integridad de contenido</b> (eje paralelo, informativo):
+        {{ chain.content.content_changed }} de {{ chain.content.checked }} actas re-emitidas
+        ({{ chain.content.changed_pct }}%) — re-emisión de PDF bajo el mismo hash, <b>no edición de tally
+        probada</b>. Informe: {{ chain.content.report }}.
+      </div>
+      {% endif %}
+      {% else %}
+      <div class="muted" style="font-size:13px; padding:8px 0;">
+        El puntero publicado aún no trae el bloque de reconciliación. Ejecuta
+        <code>e14detector publish-db --force-pointer</code> (o desde el panel) para estamparlo.
+        En la DB servida hay {% if pipeline and pipeline.served_total_label %}{{ pipeline.served_total_label }}{% else %}&mdash;{% endif %} actas.
+      </div>
+      {% endif %}
+      <div class="gapbox" id="gapBox" hidden>
+        <div class="muted"></div>
+        <div class="gaptable-wrap">
+          <table>
+            <thead><tr><th>mesa (clave)</th><th>depto</th><th>mun.</th><th>zona</th><th>puesto</th><th>mesa</th></tr></thead>
+            <tbody id="gapRows"></tbody>
+          </table>
+        </div>
       </div>
     </section>
   </main>
@@ -131,6 +216,30 @@
         location.reload();
       } catch (e) { alert('Error: ' + e.message); b.disabled = false; location.reload(); }
     }));
+
+    // "ver detalle": list the ingesta backlog (mesas informadas aún no servidas), straight from
+    // /admin/gap (the pointer's missing-key sample), so the cobertura gap is explainable in one click.
+    const gapBtn = document.getElementById('gapBtn');
+    if (gapBtn) gapBtn.addEventListener('click', async () => {
+      const box = document.getElementById('gapBox');
+      if (!box.hidden) { box.hidden = true; gapBtn.textContent = 'ver detalle'; return; }
+      gapBtn.disabled = true; gapBtn.textContent = '…';
+      try {
+        const r = await fetch(`/admin/gap?key=${encodeURIComponent(KEY)}`);
+        if (!r.ok) throw new Error(await r.text());
+        const data = await r.json();
+        const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+        const more = data.shown < data.count ? ` (mostrando ${data.shown})` : '';
+        document.querySelector('#gapBox .muted').textContent =
+          `${data.count} mesa(s) informadas aún no servidas — backlog de ingesta${more}:`;
+        document.getElementById('gapRows').innerHTML = data.actas.map(a =>
+          `<tr><td>${esc(a.key)}</td><td>${esc(a.department_code)}</td>` +
+          `<td>${esc(a.municipality_code)}</td><td>${esc(a.zone)}</td>` +
+          `<td>${esc(a.puesto)}</td><td>${esc(a.mesa)}</td></tr>`).join('');
+        box.hidden = false; gapBtn.textContent = 'ocultar detalle';
+      } catch (e) { alert('Error: ' + e.message); }
+      finally { gapBtn.disabled = false; }
+    });
   </script>
 </body>
 </html>

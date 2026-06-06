@@ -129,6 +129,35 @@ def test_refresh_rejects_corrupt_snapshot_and_keeps_served_file(tmp_path: Path) 
     assert not list(dest.parent.glob("*.incoming"))  # temp cleaned up
 
 
+def test_refresh_db_reader_side_lock_rejects_regressing_pointer(tmp_path: Path) -> None:
+    """Reader-side lock enforcement: while db/lock.json is locked at N, the reader refuses to adopt
+    a pointer that regresses (n_docs missing or < N) — protecting the served DB even when a
+    stale/rogue publisher (old code) flips the pointer past the publisher-side lock."""
+    src = tmp_path / "src" / "results.sqlite"
+    _make_db(src, 5)
+    cdn = tmp_path / "cdn"
+    digest = _publish_to_dir(src, cdn)  # pointer here has no n_docs (like the legacy publisher)
+    dest = tmp_path / "served" / "results.sqlite"
+    # First pull (unlocked) installs the good snapshot.
+    assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) == digest
+
+    # Lock the round at 5 docs.
+    (cdn / dbsync.LOCK_KEY).write_text(json.dumps({"locked": True, "n_docs": 5}))
+    # A rogue publish: new snapshot with NO n_docs (legacy publisher signature), pointer flipped.
+    _make_db(src, 1)  # different content -> different sha
+    rogue = _publish_to_dir(src, cdn)
+    assert rogue != digest
+    # Reader refuses it (locked, new pointer has no n_docs) and keeps the good snapshot.
+    assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) is None
+    con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+    assert con.execute("SELECT COUNT(*) FROM vote_fields").fetchone()[0] == 5  # unchanged
+    con.close()
+
+    # Unlocking lets the reader adopt the new pointer again (escape hatch).
+    (cdn / dbsync.LOCK_KEY).write_text(json.dumps({"locked": False}))
+    assert dbsync.refresh_db_once(cdn.as_uri(), dest, timeout=10) == rogue
+
+
 def test_publish_db_only_uploaded_publishes_the_frontier(tmp_path: Path) -> None:
     """--only-uploaded drops actas whose crops aren't all in the manifest."""
     out = tmp_path / "out"
@@ -383,6 +412,166 @@ def test_publish_db_uses_content_hashed_key_and_flips_pointer(tmp_path: Path) ->
     pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
     assert pointer["sha256"] == info["sha256"] and pointer["key"] == info["key"]
     assert pointer["n_docs"] == info["n_docs"] == 2  # count recorded for the count-based guard
+    # Both totals shipped, and every doc here is browsable (has a candidate crop) so they match.
+    assert pointer["n_browsable"] == info["n_browsable"] == 2
+
+
+def test_publish_db_records_browsable_count_and_gap(tmp_path: Path) -> None:
+    """The pointer carries n_browsable (actas with >=1 candidate crop) next to n_docs so the admin
+    board reconciles 'servidas' vs 'publicadas' from one source. Docs with no candidate crop
+    (n_candidates=0) widen the n_docs-vs-n_browsable gap — they must not count as browsable."""
+    out = tmp_path / "out"
+    db = out / "results" / "results.sqlite"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT)")
+    con.execute(
+        "CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, page_number INTEGER, "
+        "row_number INTEGER, row_type TEXT, section TEXT, candidate_number INTEGER, "
+        "candidate_name TEXT, raw_crop_path TEXT, vlm_classification TEXT)")
+    # 3 browsable docs: a candidate row WITH a crop path.
+    for d in ("d0", "d1", "d2"):
+        con.execute("INSERT INTO documents VALUES (?, ?)", (d, f"{d}.pdf"))
+        con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                    "VALUES (?,1,1,'candidate',?)", (d, f"crops/{d}.png"))
+    # 2 metadata-only docs (n_candidates=0): one with no vote_fields, one with only a summary row.
+    con.execute("INSERT INTO documents VALUES ('g0', 'g0.pdf')")
+    con.execute("INSERT INTO documents VALUES ('g1', 'g1.pdf')")
+    con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                "VALUES ('g1',2,14,'summary',NULL)")
+    con.commit(); con.close()
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _FakeS3()
+    info = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    assert info["n_docs"] == 5 and info["n_browsable"] == 3  # 2 metadata-only docs in the gap
+    pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
+    assert pointer["n_docs"] == 5 and pointer["n_browsable"] == 3
+    assert pointer["n_browsable"] <= pointer["n_docs"]  # the invariant the admin board relies on
+
+
+def _make_geo_db(path: Path, served_keys: list[tuple[str, str, str, str, str]]) -> None:
+    """A results DB whose documents carry geo codes (dep,muni,zona,puesto,mesa) so the
+    reconciliation can diff served keys against the universe's informed keys."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE documents (document_id TEXT PRIMARY KEY, source_path TEXT, "
+                "department_code TEXT, municipality_code TEXT, zone TEXT, puesto TEXT, mesa TEXT)")
+    con.execute("CREATE TABLE vote_fields (id INTEGER PRIMARY KEY, document_id TEXT, page_number INTEGER, "
+                "row_number INTEGER, row_type TEXT, section TEXT, candidate_number INTEGER, "
+                "candidate_name TEXT, raw_crop_path TEXT, vlm_classification TEXT)")
+    for i, (dep, muni, zona, puesto, mesa) in enumerate(served_keys):
+        d = f"doc-{i}"
+        con.execute("INSERT INTO documents VALUES (?,?,?,?,?,?,?)", (d, f"{d}.pdf", dep, muni, zona, puesto, mesa))
+        con.execute("INSERT INTO vote_fields (document_id, page_number, row_number, row_type, raw_crop_path) "
+                    "VALUES (?,1,1,'candidate',?)", (d, f"crops/{d}.png"))
+    con.commit(); con.close()
+
+
+def _write_universe_snapshot(path: Path, total_global: int, keys: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "total_global": total_global, "mesas_informadas": len(keys),
+        "fetched_at": "2026-06-05T00:00:00+00:00", "keys": sorted(keys)}))
+
+
+def test_publish_db_stamps_reconciliation_chain(tmp_path: Path, monkeypatch) -> None:
+    """The publisher stamps the count-model chain into the pointer: total_global / informadas
+    from the universe snapshot, sqlite_served from the snapshot, and the derived ingest backlog
+    (informadas − served) with a sample of which informed mesas aren't served yet."""
+    from e14 import universe
+
+    monkeypatch.chdir(tmp_path)  # isolate from the repo's real data/manifest.db
+    out = tmp_path / "out"
+    # Serve 3 mesas; the universe knows 4 informed mesas (1 is behind) out of 6 total_global.
+    served = [("01", "001", "001", "01", "001"), ("01", "001", "001", "01", "002"),
+              ("01", "001", "001", "01", "003")]
+    _make_geo_db(out / "results" / "results.sqlite", served)
+    informed_keys = [f"01_001_001_01_{m}" for m in ("001", "002", "003", "004")]  # 004 is the backlog
+    snap_path = tmp_path / "universe_snapshot.json"
+    _write_universe_snapshot(snap_path, total_global=6, keys=informed_keys)
+    monkeypatch.setattr(universe, "SNAPSHOT_PATH", snap_path)
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _FakeS3()
+    info = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    recon = info["reconciliation"]
+    assert recon["total_global"] == 6
+    assert recon["mesas_informadas"] == 4
+    assert recon["sqlite_served"] == 3
+    assert recon["backlog_ingesta"] == 1   # 4 informed − 3 served
+    assert recon["backlog_reporte"] == 2   # 6 total − 4 informed
+    assert recon["missing_count"] == 1
+    assert recon["missing_keys_sample"] == ["01_001_001_01_004"]
+    # The pointer on the bucket carries the same block.
+    pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
+    assert pointer["reconciliation"]["backlog_ingesta"] == 1
+
+
+def test_publish_db_force_pointer_restamps_unchanged_db(tmp_path: Path, monkeypatch) -> None:
+    """A frozen/locked round's DB is unchanged (same sha), so a normal publish is a no-op. With
+    force_pointer the pointer is re-stamped with a fresh reconciliation block — no re-upload."""
+    from e14 import universe
+
+    monkeypatch.chdir(tmp_path)  # isolate from the repo's real data/manifest.db
+    out = tmp_path / "out"
+    served = [("01", "001", "001", "01", "001"), ("01", "001", "001", "01", "002")]
+    _make_geo_db(out / "results" / "results.sqlite", served)
+    snap_path = tmp_path / "universe_snapshot.json"
+    _write_universe_snapshot(snap_path, total_global=5, keys=[f"01_001_001_01_{m}" for m in ("001", "002", "003")])
+    monkeypatch.setattr(universe, "SNAPSHOT_PATH", snap_path)
+
+    class _FakeS3:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+            self.uploads = 0
+
+        def get_object(self, Bucket, Key):  # noqa: N803
+            if Key not in self.objects:
+                raise KeyError(Key)
+            return {"Body": type("B", (), {"read": lambda s: self.objects[Key]})()}
+
+        def upload_file(self, local, bucket, key, ExtraArgs=None):  # noqa: N803
+            self.uploads += 1
+            self.objects[key] = Path(local).read_bytes()
+
+        def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803
+            self.objects[Key] = Body
+
+    s3 = _FakeS3()
+    first = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    uploads_after_first = s3.uploads
+    assert first["reconciliation"]["sqlite_served"] == 2
+
+    # Re-publishing the same DB without force_pointer is a skip (no re-upload, no re-stamp).
+    skipped = dbsync.publish_db(out, bucket="b", client=s3, verbose=False)
+    assert skipped.get("skipped") is True and s3.uploads == uploads_after_first
+
+    # With force_pointer it re-stamps the pointer (fresh ts) but does NOT re-upload the snapshot.
+    restamped = dbsync.publish_db(out, bucket="b", client=s3, force_pointer=True, verbose=False)
+    assert restamped.get("restamped") is True
+    assert s3.uploads == uploads_after_first  # snapshot object untouched
+    pointer = json.loads(s3.objects[dbsync.POINTER_KEY])
+    assert pointer["reconciliation"]["sqlite_served"] == 2
+    assert pointer["sha256"] == first["sha256"]  # same content, just a refreshed pointer
 
 
 def test_build_serving_db_drops_fat_columns_and_tables(tmp_path: Path) -> None:

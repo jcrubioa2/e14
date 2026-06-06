@@ -10,6 +10,11 @@ logs/
 files/
 .claude/
 
+# acta integrity-monitor artifacts (already under data/, listed for clarity/defense)
+data/snapshots/
+data/reports/
+data/_verify_tmp/
+
 # transient: core-affinity choice written by scripts/cpu_throttle.sh
 .cpu_set
 .gitsecret/keys/random_seed

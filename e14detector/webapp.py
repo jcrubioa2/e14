@@ -4,10 +4,13 @@ from __future__ import annotations
 import asyncio
 import collections
 import functools
+import hmac
+import ipaddress
 import math
 import os
 import random
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -378,26 +381,43 @@ def _puestos(
     ).fetchall()
 
 
-def crop_key(raw_crop_path: str) -> str:
-    """Object-store key for a crop: the ``crops/<file>`` suffix of its stored path.
+def crop_prefix(round: str | None = None) -> str:
+    """Bucket-key prefix for crops in a round. ``r1`` (default) keeps the LEGACY ``crops/``
+    prefix so first-round object keys never move; any other round nests under ``crops/<round>/``.
+    Mirrors the ``db/`` round-prefix scheme in ``dbsync._round_prefix``."""
+    r = (round or config.ELECTION_ROUND or "r1").strip().lower()
+    return "crops/" if r == "r1" else f"crops/{r}/"
 
-    All candidate crops live under ``<output_dir>/crops/``, so keying on that suffix
-    lets the uploader and the page agree regardless of whether the stored path is
-    absolute or relative.
+
+def crop_rel(raw_crop_path: str) -> str:
+    """The round-agnostic file part after the local ``crops/`` segment of a stored path.
+
+    The local file always lives at ``<output_dir>/crops/<rel>`` regardless of round (one round
+    per machine, so no on-disk collision); only the bucket object key is round-scoped.
     """
     s = str(raw_crop_path).replace("\\", "/")
     idx = s.find("crops/")
-    return s[idx:] if idx != -1 else s.lstrip("/")
+    return s[idx + len("crops/"):] if idx != -1 else s.lstrip("/")
 
 
-def crop_cdn_url(raw_crop_path: str, cdn_base: str) -> str | None:
+def crop_key(raw_crop_path: str, round: str | None = None) -> str:
+    """Object-store key for a crop. ``r1`` keeps the legacy ``crops/<file>`` key (byte-identical
+    to before round-scoping); any other round nests under ``crops/<round>/<file>``.
+
+    The manifest key == bucket object key == the CDN URL path, so this single function carries
+    crops, the upload cache, the publish frontier (``_prune_to_uploaded``), and CDN URLs together.
+    """
+    return crop_prefix(round) + crop_rel(raw_crop_path)
+
+
+def crop_cdn_url(raw_crop_path: str, cdn_base: str, round: str | None = None) -> str | None:
     """Public URL for a crop on the CDN, or None when no CDN is configured.
 
     None => caller falls back to the in-app /crop endpoint.
     """
     if not cdn_base:
         return None
-    return f"{cdn_base}/{crop_key(raw_crop_path)}"
+    return f"{cdn_base}/{crop_key(raw_crop_path, round)}"
 
 
 def resolve_crop_path(path: str, output_dir: Path) -> Path:
@@ -540,15 +560,29 @@ def _es_duration(secs: float) -> str:
     return f"~{mins} min"
 
 
-def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None) -> dict:
+def compute_sync_progress(
+    conn: sqlite3.Connection,
+    now: datetime | None = None,
+    *,
+    national_total: int | None = None,
+) -> dict:
     """Public rollout status, derived purely from the served results DB.
 
-    Counts browsable actas (those with at least one candidate crop) against the full
-    national universe, and estimates remaining time from the processing-timestamp span.
-    Reads the total at call time so it can be overridden per-deployment / in tests.
+    Counts browsable actas (those with at least one candidate crop) against the full national
+    universe (``mesas_informadas`` from the count-model reconciliation, passed in as
+    ``national_total``), and estimates remaining time from the processing-timestamp span.
+
+    The denominator is no longer a hardcoded constant (the old ``NATIONAL_TOTAL_ACTAS=121913``
+    matched nothing and manufactured a fake 100%). When ``national_total`` is unknown we fall
+    back to the served count itself so the bar reads an honest "complete" rather than capping
+    against a wrong number — and flag it via ``total_known=False``.
     """
     now = now or datetime.now(timezone.utc)
-    total = max(1, config.NATIONAL_TOTAL_ACTAS)
+    # Optional env override stays supported, but there is NO baked-in default any more.
+    if national_total is None:
+        env_total = os.environ.get("E14_NATIONAL_TOTAL")
+        national_total = int(env_total) if env_total and env_total.isdigit() else None
+    total_known = bool(national_total and national_total > 0)
     # A browsable acta is one with >=1 candidate crop — exactly documents.n_candidates>0 (the
     # precomputed column). Count it off the 122k-row documents table via idx_doc_browse instead of
     # a COUNT(DISTINCT) + JOIN scan over the 1.5M-row vote_fields table (which dominated /browse).
@@ -558,8 +592,18 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
         "       MAX(processing_timestamp) AS last_ts "
         "FROM documents WHERE n_candidates>0"
     ).fetchone()
-    synced = min(row["synced"] or 0, total)
+    served_browsable = row["synced"] or 0  # raw (uncapped) — authoritative "what's actually served"
+    # Denominator: the known national target (informadas) when we have it, else the served
+    # count itself (honest "complete", no fake cap against a wrong constant).
+    total = max(1, national_total if total_known else served_browsable)
+    synced = min(served_browsable, total)
     pct = round(synced * 100 / total, 1)
+    # Total rows in the served snapshot (incl. n_candidates=0). The served DB on the volume is the
+    # ground truth of what visitors get, so the admin board's totales/con-recortes/sin-recortes
+    # triplet is derived from HERE (always available) — the pointer is only used to flag a
+    # served-vs-published *divergence*. served_gap = the 'sin recortes' rows (n_candidates=0).
+    served_total = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    served_gap = served_total - served_browsable
 
     last_sync_text = None
     if row["last_ts"]:
@@ -587,10 +631,136 @@ def compute_sync_progress(conn: sqlite3.Connection, now: datetime | None = None)
         "total": total,
         "synced_label": _es_thousands(synced),
         "total_label": _es_thousands(total),
+        "served_browsable": served_browsable,
+        "served_browsable_label": _es_thousands(served_browsable),
+        "served_total": served_total,
+        "served_total_label": _es_thousands(served_total),
+        "served_gap": served_gap,
+        "served_gap_label": _es_thousands(served_gap),
         "pct": pct,
+        "total_known": total_known,
         "complete": synced >= total,
         "last_sync_text": last_sync_text,
         "eta_text": eta_text,
+    }
+
+
+def build_count_chain(recon: dict | None, served_total: int) -> dict:
+    """Assemble the count-model chain for display, from the pointer reconciliation block + the
+    app's own authoritative served count. Pure/derived so it unit-tests cleanly.
+
+    The chain is non-increasing top→bottom (total_global ≥ informadas ≥ downloaded ≥
+    crops_uploaded ≥ sqlite_served == published); any known count exceeding the one above it is
+    an inversion (status ``bad``) and an alarm. Unknown counts (a source not reachable from the
+    publishing machine) render as ``na`` and don't break the monotone check. ``sqlite_served`` is
+    the app's OWN live served count (authoritative); ``published`` is what the pointer claims it
+    shipped — they must be equal (``served_eq_published``).
+    """
+    recon = recon or {}
+    total_global = recon.get("total_global")
+    escrutadas = recon.get("mesas_escrutadas")
+    informadas = recon.get("mesas_informadas")
+    downloaded = recon.get("downloaded")
+    crops_uploaded = recon.get("crops_uploaded")
+    published = recon.get("sqlite_served")  # the pointer's claim of what it shipped
+    rows = [
+        {"key": "total_global", "label": "Total nacional de mesas", "count": total_global,
+         "source": "Resultados oficiales · ACT/PR/00.json (metota)"},
+        {"key": "mesas_escrutadas", "label": "Mesas escrutadas", "count": escrutadas,
+         "source": "Resultados oficiales · ACT/PR/00.json (mesesc)"},
+        {"key": "informadas", "label": "Actas con imagen publicada", "count": informadas,
+         "source": "Divulgador · allTransmissionCodes.json"},
+        {"key": "downloaded", "label": "Actas descargadas", "count": downloaded,
+         "source": "manifest · status=done"},
+        {"key": "crops_uploaded", "label": "Recortes subidos (frontera)", "count": crops_uploaded,
+         "source": "review/uploaded_crops.txt"},
+        {"key": "sqlite_served", "label": "En la DB servida", "count": served_total,
+         "source": "results.sqlite · COUNT(documents)"},
+        {"key": "published", "label": "Publicadas (lo que ve el público)", "count": published,
+         "source": "db/latest.json · n_docs"},
+    ]
+    prev = None
+    for r in rows:
+        c = r["count"]
+        if c is None:
+            r["status"] = "na"
+        elif prev is not None and c > prev:
+            r["status"] = "bad"  # inversion — a lower row exceeds a higher one
+        else:
+            r["status"] = "ok"
+        if c is not None:
+            prev = c
+        r["count_label"] = _es_thousands(c) if isinstance(c, int) else "—"
+    served_eq_published = published is None or published == served_total
+    cobertura = round(served_total * 100 / informadas, 2) if isinstance(informadas, int) and informadas else None
+    backlog_ingesta = max(0, informadas - served_total) if isinstance(informadas, int) else None
+    backlog_reporte = (max(0, total_global - informadas)
+                       if isinstance(total_global, int) and isinstance(informadas, int) else None)
+    return {
+        "rows": rows,
+        "cobertura": cobertura,
+        # Colombian decimal comma, e.g. 99.99 -> "99,99".
+        "cobertura_label": (f"{cobertura:.2f}".replace(".", ",") if cobertura is not None else None),
+        "backlog_ingesta": backlog_ingesta,
+        "backlog_ingesta_label": (_es_thousands(backlog_ingesta) if backlog_ingesta is not None else None),
+        "backlog_reporte": backlog_reporte,
+        "backlog_reporte_label": (_es_thousands(backlog_reporte) if backlog_reporte is not None else None),
+        "served_eq_published": served_eq_published,
+        "missing_count": recon.get("missing_count"),
+        "universe_fetched_at": recon.get("universe_fetched_at"),
+        # Content-integrity axis (parallel, informational): latest content-report summary.
+        "content": recon.get("content"),
+        "has_reconciliation": bool(recon),
+    }
+
+
+def build_public_counts(recon: dict | None, served_total: int) -> dict:
+    """The PUBLIC projection of the count model — for citizens, not operators.
+
+    The admin chain (build_count_chain) exposes every internal frontier (downloaded, crops,
+    published, inversion flags, source columns). The public doesn't need any of that: it needs a
+    plain four-step funnel from "the whole country" to "what you can actually open here", in
+    everyday Spanish. Same source numbers, friendly labels, no jargon. ``mesas_escrutadas`` is
+    surfaced as "escaneadas" (the wording the public understands), and the final, highlighted step
+    is what the platform genuinely makes accessible (the served count).
+    """
+    recon = recon or {}
+    tg = recon.get("total_global")
+    esc = recon.get("mesas_escrutadas")
+    inf = recon.get("mesas_informadas")
+
+    def lab(n):
+        return _es_thousands(n) if isinstance(n, int) else "—"
+
+    # Each step carries a narrative connector so the four numbers read as one sentence top-to-bottom
+    # ("En todo el país… de ellas… y de esas… todas, aquí"), rather than a technical pipeline.
+    funnel = [
+        {"key": "pais", "connector": "En todo el país hay",
+         "label": "Mesas instaladas en el país", "value_label": lab(tg),
+         "sub": "El total nacional, según la Registraduría."},
+        {"key": "escaneadas", "connector": "De ellas, ya fueron escaneadas",
+         "label": "Mesas escaneadas", "value_label": lab(esc),
+         "sub": "Mesas cuyo resultado ya procesó la Registraduría."},
+        {"key": "acta", "connector": "Y de esas, ya tienen su acta publicada",
+         "label": "Mesas con su acta (PDF) publicada", "value_label": lab(inf),
+         "sub": "La Registraduría ya publicó el PDF del formulario E-14."},
+        {"key": "sistema", "connector": "Todas, disponibles para ti aquí",
+         "label": "Mesas disponibles en nuestro sistema", "value_label": lab(served_total),
+         "sub": "Listas para consultar, revisar y comparar.", "highlight": True},
+    ]
+    cobertura = round(served_total * 100 / inf, 2) if isinstance(inf, int) and inf else None
+    return {
+        "served_label": lab(served_total),
+        "cobertura_label": (f"{cobertura:.2f}".replace(".", ",") if cobertura is not None else None),
+        "funnel": funnel,
+        # Plain-language gaps: mesas escaneadas cuya acta aún no publica la Registraduría, and
+        # actas publicadas que todavía no incorporamos (our pending ingest — 0 when caught up).
+        "sin_acta": (max(0, esc - inf) if isinstance(esc, int) and isinstance(inf, int) else None),
+        "pendientes": (max(0, inf - served_total) if isinstance(inf, int) else None),
+        "missing_count": recon.get("missing_count"),
+        "content": recon.get("content"),
+        "universe_fetched_at": recon.get("universe_fetched_at"),
+        "has_data": bool(recon) and inf is not None,
     }
 
 
@@ -657,12 +827,97 @@ def lookup_candidate_appeal(conn: sqlite3.Connection, field_key: str) -> tuple[s
     return row_["raw_crop_path"], bool(row_["algo_flagged"])
 
 
+_CF_NETS = []
+for _c in config.CF_IP_RANGES:
+    try:
+        _CF_NETS.append(ipaddress.ip_network(_c))
+    except ValueError:
+        pass
+
+
+def _ip_in_cloudflare(ip: str) -> bool:
+    """True if ``ip`` is within Cloudflare's published edge ranges."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in _CF_NETS)
+
+
 def _client_ip(request: Request) -> str:
-    """Best-effort client IP, honoring a single proxy hop (Fly/Cloudflare)."""
+    """Real client IP — un-spoofable, and correct whether or not Cloudflare is in front.
+
+    ``Fly-Client-IP`` is set by Fly's edge to whoever opened the connection, and a client cannot
+    forge it. If that connector is a Cloudflare IP, the request came through Cloudflare and the real
+    visitor is in ``cf-connecting-ip`` — which we trust ONLY in that case, so a direct-to-Fly
+    attacker can't forge ``cf-connecting-ip`` (their Fly-Client-IP wouldn't be a Cloudflare IP).
+    Otherwise (direct to Fly, or mid-DNS-propagation) Fly-Client-IP IS the real client. We never
+    trust the first ``X-Forwarded-For`` hop (attacker-controlled); the XFF/peer fallbacks are only
+    for local/dev where no Fly header exists."""
+    fly = request.headers.get("fly-client-ip")
+    if fly:
+        fly = fly.strip()
+        if _ip_in_cloudflare(fly):
+            cf = request.headers.get("cf-connecting-ip")
+            if cf:
+                return cf.strip()
+        return fly
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
-        return fwd.split(",")[0].strip()
+        return fwd.split(",")[-1].strip()
     return request.client.host if request.client else "0.0.0.0"
+
+
+def _voter_ip(request: Request) -> str:
+    """Client IP normalized for the voter identity: an IPv6 address is collapsed to its **/64**
+    so one allocation (which can hand out billions of addresses) maps to a SINGLE identity, not
+    unlimited ones. IPv4 (and any non-IP fallback string) is returned unchanged. Used only for
+    ``voter_token`` / rate limiting; Turnstile still gets the raw ``_client_ip`` as remoteip."""
+    ip = _client_ip(request)
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False).network_address)
+    return ip
+
+
+# In-process per-IP token bucket for the read/deck endpoints. Best-effort and per-machine (not
+# shared across Fly machines) — that's fine: its only job is to stop one client from driving
+# unbounded cid_index writes / Aurora cost by hammering /api/feed. The authoritative anti-Sybil
+# controls (dedup, the vote rate limiter, Turnstile) all live on the write path. Keyed by
+# _voter_ip; costs zero DB round-trips so it doesn't add load to the hot read path.
+_feed_buckets: dict[str, tuple[float, float]] = {}
+_feed_lock = threading.Lock()
+
+
+def _feed_allow(ip: str) -> bool:
+    refill = config.FEED_RATE_REFILL_PER_MIN / 60.0
+    cap = config.FEED_RATE_BUCKET
+    now = time.time()
+    with _feed_lock:
+        if len(_feed_buckets) > 50000:
+            _feed_buckets.clear()  # crude memory bound under an IP-spray; best-effort anyway
+        tokens, last = _feed_buckets.get(ip, (cap, now))
+        tokens = min(cap, tokens + (now - last) * refill)
+        if tokens < 1.0:
+            _feed_buckets[ip] = (tokens, now)
+            return False
+        _feed_buckets[ip] = (tokens - 1.0, now)
+        return True
+
+
+def _require_admin(request: Request, key: str) -> None:
+    """Gate the operator-only /admin routes. 404 when no token is configured (feature off);
+    403 unless the supplied token matches. The token may come from an ``X-Admin-Token`` header
+    (preferred — keeps it out of URLs/logs/Referer) or the ``?key=`` query param (browser
+    convenience). Compared in constant time to avoid leaking it via response timing."""
+    if not config.ADMIN_TOKEN:
+        raise HTTPException(status_code=404, detail="not found")
+    supplied = request.headers.get("x-admin-token") or key or ""
+    if not hmac.compare_digest(supplied, config.ADMIN_TOKEN):
+        raise HTTPException(status_code=403, detail="forbidden")
 
 
 def create_app(
@@ -682,6 +937,11 @@ def create_app(
     # names resolved at render time (see enrich_doc_names) instead of duplicating them per row.
     geo = load_geo_names()
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+    # Round-aware appbar (Phase 2): exposed once as Jinja globals so every page's shared appbar can
+    # show the "primera vuelta" archive button when this process serves the runoff — no per-route
+    # context churn. On the R1 app r1_archive_url is empty, so the button never renders (byte-identical).
+    templates.env.globals["election_round"] = config.ELECTION_ROUND
+    templates.env.globals["r1_archive_url"] = config.R1_ARCHIVE_URL
     poll_cfg = poll or PollConfig.from_config()
     community = make_store(community_db or (output_dir / "community.sqlite"))
     # Durable vote path: when SQS is configured, votes are enqueued (worker drains to
@@ -703,6 +963,25 @@ def create_app(
         val = fn()
         _agg_cache[key] = (now, val)
         return val
+
+    def _pointer_reconciliation() -> dict | None:
+        # The count-model chain the publisher stamped into the pointer. Cached generously (5 min):
+        # it changes only when the publisher republishes, and resolving it is a network fetch.
+        if not config.CDN_BASE_URL:
+            return None
+
+        def _fetch():
+            from .dbsync import pointer_status
+            ptr = pointer_status(config.CDN_BASE_URL)
+            return (ptr or {}).get("reconciliation")
+        return _agg_cached("pointer_reconciliation", _fetch, ttl=300.0)
+
+    def _national_total() -> int | None:
+        # Denominator for the public progress bar: mesas_informadas from the reconciliation block
+        # (the single source of truth), or None when no reconciliation pointer exists yet.
+        recon = _pointer_reconciliation()
+        inf = (recon or {}).get("mesas_informadas")
+        return int(inf) if isinstance(inf, int) and inf > 0 else None
 
     # cid -> {field_key, crop_rel, document_id} is an immutable, append-only mapping (a cid is
     # registered when the feed surfaces it, well before it can be voted on), so resolving it
@@ -796,7 +1075,8 @@ def create_app(
                     # Progress of the snapshot we actually serve (== what the publisher shipped).
                     try:
                         with _connect(results_db) as db:
-                            return compute_sync_progress(db).get("pct")
+                            return compute_sync_progress(
+                                db, national_total=_national_total()).get("pct")
                     except Exception:  # noqa: BLE001 — can't measure -> let the helper page
                         return None
 
@@ -848,6 +1128,17 @@ def create_app(
         """Baseline hardening headers on every response. Deliberately NO restrictive
         ``default-src`` CSP (would break the inline JS/Turnstile widget); only frame-ancestors
         (anti-clickjacking) plus the cheap, universally-safe headers."""
+        # Edge-bypass guard: when E14_REQUIRE_CF is on, the Fly origin must only be reachable THROUGH
+        # Cloudflare. Any request whose un-spoofable Fly-Client-IP is NOT a Cloudflare IP is a direct-
+        # to-origin hit and gets a bare 404 — so e14-poll.fly.dev serves no usable page OR api and
+        # looks dead to anyone skipping the edge (no origin-confirmation, no direct-origin vote path).
+        # Exemption: /health, which Fly's own internal checker hits directly (no Cloudflare hop), so it
+        # must stay reachable or the machine is marked unhealthy. Fail-OPEN when the switch is off
+        # (local/dev). The 404 body matches FastAPI's default so a direct hit looks like a plain miss.
+        if config.REQUIRE_CF_ORIGIN and request.url.path != "/health":
+            _fly = request.headers.get("fly-client-ip", "")
+            if not (_fly and _ip_in_cloudflare(_fly)):
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
         try:
             resp = await call_next(request)
         except Exception as exc:  # noqa: BLE001 — record + page, then let the 500 propagate
@@ -878,6 +1169,9 @@ def create_app(
     app.state.started_at = time.time()
     app.state.err_5xx = 0
     app.state.recent_errors: collections.deque = collections.deque(maxlen=20)
+    # Client-reported outbox health (vote-loss signal): how many times a browser couldn't deliver
+    # queued votes. Best-effort, in-memory (per machine, resets on deploy) — watch it in /health.
+    app.state.telemetry: collections.Counter = collections.Counter()
 
     def conn() -> sqlite3.Connection:
         if not results_db.exists():
@@ -935,9 +1229,24 @@ def create_app(
 
         ok = await asyncio.to_thread(_ready)
         return JSONResponse(
-            {"status": "ok" if ok else "unavailable", "db": ok},
+            {"status": "ok" if ok else "unavailable", "db": ok,
+             # Vote-loss signal: client outbox stalls reported since this machine booted.
+             "outbox_stalled": app.state.telemetry.get("outbox_stalled", 0)},
             status_code=200 if ok else 503,
         )
+
+    @app.post("/api/telemetry")
+    async def api_telemetry(request: Request, payload: dict = Body(...)):
+        # Tiny, unauthenticated client telemetry (vote-loss signal). Rate-limited per IP so it
+        # can't be spammed to skew the counter; never errors (best-effort, returns 200 always).
+        if _feed_allow("tlm:" + _voter_ip(request)):
+            event = str(payload.get("event", "") or "")[:40]
+            if event:
+                app.state.telemetry[event] += 1
+                if event == "outbox_stalled":
+                    queued = int(payload.get("queued", 0) or 0)
+                    print(f"telemetry outbox_stalled queued={queued} ip={_voter_ip(request)}", flush=True)
+        return JSONResponse({"ok": True}, status_code=200)
 
     def _admin_health(votes_ok: bool, pipeline: dict) -> dict:
         """At-a-glance status for the operator board: serving DB, votes backend, queue backlog,
@@ -977,27 +1286,47 @@ def create_app(
     @app.get("/admin/poll")
     async def admin_poll(request: Request, key: str = ""):
         # Operator-only: DB/publishing management + health. Off unless a token is configured.
-        if not config.ADMIN_TOKEN:
-            raise HTTPException(status_code=404, detail="not found")
-        if key != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=403, detail="forbidden")
+        _require_admin(request, key)
         votes_ok = await asyncio.to_thread(_votes_backend_ok)
         # Pipeline health: what the served DB holds vs what the publisher last shipped.
         # A large pointer age, or a served count far below the published frontier, means
         # the publisher stalled or the reader isn't swapping (the stub-DB incident class).
-        with conn() as db:
-            pipeline = compute_sync_progress(db)
         from .dbsync import pointer_status, read_db_lock
         ptr = pointer_status(config.CDN_BASE_URL) if config.CDN_BASE_URL else None
+        recon = (ptr or {}).get("reconciliation")
+        national_total = None
+        if recon and isinstance(recon.get("mesas_informadas"), int):
+            national_total = recon["mesas_informadas"]
+        with conn() as db:
+            pipeline = compute_sync_progress(db, national_total=national_total)
+        # The count-model chain: one top-to-bottom reconciliation built from the pointer block +
+        # the app's own authoritative served count (asserts published == served).
+        chain = build_count_chain(recon, pipeline["served_total"])
+        pipeline["chain"] = chain
         if ptr:
             age = ptr.get("age_secs")
             pipeline["pointer_sha"] = ptr["sha"]
             pipeline["pointer_raw_mb"] = round(ptr["raw_size"] / 1e6) if ptr.get("raw_size") else None
             pipeline["pointer_gz_mb"] = round(ptr["gz_size"] / 1e6, 1) if ptr.get("gz_size") else None
             pipeline["pointer_n_docs"] = ptr.get("n_docs") or None
+            pipeline["pointer_n_browsable"] = ptr.get("n_browsable")
             pipeline["pointer_age_min"] = round(age / 60) if age is not None else None
             # Stale if the publisher hasn't flipped the pointer in >30 min (cycles run ~10-14).
             pipeline["pointer_stale"] = age is not None and age > 30 * 60
+            # Divergence = the served DB (authoritative — what visitors actually get) disagrees with
+            # what the publisher's pointer claims it shipped, i.e. the publisher stalled or the reader
+            # hasn't swapped. Compare totals always (every pointer has n_docs) and browsable when the
+            # pointer carries it (post-reconciliation pointers; legacy pointers simply skip that half,
+            # never a false alarm). The triplet itself is served-derived, so it renders even on a
+            # legacy/locked pointer that predates n_browsable.
+            pn_docs = pipeline["pointer_n_docs"]
+            pn_browsable = pipeline["pointer_n_browsable"]
+            if pn_docs is not None and pipeline["served_total"] != pn_docs:
+                pipeline["count_divergence"] = abs(pipeline["served_total"] - pn_docs)
+                pipeline["divergence_kind"] = "totales"
+            elif pn_browsable is not None and pipeline["served_browsable"] != pn_browsable:
+                pipeline["count_divergence"] = abs(pipeline["served_browsable"] - pn_browsable)
+                pipeline["divergence_kind"] = "con recortes"
         # Off the event loop: _admin_health and the lock read do blocking network probes.
         health = await asyncio.to_thread(_admin_health, votes_ok, pipeline)
         lock = await asyncio.to_thread(read_db_lock)
@@ -1007,14 +1336,33 @@ def create_app(
             {"key": key, "pipeline": pipeline, "health": health, "lock": lock},
         )
 
+    @app.get("/admin/gap")
+    async def admin_gap(request: Request, key: str = ""):
+        """The ingesta backlog: mesas the Registraduría reports as informed but that we are not
+        yet serving (informadas − sqlite_served). Sourced from the pointer reconciliation block's
+        missing-key sample so an operator can see *which* mesas are behind, with no shell."""
+        _require_admin(request, key)
+        recon = await asyncio.to_thread(_pointer_reconciliation)
+        recon = recon or {}
+        sample = recon.get("missing_keys_sample") or []
+        actas: list[dict] = []
+        for k in sample:
+            parts = str(k).split("_")
+            dep, muni, zona, puesto, mesa = (parts + [""] * 5)[:5]
+            actas.append({"key": k, "department_code": dep, "municipality_code": muni,
+                          "zone": zona, "puesto": puesto, "mesa": mesa})
+        return JSONResponse({
+            "count": recon.get("missing_count", len(actas)),
+            "shown": len(actas),
+            "actas": actas,
+            "note": "mesas informadas por la Registraduría aún no servidas (backlog de ingesta)",
+        })
+
     @app.post("/admin/db-lock")
-    async def admin_db_lock(key: str = "", locked: str = ""):
+    async def admin_db_lock(request: Request, key: str = "", locked: str = ""):
         # Toggle the publish lock (freezes the served DB so no publisher can overwrite it).
         # POST with query params (?key=...&locked=on|off) — no form body, so no multipart dep.
-        if not config.ADMIN_TOKEN:
-            raise HTTPException(status_code=404, detail="not found")
-        if key != config.ADMIN_TOKEN:
-            raise HTTPException(status_code=403, detail="forbidden")
+        _require_admin(request, key)
         from .dbsync import set_db_lock
         want = locked.strip().lower() in ("1", "true", "on", "yes", "lock")
         n_docs = None
@@ -1033,6 +1381,7 @@ def create_app(
             "Allow: /votar\n"
             "Allow: /reportes\n"
             "Allow: /buscar\n"
+            "Allow: /transparencia\n"
             "Allow: /acta/\n"
             "Disallow: /admin\n"
             "Disallow: /api/\n"
@@ -1053,6 +1402,7 @@ def create_app(
             f"{config.SITE_URL}/reportes",
             f"{config.SITE_URL}/buscar",
             f"{config.SITE_URL}/buscar?review=1",
+            f"{config.SITE_URL}/transparencia",
         ]
         for d in deps:
             code = d["department_code"] or d["department_name"]
@@ -1091,9 +1441,13 @@ def create_app(
 
     def _progress_ctx():
         # National-load progress for the shared app bar. Cached (a cheap precomputed COUNT);
-        # opening a conn on a cache hit is negligible.
+        # opening a conn on a cache hit is negligible. The denominator (mesas_informadas) comes
+        # from the reconciliation block, itself cached, so the bar shows the true national share.
         with conn() as db:
-            return _agg_cached("sync_progress", lambda: compute_sync_progress(db))
+            return _agg_cached(
+                "sync_progress",
+                lambda: compute_sync_progress(db, national_total=_national_total()),
+            )
 
     def _total_reviews():
         # Community impact for the shared app bar: total mesas reviewed. A heavier aggregate (a
@@ -1323,6 +1677,43 @@ def create_app(
             raise HTTPException(status_code=404, detail="map data not found")
         return FileResponse(DEPARTAMENTOS_GEOJSON, media_type="application/geo+json")
 
+    @app.get("/transparencia")
+    async def transparencia(request: Request):
+        # Public, read-only count reconciliation: the SAME chain the admin board renders, so any
+        # citizen can verify our counts independently (no token). Reuses the pointer reconciliation
+        # block + the app's own served count; asserts published == served.
+        recon = _pointer_reconciliation()
+        with conn() as db:
+            served_total = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        public = build_public_counts(recon, served_total)
+        # Parse the missing-key sample into a readable list (only shown when we have a real ingest
+        # backlog — mesas with a published acta we haven't incorporated yet).
+        backlog = []
+        for k in ((recon or {}).get("missing_keys_sample") or []):
+            parts = str(k).split("_")
+            dep, muni, zona, puesto, mesa = (parts + [""] * 5)[:5]
+            backlog.append({"key": k, "dep": dep, "muni": muni, "zona": zona,
+                            "puesto": puesto, "mesa": mesa})
+        return templates.TemplateResponse(
+            request,
+            "transparencia.html",
+            {
+                "public": public,
+                "backlog": backlog,
+                "progress": _progress_ctx(),
+                "total_reviews": _total_reviews(),
+                "active": "transparencia",
+                "site_url": config.SITE_URL,
+                "canonical": config.SITE_URL + "/transparencia",
+                "page_title": "Transparencia — conteo de actas E-14 | Veeduría ciudadana 2026",
+                "meta_description": (
+                    "Cómo cuadran nuestros conteos de actas E-14 con la Registraduría: total "
+                    "nacional, mesas informadas, actas servidas y publicadas, cobertura y "
+                    "qué mesas faltan. Veeduría ciudadana, elecciones Colombia 2026."
+                ),
+            },
+        )
+
     @app.get("/buscar")
     async def buscar(
         request: Request,
@@ -1438,7 +1829,7 @@ def create_app(
         form_token = (
             ""
             if turnstile_on
-            else (issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else "")
+            else (issue_form_token(poll_cfg.form_token_secret, sid, _voter_ip(request)) if poll_cfg.form_token_secret else "")
         )
         response = templates.TemplateResponse(
             request,
@@ -1526,10 +1917,12 @@ def create_app(
         return out
 
     @app.get("/api/feed")
-    async def api_feed(n: int = Query(12, ge=1, le=50), exclude: str = ""):
+    async def api_feed(request: Request, n: int = Query(12, ge=1, le=50), exclude: str = ""):
         # Anonymized random deck. ``exclude`` is a comma-separated list of cids the client
         # has already swiped this session (best-effort de-dup; the vote tables ignore true
         # repeats anyway). No acta id / location / path ever appears in the response.
+        if not _feed_allow(_voter_ip(request)):
+            raise HTTPException(status_code=429, detail="slow down")
         skip = {c for c in exclude.split(",") if c}
         return {"items": _feed_payload(n, skip)}
 
@@ -1583,8 +1976,10 @@ def create_app(
         return items
 
     @app.get("/api/acta-deck")
-    async def api_acta_deck():
+    async def api_acta_deck(request: Request):
         # One random anonymized acta as a grid of casillas. No acta id / location ever leaks.
+        if not _feed_allow(_voter_ip(request)):
+            raise HTTPException(status_code=429, detail="slow down")
         return {"items": _acta_deck_payload()}
 
     def _hot_crops_payload() -> list[dict]:
@@ -1595,7 +1990,15 @@ def create_app(
         voting act stays anonymous (no per-voter identity is ever exposed). Each item carries
         the crop image, its acta ``document_id`` + a location label, and the public tallies.
         """
-        hot = community.hot_crops(HOTLIST_SIZE)
+        # Promotion floor: a crop only headlines the public billboard once >= MIN_PROMOTE_VOTERS
+        # distinct voters flagged it (post /64-bucketing, ~distinct networks) — one identity can't
+        # manufacture a "hot" crop. Over-fetch then filter+truncate so the floor doesn't under-fill.
+        floor = config.MIN_PROMOTE_VOTERS
+        if floor > 1:
+            hot = [h for h in community.hot_crops(HOTLIST_SIZE * 4)
+                   if h["strange"] >= floor][:HOTLIST_SIZE]
+        else:
+            hot = community.hot_crops(HOTLIST_SIZE)
         if not hot:
             return []
         keys = [h["field_key"] for h in hot]
@@ -1724,7 +2127,12 @@ def create_app(
         on the requested page. Only a page's worth of cards is built (each costs a vote_fields +
         counts_among round-trip), and the ranked list comes from the cached popularity dict."""
         pop = _agg_cached("popularity", community.acta_popularity)
-        ranked = sorted(pop.items(), key=lambda kv: kv[1], reverse=True) if pop else []
+        # Promotion floor: only rank actas reported by >= MIN_PROMOTE_VOTERS distinct voters, so a
+        # single identity can't push an acta onto the public "most reported" board (see _hot_crops_payload).
+        floor = config.MIN_PROMOTE_VOTERS
+        ranked = sorted(
+            ((d, r) for d, r in pop.items() if r >= floor), key=lambda kv: kv[1], reverse=True
+        ) if pop else []
         total = len(ranked)
         pages = max(1, math.ceil(total / REPORTES_PER_PAGE))
         page = max(1, min(page, pages))
@@ -1804,7 +2212,8 @@ def create_app(
         ):
             return _flag_response({"ok": False, "error": "challenge_failed"}, 403, sid, new_sid)
         form_token = (
-            issue_form_token(poll_cfg.form_token_secret, sid) if poll_cfg.form_token_secret else ""
+            issue_form_token(poll_cfg.form_token_secret, sid, _voter_ip(request))
+            if poll_cfg.form_token_secret else ""
         )
         return _flag_response({"ok": True, "form_token": form_token}, 200, sid, new_sid)
 
@@ -1827,7 +2236,7 @@ def create_app(
         # Reject cross-site browser vote casting (see _origin_allowed). Cheap, before any DB work.
         if not _origin_allowed(request):
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
+        token = voter_token(poll_cfg.voter_salt, _voter_ip(request))
 
         # The store calls below are blocking boto3 (Aurora Data API) / SQS round-trips. In an
         # async handler they must run in a thread or they stall the event loop, serializing the
@@ -1838,15 +2247,15 @@ def create_app(
             community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
         ):
             return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        bot = bot_check(payload, sid, poll_cfg)
+        bot = bot_check(payload, sid, _voter_ip(request), poll_cfg)
         if bot == "honeypot":
             return _flag_response({"ok": True}, 200, sid, new_sid)  # shadow-drop the bot
         if bot:
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        if poll_cfg.turnstile_enabled and not verify_turnstile(
-            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
-        ):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        # No per-vote Turnstile check: Turnstile is a SESSION gate. The client solves it once and
+        # exchanges it at /api/session for the signed form token, which bot_check verifies above.
+        # Votes carry only that form token (single-use ~300s Turnstile tokens wouldn't survive a
+        # whole deck), so re-verifying a Turnstile token here rejected every vote when it was on.
 
         row = await asyncio.to_thread(resolve_cid_cached, cid)  # cache hit => no Data API call
         if not row:
@@ -1899,21 +2308,26 @@ def create_app(
 
         if not _origin_allowed(request):
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        token = voter_token(poll_cfg.voter_salt, _client_ip(request))
-        # One rate charge per submit (not per crop): a full-acta batch is one contribution.
-        if not await asyncio.to_thread(
-            community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
-        ):
-            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
-        bot = bot_check(payload, sid, poll_cfg)
+        token = voter_token(poll_cfg.voter_salt, _voter_ip(request))
+        # Charge the limiter proportionally: a normal full-acta batch (~10-20 crops) costs ~1
+        # token, but an oversized submit is charged ceil(n / BATCH_VOTES_PER_TOKEN) so one identity
+        # can't enqueue an outsized amount of work per submit. Consuming a token on a rejected
+        # oversized batch is intended (it's rate limiting).
+        charges = max(1, math.ceil((len(strange) + len(good)) / config.BATCH_VOTES_PER_TOKEN))
+        for _ in range(charges):
+            if not await asyncio.to_thread(
+                community.allow, token, poll_cfg.rate_refill_per_min, poll_cfg.rate_bucket
+            ):
+                return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        bot = bot_check(payload, sid, _voter_ip(request), poll_cfg)
         if bot == "honeypot":
             return _flag_response({"ok": True, "strange": 0, "good": 0}, 200, sid, new_sid)
         if bot:
             return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        if poll_cfg.turnstile_enabled and not verify_turnstile(
-            poll_cfg.turnstile_secret, payload.get("turnstile_token"), _client_ip(request)
-        ):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        # No per-vote Turnstile check: Turnstile is a SESSION gate. The client solves it once and
+        # exchanges it at /api/session for the signed form token, which bot_check verifies above.
+        # Votes carry only that form token (single-use ~300s Turnstile tokens wouldn't survive a
+        # whole deck), so re-verifying a Turnstile token here rejected every vote when it was on.
 
         async def record(cid: str, value: str) -> bool:
             row = await asyncio.to_thread(resolve_cid_cached, cid)
@@ -1941,14 +2355,15 @@ def create_app(
     return app
 
 
-def bot_check(payload: dict, sid: str, poll: PollConfig) -> str:
+def bot_check(payload: dict, sid: str, ip: str, poll: PollConfig) -> str:
     """In-app bot screen. Returns '' to proceed, 'honeypot' (silently drop a bot), or
-    'bad_token' (forged/missing/too-fast submit). Skipped when no form-token secret."""
+    'bad_token' (forged/missing/too-fast/wrong-IP submit). Skipped when no form-token secret.
+    ``ip`` binds the token to the client IP so a solved token can't be replayed from elsewhere."""
     if str(payload.get("website", "")).strip():
         return "honeypot"  # a hidden field only bots fill
     if poll.form_token_secret and not verify_form_token(
         poll.form_token_secret, sid, payload.get("form_token"),
-        poll.form_min_seconds, poll.form_max_seconds,
+        poll.form_min_seconds, poll.form_max_seconds, ip=ip,
     ):
         return "bad_token"
     return ""

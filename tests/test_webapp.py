@@ -93,7 +93,9 @@ def test_browse_shows_national_sync_progress(tmp_path: Path, monkeypatch) -> Non
     """The shared app bar shows national-load progress (pct) while the rollout is incomplete.
     (The old /browse synced/total/ETA panel was retired when /browse split into /buscar+/reportes;
     the compact app-bar label is what remains, and it renders on every page incl. /buscar.)"""
-    monkeypatch.setattr(config, "NATIONAL_TOTAL_ACTAS", 100)
+    # The denominator now comes from the count-model reconciliation; with no published pointer
+    # in tests, the E14_NATIONAL_TOTAL env override supplies it (replaces the old constant).
+    monkeypatch.setenv("E14_NATIONAL_TOTAL", "100")
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     crop = _crop(output_dir / "crops" / "c.png")
@@ -455,6 +457,179 @@ def test_browse_shows_billboard(tmp_path: Path) -> None:
             assert '<div class="list">' not in review_html  # not the old text-only card grid
 
     asyncio.run(run())
+
+
+def test_compute_sync_progress_separates_browsable_from_total(tmp_path: Path) -> None:
+    """The served headline counts browsable actas only; docs with no candidate crop widen the
+    served_total gap, never the served count. This is the reconciliation the admin board renders,
+    and the reason 'servidas' and 'publicadas' must never be shown as one undifferentiated number."""
+    import sqlite3
+
+    from e14detector.webapp import compute_sync_progress
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-has", source_path="doc-has.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc-has", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="A", raw_crop_path=str(crop)))
+    store.upsert_document(DocumentMetadata(document_id="doc-none", source_path="doc-none.pdf"))
+    store.commit()
+    store.close()
+
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    try:
+        prog = compute_sync_progress(con)
+    finally:
+        con.close()
+    assert prog["served_browsable"] == 1  # only the doc with a candidate crop
+    assert prog["served_total"] == 2  # both docs are shipped in the snapshot
+    assert prog["served_gap"] == 1  # the 'sin recortes' gap = total - browsable
+    assert prog["served_total"] == prog["served_browsable"] + prog["served_gap"]  # triplet reconciles
+    assert prog["synced"] == 1  # headline derives from browsable, not the row total
+
+
+def test_transparencia_renders_without_pointer(tmp_path: Path) -> None:
+    """The public page renders even with no reconciliation pointer (shows the 'preparando' note)."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf"))
+    store.insert_vote_field(VoteField(document_id="doc1", page_number=1, row_type="candidate",
+                                      row_number=1, candidate_name="A", raw_crop_path=str(crop)))
+    store.commit(); store.close()
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/transparencia")
+            assert r.status_code == 200
+            assert "Cómo cuadran" in r.text  # header renders
+
+    asyncio.run(run())
+
+
+def test_transparencia_renders_chain_from_pointer(tmp_path: Path, monkeypatch) -> None:
+    """With a reconciliation pointer, the public page renders the chain + cobertura + backlog."""
+    from e14detector import config, dbsync
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc1", source_path="doc1.pdf"))
+    store.insert_vote_field(VoteField(document_id="doc1", page_number=1, row_type="candidate",
+                                      row_number=1, candidate_name="A", raw_crop_path=str(crop)))
+    store.commit(); store.close()
+
+    monkeypatch.setattr(config, "CDN_BASE_URL", "http://cdn.example")
+    recon = {"total_global": 100, "mesas_informadas": 100, "sqlite_served": 1,
+             "backlog_ingesta": 99, "backlog_reporte": 0, "missing_count": 99,
+             "missing_keys_sample": ["88_001_001_01_001"]}
+    monkeypatch.setattr(dbsync, "pointer_status",
+                        lambda *a, **k: {"reconciliation": recon, "n_docs": 1})
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/transparencia")
+            assert r.status_code == 200
+            # Public funnel labels (plain language), not the technical chain.
+            assert "Mesas escaneadas" in r.text
+            assert "Mesas disponibles en nuestro sistema" in r.text
+            assert "Mesas instaladas en el país" in r.text
+            assert "88_001_001_01_001" in r.text  # the pending mesa is listed (pendientes > 0)
+
+    asyncio.run(run())
+
+
+def test_build_public_counts_is_a_friendly_funnel() -> None:
+    """The public projection is a 4-step funnel with plain labels (no internal frontier/jargon),
+    surfaces escrutadas as 'escaneadas', and highlights the served step as the final one."""
+    from e14detector.webapp import build_public_counts
+
+    recon = {"total_global": 122020, "mesas_escrutadas": 122020, "mesas_informadas": 122016}
+    pub = build_public_counts(recon, served_total=122016)
+    keys = [s["key"] for s in pub["funnel"]]
+    assert keys == ["pais", "escaneadas", "acta", "sistema"]
+    assert pub["funnel"][-1]["highlight"] is True  # "disponibles en nuestro sistema" is final
+    assert pub["funnel"][1]["label"] == "Mesas escaneadas"  # not "escrutadas"
+    assert pub["served_label"] == "122.016"
+    assert pub["cobertura_label"] == "100,00"  # served / informadas
+    assert pub["sin_acta"] == 4       # escaneadas − acta publicada (registraduría's)
+    assert pub["pendientes"] == 0     # acta publicada − served (ours; caught up)
+    # No technical fields leak into the public projection.
+    assert "rows" not in pub and "served_eq_published" not in pub
+
+
+def test_build_public_counts_handles_missing_data() -> None:
+    from e14detector.webapp import build_public_counts
+    pub = build_public_counts(None, served_total=5)
+    assert pub["has_data"] is False
+    assert pub["funnel"][0]["value_label"] == "—"
+
+
+def test_build_count_chain_orders_and_derives() -> None:
+    """The chain renders non-increasing top→bottom, computes cobertura + both backlogs, and
+    confirms published==served — the single reconciliation the admin/public pages render."""
+    from e14detector.webapp import build_count_chain
+
+    recon = {
+        "total_global": 122020, "mesas_escrutadas": 122020, "mesas_informadas": 122016,
+        "downloaded": 122010, "crops_uploaded": 122007,
+        "sqlite_served": 122007, "missing_count": 9,
+    }
+    chain = build_count_chain(recon, served_total=122007)
+    by_key = {r["key"]: r for r in chain["rows"]}
+    assert [r["status"] for r in chain["rows"]] == ["ok"] * 7  # monotone, nothing inverted
+    assert by_key["published"]["count"] == 122007
+    assert chain["served_eq_published"] is True
+    # cobertura = served / informadas (acta images), not / total_global.
+    assert chain["cobertura"] == round(122007 * 100 / 122016, 2)
+    assert chain["backlog_ingesta"] == 9    # informadas − served (ours)
+    assert chain["backlog_reporte"] == 4    # total_global − informadas (registraduría's)
+
+
+def test_build_count_chain_flags_inversion_and_divergence() -> None:
+    """An impossible inversion (a lower count exceeds a higher one) is flagged 'bad', and a
+    published count that disagrees with the app's own served count breaks served_eq_published."""
+    from e14detector.webapp import build_count_chain
+
+    # sqlite_served (120) > crops_uploaded (100): an inversion that must alarm.
+    recon = {"total_global": 200, "mesas_informadas": 150, "downloaded": 130,
+             "crops_uploaded": 100, "sqlite_served": 99}
+    chain = build_count_chain(recon, served_total=120)
+    statuses = {r["key"]: r["status"] for r in chain["rows"]}
+    assert statuses["sqlite_served"] == "bad"  # 120 > 100 above it
+    # The app's own served (120) disagrees with the pointer's published (99).
+    assert chain["served_eq_published"] is False
+
+
+def test_build_count_chain_tolerates_unknown_rows() -> None:
+    """Counts a publishing machine can't see (downloaded/crops_uploaded) render 'na' and don't
+    break the monotone check — only the external anchors + served are guaranteed present."""
+    from e14detector.webapp import build_count_chain
+
+    recon = {"total_global": 100, "mesas_informadas": 100, "sqlite_served": 90}
+    chain = build_count_chain(recon, served_total=90)
+    statuses = {r["key"]: r["status"] for r in chain["rows"]}
+    assert statuses["downloaded"] == "na" and statuses["crops_uploaded"] != "bad"
+    assert chain["backlog_ingesta"] == 10
+    assert chain["served_eq_published"] is True
+
+
+def test_build_count_chain_without_reconciliation_is_empty() -> None:
+    """A legacy pointer (no reconciliation block) yields has_reconciliation=False so the admin
+    page shows the 'run publish-db --force-pointer' hint instead of a half-blank table."""
+    from e14detector.webapp import build_count_chain
+
+    chain = build_count_chain(None, served_total=122007)
+    assert chain["has_reconciliation"] is False
+    assert chain["cobertura"] is None
 
 
 def _drop_n_candidates(db: Path) -> None:
@@ -841,3 +1016,287 @@ def test_api_session_requires_turnstile_when_enabled(tmp_path: Path, monkeypatch
     monkeypatch.setattr(wa, "verify_turnstile", lambda *a, **k: True)
     r = asyncio.run(run(True))
     assert r.status_code == 200 and r.json()["form_token"]
+
+
+# --- Security hardening: trusted client IP, IPv6 bucketing, amplification, promotion floor ----
+
+def _fake_request(headers: dict | None = None, client=("203.0.113.7", 0)):
+    from starlette.requests import Request
+
+    hdrs = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    return Request({"type": "http", "headers": hdrs, "client": client})
+
+
+def test_client_ip_trusts_edge_header_not_spoofable_xff() -> None:
+    """The voter IP must come from the edge-set header (Fly-Client-IP), never the attacker-
+    controlled first X-Forwarded-For hop — that distinction is the whole anti-Sybil fix."""
+    from e14detector.webapp import _client_ip
+
+    # Trusted edge header wins even when the client forges an XFF first hop.
+    req = _fake_request({"fly-client-ip": "9.9.9.9", "x-forwarded-for": "1.2.3.4, 9.9.9.9"})
+    assert _client_ip(req) == "9.9.9.9"
+    # No trusted header -> fall back to the LAST xff hop (closest trusted proxy), not the first.
+    assert _client_ip(_fake_request({"x-forwarded-for": "1.2.3.4, 8.8.8.8"})) == "8.8.8.8"
+    # Nothing -> the socket peer.
+    assert _client_ip(_fake_request(client=("203.0.113.7", 0))) == "203.0.113.7"
+
+
+def test_client_ip_uses_cf_connecting_ip_only_behind_cloudflare() -> None:
+    """When Fly-Client-IP is a Cloudflare edge IP, the real visitor comes from cf-connecting-ip;
+    when it isn't (direct-to-Fly), cf-connecting-ip is ignored so it can't be forged."""
+    from e14detector.webapp import _client_ip
+
+    # Through Cloudflare: Fly saw a CF IP connect -> trust cf-connecting-ip (the real visitor).
+    via_cf = _fake_request({"fly-client-ip": "104.16.0.1", "cf-connecting-ip": "5.5.5.5"})
+    assert _client_ip(via_cf) == "5.5.5.5"
+    # Direct to Fly with a FORGED cf-connecting-ip: Fly-Client-IP isn't a CF IP -> ignore the
+    # forgery and use the un-spoofable Fly-Client-IP.
+    forged = _fake_request({"fly-client-ip": "9.9.9.9", "cf-connecting-ip": "5.5.5.5"})
+    assert _client_ip(forged) == "9.9.9.9"
+
+
+def test_edge_guard_requires_cloudflare_origin_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    """With E14_REQUIRE_CF on, the bare Fly origin must look dead to anyone bypassing Cloudflare:
+    ANY request (page or api) whose un-spoofable Fly-Client-IP is not a Cloudflare IP gets a bare
+    404. The sole exemption is /health (Fly's own checker reaches it directly, no Cloudflare hop).
+    Cloudflare-originated traffic passes through. Fail-open when off (covered by every other test)."""
+    from e14detector import config as _config
+
+    monkeypatch.setattr(_config, "REQUIRE_CF_ORIGIN", True)
+    output_dir, db = _one_crop_db(tmp_path)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "c.sqlite")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            direct = {"fly-client-ip": "9.9.9.9"}  # connected to Fly from a non-Cloudflare IP
+            # Direct-to-Fly page hit -> 404, body indistinguishable from a normal miss.
+            page = await client.get("/votar", headers=direct)
+            assert page.status_code == 404 and page.json()["detail"] == "Not Found"
+            # Direct-to-Fly api hit -> the SAME bare 404 (previously 403 'forbidden').
+            api = await client.post("/api/vote", json={"cid": "x", "value": "good"}, headers=direct)
+            assert api.status_code == 404 and api.json()["detail"] == "Not Found"
+            # /health is exempt even from a non-CF IP (Fly's internal checker must keep it green).
+            assert (await client.get("/health", headers=direct)).status_code in (200, 503)
+            # Arrived via Cloudflare (Fly-Client-IP is a CF IP) -> guard passes, served normally.
+            feed = await client.get("/api/feed", headers={"fly-client-ip": "104.16.0.1"})
+            assert feed.status_code == 200
+
+    asyncio.run(run())
+
+
+def test_voter_ip_collapses_ipv6_to_64() -> None:
+    """One IPv6 /64 allocation = one identity (else a single allocation mints billions)."""
+    from e14detector.webapp import _voter_ip
+
+    a = _voter_ip(_fake_request({"fly-client-ip": "2001:db8:abcd:1234::1"}))
+    b = _voter_ip(_fake_request({"fly-client-ip": "2001:db8:abcd:1234:ffff:ffff:ffff:ffff"}))
+    c = _voter_ip(_fake_request({"fly-client-ip": "2001:db8:abcd:9999::1"}))
+    assert a == b          # same /64 -> one identity
+    assert a != c          # different /64 -> different identity
+    assert _voter_ip(_fake_request({"fly-client-ip": "203.0.113.7"})) == "203.0.113.7"  # IPv4 as-is
+
+
+def _one_crop_db(tmp_path: Path, doc="doc-x", n=1):
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(
+        document_id=doc, source_path=f"{doc}.pdf",
+        department_name="VALLE", municipality_name="CALI", mesa="07"))
+    for i in range(n):
+        store.insert_vote_field(VoteField(
+            document_id=doc, page_number=1, row_type="candidate", row_number=i + 1,
+            candidate_name=f"C{i}", raw_crop_path=str(crop)))
+    store.commit()
+    store.close()
+    return output_dir, db
+
+
+def test_vote_identity_keys_on_trusted_ip_not_spoofed_xff(tmp_path: Path) -> None:
+    """Spoofing X-Forwarded-For can no longer mint new identities: many forged XFF values behind
+    one Fly-Client-IP collapse to ONE vote; a genuinely different Fly-Client-IP is a second."""
+    import dataclasses
+    from e14detector.community import CommunityStore, PollConfig, field_key_of
+
+    output_dir, db = _one_crop_db(tmp_path)
+    community_db = tmp_path / "community.sqlite"
+    cfg = dataclasses.replace(PollConfig.from_config(), form_token_secret="")
+    fk = field_key_of("doc-x", 1, 1, None)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db, poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            cid = (await client.get("/api/acta-deck", headers={"fly-client-ip": "10.0.0.1"})
+                   ).json()["items"][0]["cid"]
+            for xff in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):  # same edge IP, forged XFF each time
+                r = await client.post("/api/vote", json={"cid": cid, "value": "strange"},
+                                      headers={"fly-client-ip": "10.0.0.1", "x-forwarded-for": xff})
+                assert r.status_code == 200
+            r = await client.post("/api/vote", json={"cid": cid, "value": "strange"},
+                                  headers={"fly-client-ip": "10.0.0.2"})  # a real second identity
+            assert r.status_code == 200
+
+    asyncio.run(run())
+    cs = CommunityStore(community_db)
+    strange = cs.counts_among([fk])[fk]["strange"]
+    cs.close()
+    assert strange == 2  # 3 spoofed-XFF votes from 10.0.0.1 dedup to 1; +1 from 10.0.0.2
+
+
+def test_feed_endpoint_rate_limited_per_ip(tmp_path: Path, monkeypatch) -> None:
+    """/api/feed is throttled per IP so a script can't drive unbounded cid_index writes."""
+    from e14detector import config as _config, webapp as _wa
+
+    monkeypatch.setattr(_config, "FEED_RATE_BUCKET", 3.0)
+    monkeypatch.setattr(_config, "FEED_RATE_REFILL_PER_MIN", 1.0)  # ~0 refill during the test
+    _wa._feed_buckets.clear()
+    output_dir, db = _one_crop_db(tmp_path)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "c.sqlite")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            h = {"fly-client-ip": "198.51.100.5"}
+            codes = [(await client.get("/api/feed?n=1", headers=h)).status_code for _ in range(5)]
+            assert codes[:3] == [200, 200, 200] and 429 in codes[3:]
+
+    asyncio.run(run())
+
+
+def test_vote_batch_charges_rate_proportionally(tmp_path: Path, monkeypatch) -> None:
+    """A batch larger than the bucket allows is rejected (charged ceil(n/BATCH_VOTES_PER_TOKEN))."""
+    import dataclasses
+    from e14detector import config as _config
+    from e14detector.community import PollConfig
+
+    monkeypatch.setattr(_config, "BATCH_VOTES_PER_TOKEN", 1)
+    output_dir, db = _one_crop_db(tmp_path, n=5)
+    cfg = dataclasses.replace(PollConfig.from_config(), form_token_secret="",
+                              rate_bucket=2.0, rate_refill_per_min=0.0)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "c.sqlite", poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            cids = [it["cid"] for it in (await client.get(
+                "/api/acta-deck", headers={"fly-client-ip": "203.0.113.20"})).json()["items"]]
+            assert len(cids) == 5
+            r = await client.post("/api/vote-batch", json={"strange": [], "good": cids},
+                                  headers={"fly-client-ip": "203.0.113.20"})
+            assert r.status_code == 429 and r.json()["error"] == "rate_limited"
+
+    asyncio.run(run())
+
+
+def test_promotion_floor_hides_single_voter_actas(tmp_path: Path, monkeypatch) -> None:
+    """With MIN_PROMOTE_VOTERS=2 a single-reporter acta stays off the public billboard/reportes
+    until a second distinct voter flags it."""
+    from e14detector import config as _config
+    from e14detector.community import CommunityStore, field_key_of
+
+    monkeypatch.setattr(_config, "MIN_PROMOTE_VOTERS", 2)
+    output_dir, db = _one_crop_db(tmp_path, doc="doc-hot")
+    community_db = tmp_path / "community.sqlite"
+    fk = field_key_of("doc-hot", 1, 1, None)
+    cs = CommunityStore(community_db)
+    cs.record_flag(fk, "voter-1")  # only ONE distinct voter -> below the floor
+    cs.close()
+
+    async def reportes_html() -> tuple[str, list]:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/reportes")).text
+            bb = (await client.get("/api/billboard")).json()["items"]
+            return html, bb
+
+    html, bb = asyncio.run(reportes_html())
+    assert "/acta/doc-hot" not in html and bb == []
+
+    cs = CommunityStore(community_db)
+    cs.record_flag(fk, "voter-2")  # second distinct voter -> meets the floor
+    cs.close()
+    html2, _ = asyncio.run(reportes_html())
+    assert "/acta/doc-hot" in html2
+
+
+def test_vote_succeeds_with_session_token_when_turnstile_enabled(tmp_path: Path, monkeypatch) -> None:
+    """With Turnstile ON, a vote carrying the /api/session-minted form token must be ACCEPTED and
+    recorded. Turnstile gates the session (one solve -> form token); votes do NOT carry a per-vote
+    Turnstile token, so the handler must not re-verify one (doing so 403'd every vote)."""
+    import dataclasses
+    from e14detector import webapp as wa
+    from e14detector.community import CommunityStore, PollConfig, field_key_of
+
+    output_dir, db = _one_crop_db(tmp_path)
+    community_db = tmp_path / "community.sqlite"
+    cfg = dataclasses.replace(
+        PollConfig.from_config(), turnstile_enabled=True,
+        turnstile_sitekey="0xSITE", turnstile_secret="sekret", form_min_seconds=0.0)
+    # Realistic stub: a Turnstile token verifies only when one is actually present (so a stray
+    # per-vote check on a token-less vote would fail — exactly the bug this guards against).
+    monkeypatch.setattr(wa, "verify_turnstile", lambda secret, token, ip=None: bool(token))
+    fk = field_key_of("doc-x", 1, 1, None)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db, poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            h = {"fly-client-ip": "10.1.1.1"}
+            cid = (await client.get("/api/acta-deck", headers=h)).json()["items"][0]["cid"]
+            ft = (await client.post("/api/session", json={"turnstile_token": "x"}, headers=h)
+                  ).json()["form_token"]
+            assert ft
+            r = await client.post("/api/vote", json={"cid": cid, "value": "strange", "form_token": ft},
+                                  headers=h)  # carries the FORM token, no turnstile_token
+            assert r.status_code == 200 and r.json()["ok"] is True
+
+    asyncio.run(run())
+    cs = CommunityStore(community_db)
+    n = cs.counts_among([fk])[fk]["strange"]
+    cs.close()
+    assert n == 1  # the vote was actually recorded, not silently 403'd
+
+
+def test_form_token_is_bound_to_client_ip(tmp_path: Path, monkeypatch) -> None:
+    """A session form token minted for one IP must be rejected from another — so a solved token
+    can't be replayed across a proxy pool (each Sybil identity needs its own Turnstile solve)."""
+    import dataclasses
+    from e14detector import webapp as wa
+    from e14detector.community import CommunityStore, PollConfig, field_key_of
+
+    output_dir, db = _one_crop_db(tmp_path)
+    community_db = tmp_path / "community.sqlite"
+    cfg = dataclasses.replace(
+        PollConfig.from_config(), turnstile_enabled=True,
+        turnstile_sitekey="0xSITE", turnstile_secret="sekret", form_min_seconds=0.0)
+    monkeypatch.setattr(wa, "verify_turnstile", lambda secret, token, ip=None: bool(token))
+    fk = field_key_of("doc-x", 1, 1, None)
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db, poll=cfg)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            cid = (await client.get("/api/acta-deck", headers={"fly-client-ip": "10.0.0.1"})
+                   ).json()["items"][0]["cid"]
+            ft = (await client.post("/api/session", json={"turnstile_token": "x"},
+                  headers={"fly-client-ip": "10.0.0.1"})).json()["form_token"]
+            # Same token, DIFFERENT IP -> rejected (the replay we want to stop).
+            r_other = await client.post(
+                "/api/vote", json={"cid": cid, "value": "strange", "form_token": ft},
+                headers={"fly-client-ip": "203.0.113.99"})
+            # Same token, SAME IP -> accepted.
+            r_same = await client.post(
+                "/api/vote", json={"cid": cid, "value": "strange", "form_token": ft},
+                headers={"fly-client-ip": "10.0.0.1"})
+            return r_other.status_code, r_same.status_code
+
+    other, same = asyncio.run(run())
+    assert other == 403 and same == 200
+    cs = CommunityStore(community_db)
+    n = cs.counts_among([fk])[fk]["strange"]
+    cs.close()
+    assert n == 1  # only the same-IP vote landed

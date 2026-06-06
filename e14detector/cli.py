@@ -140,14 +140,31 @@ def cmd_publish_db(args: argparse.Namespace) -> int:
     info = publish_db(
         output_dir=Path(args.output_dir), bucket=args.bucket, only_uploaded=args.only_uploaded,
         allow_shrink=getattr(args, "allow_shrink", False),
+        allow_locked=getattr(args, "allow_locked", False),
+        force_pointer=getattr(args, "force_pointer", False),
     )
     if info is None:
         print("published db: nothing in the uploaded frontier yet")
         return 0
+    if info.get("locked"):
+        print("published db: REFUSED — the live DB is locked (use --allow-locked to override)")
+        return 1
     if info.get("guarded"):
         print(f"published db: GUARDED — refused to shrink the live DB (use --allow-shrink to override)")
         return 1
-    print(f"published db: {info['key']} ({info['size']/1e6:.1f} MB, sha={info['sha256'][:12]})")
+    recon = info.get("reconciliation") or {}
+    if info.get("restamped"):
+        print(f"published db: re-stamped pointer (unchanged sha={info['sha256'][:12]}) "
+              f"with fresh reconciliation")
+    elif info.get("skipped"):
+        print(f"published db: unchanged since last publish (sha={info['sha256'][:12]})")
+    else:
+        print(f"published db: {info['key']} ({info['size']/1e6:.1f} MB, sha={info['sha256'][:12]})")
+    if recon:
+        print(f"  chain: total_global={recon.get('total_global', '—')} "
+              f"informadas={recon.get('mesas_informadas', '—')} "
+              f"served={recon.get('sqlite_served', '—')} "
+              f"backlog_ingesta={recon.get('backlog_ingesta', '—')}")
     return 0
 
 
@@ -617,6 +634,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-shrink", action="store_true",
         help="override the guard that refuses to replace the live DB with one holding <50% its "
              "actas (or, for legacy pointers, <50% its bytes)",
+    )
+    publish_db.add_argument(
+        "--allow-locked", action="store_true",
+        help="publish even if the live DB is locked (db/lock.json) — use deliberately",
+    )
+    publish_db.add_argument(
+        "--force-pointer", action="store_true",
+        help="re-stamp the pointer with a fresh reconciliation block even when the snapshot is "
+             "unchanged (one-off refresh for a frozen/locked round)",
     )
     publish_db.set_defaults(func=cmd_publish_db)
 

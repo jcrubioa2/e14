@@ -7,14 +7,49 @@ authoritative, enumerable download list — one node == one acta PDF.
 from __future__ import annotations
 
 import csv
+import json
 import logging
+import urllib.request
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
 from .session import CdnSession
 
 log = logging.getLogger("e14.universe")
+
+# The official results portal's machine-readable national summary (presidential, ámbito 00).
+# Unlike the SPA HTML (bot-blocked, 403), this JSON endpoint serves 200 to a browser-like GET and
+# carries the authoritative installed/counted mesa totals: ``totales.act.metota`` (mesas
+# instaladas = total_global) and ``mesesc`` (mesas escrutadas / counted). This is the source the
+# divulgador's acta-image list (allTransmissionCodes) does NOT give us — see fetch_universe_counts.
+RESULTS_SUMMARY_URL = "https://resultados.registraduria.gov.co/json/ACT/PR/00.json"
+
+# The count model's external source of truth lives here (see the count-model plan /
+# memory): one JSON snapshot recording total_global (every mesa in the election) and
+# mesas_informadas (mesas with a transmitted acta) the moment we last scraped the
+# registraduría. The publisher reads it to stamp the reconciliation chain into the
+# pointer; nothing else hardcodes a national total.
+SNAPSHOT_PATH = Path("data") / "universe_snapshot.json"
+
+
+def snapshot_path(round: str | None = None) -> Path:
+    """Per-round local universe-snapshot path. ``r1`` (default) keeps the LEGACY
+    ``data/universe_snapshot.json`` so first-round data never moves; any other round nests under
+    ``data/<round>/universe_snapshot.json``. Mirrors the bucket round-prefix scheme so one round
+    per machine never reads the other's denominator."""
+    r = (round or config.ELECTION_ROUND or "r1").strip().lower()
+    return SNAPSHOT_PATH if r == "r1" else Path("data") / r / "universe_snapshot.json"
+
+
+class UniverseShrinkError(RuntimeError):
+    """A freshly-fetched universe is drastically smaller than the last accepted one.
+
+    The election universe only grows (mesas get installed/informed); a sharp drop means a
+    truncated/partial fetch, not real news. Refusing it keeps a bad scrape from inverting
+    the coverage chain (a shrunken denominator would manufacture a fake >100% cobertura).
+    """
 
 
 @dataclass(frozen=True)
@@ -76,6 +111,143 @@ def fetch_universe(session: CdnSession | None = None) -> list[ActaRecord]:
                 records.append(rec)
     log.info("parsed %d actas with filenames", len(records))
     return records
+
+
+def fetch_universe_counts(session: CdnSession | None = None) -> tuple[list[ActaRecord], int]:
+    """Fetch the national list, returning (informed_records, nodes_total).
+
+    IMPORTANT — what allTransmissionCodes.json is, and isn't: every node in it carries an
+    ``expectedName`` (a downloadable acta), so it enumerates the **mesas_informadas** — the mesas
+    that have transmitted an acta — NOT the election's total_global. The official *total* of
+    installed mesas lives on the results portal (``resultados.registraduria.gov.co``), which is
+    bot-protected (403) and not machine-enumerable, so total_global is operator-supplied (see
+    ``cmd_refresh_universe`` / ``write_universe_snapshot``). ``len(records) == mesas_informadas``;
+    ``nodes_total`` is the raw node count (== informadas unless a future JSON adds un-informed
+    placeholder nodes) and is kept only for reference.
+    """
+    session = session or CdnSession()
+    url = f"{config.JSON_BASE}/{config.JSON_FILES['transmission_codes']}"
+    log.info("fetching national acta list: %s", url)
+    payload = session.get_json(url)
+    data = payload.get("data", payload)
+    records: list[ActaRecord] = []
+    nodes_total = 0
+    for block in data.values():
+        for node in (block or {}).get("nodes", []) or []:
+            nodes_total += 1
+            rec = _node_to_record(node)
+            if rec.expected_name:
+                records.append(rec)
+    log.info("universe: nodes_total=%d mesas_informadas=%d", nodes_total, len(records))
+    return records, nodes_total
+
+
+def _int_co(v) -> int | None:
+    """Parse a possibly thousands-formatted Colombian integer string ('122.020' / '122020')."""
+    try:
+        return int(str(v).replace(".", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_results_summary(timeout: float = 30.0) -> dict | None:
+    """Fetch the official results-portal national summary; None on any failure.
+
+    Returns ``{total_mesas, mesas_escrutadas, pct_escrutado}`` where ``total_mesas`` (``metota``)
+    is the installed-mesa total (the count model's ``total_global``) and ``mesas_escrutadas``
+    (``mesesc``) is the mesas counted in the official results. Both are external truth from the
+    results portal — distinct from the divulgador's published acta-image count (mesas_informadas).
+    """
+    req = urllib.request.Request(RESULTS_SUMMARY_URL, headers={
+        "User-Agent": config.USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-CO,es;q=0.9",
+        "Referer": "https://resultados.registraduria.gov.co/resultados/0/00",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+    except Exception:  # noqa: BLE001 — portal optional; absence just leaves total_global unknown
+        log.warning("results-portal summary unreachable: %s", RESULTS_SUMMARY_URL)
+        return None
+    act = ((payload.get("totales") or {}).get("act")) or {}
+    total = _int_co(act.get("metota"))
+    if total is None:
+        return None
+    log.info("results portal: metota=%s mesesc=%s (%s)",
+             act.get("metota"), act.get("mesesc"), act.get("pmesesc"))
+    return {
+        "total_mesas": total,
+        "mesas_escrutadas": _int_co(act.get("mesesc")),
+        "pct_escrutado": act.get("pmesesc"),
+    }
+
+
+def load_universe_snapshot(path: Path | None = None) -> dict | None:
+    """Return the last accepted universe snapshot dict, or None if absent/unreadable.
+    With no ``path`` it reads the active round's snapshot (see ``snapshot_path``)."""
+    path = Path(path) if path is not None else snapshot_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a corrupt snapshot reads as "none yet", never crashes
+        log.warning("universe snapshot unreadable: %s", path)
+        return None
+
+
+def write_universe_snapshot(
+    records: list[ActaRecord],
+    path: Path | None = None,
+    *,
+    total_global: int | None = None,
+    total_global_source: str | None = None,
+    mesas_escrutadas: int | None = None,
+    allow_shrink: bool = False,
+    shrink_factor: float = 0.5,
+) -> dict:
+    """Atomically write the universe snapshot, guarding against a shrunk fetch.
+
+    ``mesas_informadas`` = ``len(records)`` (mesas with a downloadable acta in
+    allTransmissionCodes.json). ``total_global`` is the election's installed-mesa total from the
+    results portal — bot-protected, so **operator-supplied** (``None`` when unknown, in which case
+    the ``total_global`` chain row reads "—" and backlog-de-reporte is left unknown rather than a
+    false 0). Records the sorted informed-key list so the publisher can diff served-vs-informed for
+    the ingest backlog. Raises ``UniverseShrinkError`` if informadas (or a supplied total_global)
+    collapses below ``shrink_factor`` of the last accepted snapshot, unless ``allow_shrink``.
+    """
+    path = Path(path) if path is not None else snapshot_path()
+    mesas_informadas = len(records)
+    prev = load_universe_snapshot(path)
+    if prev and not allow_shrink:
+        prev_inf = int(prev.get("mesas_informadas") or 0)
+        if prev_inf and mesas_informadas < shrink_factor * prev_inf:
+            raise UniverseShrinkError(
+                f"refusing snapshot: mesas_informadas {mesas_informadas} < {shrink_factor:.0%} "
+                f"of the last accepted {prev_inf} — looks like a truncated fetch. "
+                f"Pass allow_shrink=True to override.")
+        prev_total = int(prev.get("total_global") or 0)
+        if prev_total and total_global is not None and total_global < shrink_factor * prev_total:
+            raise UniverseShrinkError(
+                f"refusing snapshot: total_global {total_global} < {shrink_factor:.0%} of "
+                f"the last accepted {prev_total}. Pass allow_shrink=True to override.")
+    snap = {
+        "total_global": int(total_global) if total_global is not None else None,
+        "total_global_source": total_global_source,
+        # mesas the results portal reports as counted (mesesc); sits between total_global and
+        # mesas_informadas (acta images). None when the portal wasn't reachable.
+        "mesas_escrutadas": int(mesas_escrutadas) if mesas_escrutadas is not None else None,
+        "mesas_informadas": int(mesas_informadas),
+        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "keys": sorted(r.key for r in records),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(snap), encoding="utf-8")
+    tmp.replace(path)
+    log.info("wrote universe snapshot total_global=%s informadas=%d -> %s",
+             snap["total_global"], mesas_informadas, path)
+    return snap
 
 
 def write_universe_csv(records: list[ActaRecord], path: Path) -> None:

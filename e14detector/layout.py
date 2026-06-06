@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from . import config
+
 
 @dataclass(frozen=True)
 class NormalizedBox:
@@ -93,6 +95,36 @@ class FieldLayout:
     field_box: PixelBox
     slot_boxes: tuple[PixelBox, PixelBox, PixelBox]
     layout_confidence: float = 0.5
+
+
+@dataclass(frozen=True)
+class RoundLayout:
+    """All geometry for one election round, keyed into ``LAYOUT`` by round name.
+
+    The 3-digit slot model, inset logic and the CV feature path are geometry-agnostic and live
+    outside this struct; only the per-round coordinate TABLES differ. ``ready`` gates whether the
+    round may actually be cropped: the R1 layout is fully calibrated (``ready=True``), while the
+    R2 (runoff) layout ships as a structural STUB with placeholder coordinates (``ready=False``)
+    so any attempt to process R2 actas fails loudly until real coords are filled in — never silent
+    garbage crops. See ``_require_ready``.
+    """
+    rows_by_page: dict[int, tuple[RowLayout, ...]]
+    page_vote_columns: dict[int, NormalizedBox]
+    candidate_names: dict[int, str]
+    n_slots: int = 3
+    slot_inset_x: float = 0.06
+    slot_inset_y: float = 0.04
+    ready: bool = False
+
+    @property
+    def n_pages(self) -> int:
+        return len(self.rows_by_page)
+
+    @property
+    def n_candidates(self) -> int:
+        return sum(
+            1 for rows in self.rows_by_page.values() for r in rows if r.row_type == "candidate"
+        )
 
 
 # Conservative first-pass crop columns. X starts at the printed divider between
@@ -219,30 +251,103 @@ ROWS_BY_PAGE = {
 }
 
 
-def rows_for_page(page_number: int) -> tuple[RowLayout, ...]:
-    return ROWS_BY_PAGE.get(page_number, ())
+# --- R2 (runoff) layout STUB -------------------------------------------------
+# The runoff is a 2-candidate, almost-certainly single-page form. The 3-digit slot model, inset
+# logic and CV feature path are unchanged; only the coordinate TABLES below differ — and they are
+# PLACEHOLDERS. ready=False (in LAYOUT["r2"]) makes any crop attempt raise, so R2 can never produce
+# silent garbage until a real blank/simulacro R2 acta is measured and these are filled in.
+R2_CANDIDATE_NAMES: dict[int, str] = {
+    1: "TODO candidato 1 (segunda vuelta)",
+    2: "TODO candidato 2 (segunda vuelta)",
+}
+# TODO(form): every box below is a structural placeholder, NOT a measured R2 coordinate. Replace
+# with real cell edges from an actual runoff acta, then flip LAYOUT["r2"].ready = True.
+_R2_PAGE1_ROWS: tuple[RowLayout, ...] = (
+    RowLayout(1, "candidate", 1, 1, R2_CANDIDATE_NAMES[1], "votacion", NormalizedBox(VOTE_X0, 0.40, VOTE_X1, 0.45)),
+    RowLayout(1, "candidate", 2, 2, R2_CANDIDATE_NAMES[2], "votacion", NormalizedBox(VOTE_X0, 0.47, VOTE_X1, 0.52)),
+    RowLayout(1, "summary", 3, None, "votos_en_blanco", "summary", NormalizedBox(VOTE_X0, 0.60, VOTE_X1, 0.63)),
+    RowLayout(1, "summary", 4, None, "votos_nulos", "summary", NormalizedBox(VOTE_X0, 0.64, VOTE_X1, 0.67)),
+    RowLayout(1, "summary", 5, None, "votos_no_marcados", "summary", NormalizedBox(VOTE_X0, 0.68, VOTE_X1, 0.71)),
+    RowLayout(1, "summary", 6, None, "total_votos", "summary", NormalizedBox(VOTE_X0, 0.72, VOTE_X1, 0.75)),
+)
 
 
-def vote_column_box(page_number: int, width: int, height: int) -> PixelBox:
+# The round registry. LAYOUT["r1"] is the live, fully-calibrated first-round geometry (pinned
+# byte-for-byte by a golden test); LAYOUT["r2"] is the guarded stub above.
+LAYOUT: dict[str, RoundLayout] = {
+    "r1": RoundLayout(
+        rows_by_page=ROWS_BY_PAGE,
+        page_vote_columns=PAGE_VOTE_COLUMNS,
+        candidate_names=CANDIDATE_NAMES,
+        n_slots=3, slot_inset_x=SLOT_INSET_X, slot_inset_y=SLOT_INSET_Y,
+        ready=True,
+    ),
+    "r2": RoundLayout(
+        rows_by_page={1: _R2_PAGE1_ROWS},
+        page_vote_columns={1: NormalizedBox(VOTE_X0, 0.38, VOTE_X1, 0.76)},  # TODO(form)
+        candidate_names=R2_CANDIDATE_NAMES,
+        n_slots=3, slot_inset_x=SLOT_INSET_X, slot_inset_y=SLOT_INSET_Y,
+        ready=False,
+    ),
+}
+
+
+def _resolve_round(round: str | None) -> str:
+    return (round or config.ELECTION_ROUND or "r1").strip().lower()
+
+
+def layout_for(round: str | None = None) -> RoundLayout:
+    """The RoundLayout for ``round`` (default: the active ``config.ELECTION_ROUND``)."""
+    r = _resolve_round(round)
     try:
-        box = PAGE_VOTE_COLUMNS[page_number]
+        return LAYOUT[r]
     except KeyError as exc:
-        raise ValueError(f"unsupported page for MVP layout: {page_number}") from exc
+        raise ValueError(f"unknown election round: {r!r} (known: {sorted(LAYOUT)})") from exc
+
+
+def _require_ready(lay: RoundLayout, round: str) -> None:
+    """Refuse to produce crops for a round whose coordinates are still placeholders."""
+    if not lay.ready:
+        raise RuntimeError(
+            f"layout for round {round!r} is a STUB with placeholder coordinates — refusing to "
+            f"crop (would be silent garbage). Calibrate LAYOUT[{round!r}] from a real {round} "
+            f"acta and set ready=True first.")
+
+
+def rows_for_page(page_number: int, round: str | None = None) -> tuple[RowLayout, ...]:
+    # Metadata only (no cropping), so this is allowed even on an un-calibrated stub round.
+    return layout_for(round).rows_by_page.get(page_number, ())
+
+
+def vote_column_box(page_number: int, width: int, height: int, round: str | None = None) -> PixelBox:
+    r = _resolve_round(round)
+    lay = layout_for(r)
+    _require_ready(lay, r)
+    try:
+        box = lay.page_vote_columns[page_number]
+    except KeyError as exc:
+        raise ValueError(f"unsupported page for {r} layout: {page_number}") from exc
     return box.to_pixels(width, height)
 
 
-def field_layouts_for_page(page_number: int, width: int, height: int) -> list[FieldLayout]:
+def field_layouts_for_page(
+    page_number: int, width: int, height: int, round: str | None = None
+) -> list[FieldLayout]:
+    r = _resolve_round(round)
+    lay = layout_for(r)
+    _require_ready(lay, r)
     layouts: list[FieldLayout] = []
-    for row in rows_for_page(page_number):
+    for row in lay.rows_by_page.get(page_number, ()):
         field_box = row.box.to_pixels(width, height)
         slots = tuple(
-            slot.inset(SLOT_INSET_X, SLOT_INSET_Y)
-            for slot in field_box.split_columns(3)
+            slot.inset(lay.slot_inset_x, lay.slot_inset_y)
+            for slot in field_box.split_columns(lay.n_slots)
         )
         layouts.append(FieldLayout(row=row, field_box=field_box, slot_boxes=slots))  # type: ignore[arg-type]
     return layouts
 
 
-def all_rows() -> Iterable[RowLayout]:
-    for page in sorted(ROWS_BY_PAGE):
-        yield from ROWS_BY_PAGE[page]
+def all_rows(round: str | None = None) -> Iterable[RowLayout]:
+    lay = layout_for(round)
+    for page in sorted(lay.rows_by_page):
+        yield from lay.rows_by_page[page]

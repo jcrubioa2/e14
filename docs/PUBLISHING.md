@@ -1,5 +1,10 @@
 # Publishing — getting crops + DB from a detector machine to the live deployment
 
+> **Superseded by [`e14 sync`](SYNC.md).** Prefer `e14 sync run` / `status` / `verify` /
+> `restore`, which wrap the verbs below with the count-model consistency rules baked in
+> (lock-aware, frontier-only, shrink-guard, chain-stamp, verify-first). The commands here still
+> work and explain the mechanics, but the unified tool is the one you should reach for.
+
 This is **loop #1** of the rollout: a machine that runs the detector (producing crops and a
 results DB) pushes that data to the live site. The site grows on its own as you publish more.
 

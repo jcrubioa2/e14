@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SUPERSEDED by `e14 sync status` (see docs/SYNC.md), which prints the full count chain +
+# cobertura + backlogs from one source. This local crop tally still works.
 # Quick national crop progress (actas + candidate PNG count + log tail).
 set -euo pipefail
 cd "$(dirname "$0")/.."
