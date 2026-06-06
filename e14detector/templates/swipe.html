@@ -110,12 +110,11 @@
     @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
 
     .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
-    @media (max-width:470px) { .grid { grid-template-columns:repeat(2, 1fr); gap:11px; } }
 
     .tile {
       position:relative; border:1.5px solid var(--line); border-radius:var(--r); background:var(--card);
-      padding:13px 13px 10px; cursor:pointer; box-shadow:var(--shadow); outline:none;
-      display:flex; flex-direction:column; gap:7px; min-height:114px;
+      padding:11px 13px 8px; cursor:pointer; box-shadow:var(--shadow); outline:none;
+      display:flex; flex-direction:column; gap:6px; min-height:114px;
       transition:transform .14s cubic-bezier(.2,.7,.2,1), border-color .14s, box-shadow .14s, background .14s;
     }
     .tile:hover { transform:translateY(-3px); border-color:var(--line-strong); box-shadow:0 2px 2px rgba(28,26,21,.04), 0 14px 28px -12px rgba(28,26,21,.22); }
@@ -197,6 +196,42 @@
     .toast.warn { background:var(--red-deep); }
     .toast.win { background:var(--rank, var(--link)); font-weight:700; }
     .toast.win b { font-weight:800; }
+
+    /* Mobile voting: one screen, no scroll — grid stretches to fill the gap above the sticky bar and
+       crops scale up to use every pixel (fitGridLayout picks columns for max readable size). */
+    @media (max-width:600px) {
+      body { height:100dvh; overflow:hidden; padding-bottom:0; display:flex; flex-direction:column; }
+      .appbar-wrap { flex:0 0 auto; }
+      header { flex:0 0 auto; }
+      .eyebrow { display:none; }
+      .head-inner { padding:10px 16px 8px; }
+      header h1 { font-size:22px; }
+      main { padding:8px 12px 0; flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+      .meta { margin-bottom:8px; flex:0 0 auto; }
+      .rank .next { display:none; }
+      .note { display:none; }
+      #board { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+      .grid {
+        flex:0 0 auto;
+        width:100%;
+        align-content:stretch;
+        grid-template-columns:repeat(var(--deck-cols, 3), 1fr);
+        grid-template-rows:repeat(var(--deck-rows, 1), 1fr);
+        gap:var(--tile-gap, 8px);
+      }
+      .grid .tile {
+        height:100%;
+        min-height:0;
+        padding:var(--tile-pad, 5px) var(--tile-pad, 5px) 3px;
+        gap:2px;
+      }
+      .grid .tile .thumb { flex:1 1 auto; min-height:0; }
+      .grid .tile img { max-height:100%; max-width:100%; width:auto; height:auto; }
+      .bar { position:fixed; }
+      .bar-inner { padding:13px 16px; padding-bottom:calc(13px + env(safe-area-inset-bottom)); }
+      .spacer { display:none; }
+      .b-skip { margin-left:auto; }
+    }
 
     @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
   </style>
@@ -468,6 +503,60 @@
       updateCount();
     }
 
+    // On phones, fill the viewport between meta and the sticky bar: pick a column count that keeps
+    // every casilla on screen AND maximizes crop size (no tiny 5-up grid floating in empty space).
+    const MOBILE_GRID_MQ = window.matchMedia('(max-width: 600px)');
+
+    function fitGridLayout() {
+      const grid = board.querySelector('.grid');
+      if (!grid || !deck.length) return;
+      if (!MOBILE_GRID_MQ.matches) {
+        grid.style.height = '';
+        grid.style.removeProperty('--deck-cols');
+        grid.style.removeProperty('--deck-rows');
+        grid.style.removeProperty('--tile-gap');
+        grid.style.removeProperty('--tile-pad');
+        document.body.style.overflow = '';
+        return;
+      }
+      document.body.style.overflow = 'hidden';
+      const n = deck.length;
+      const gap = 8;
+      const tilePad = 5;
+      const capH = 13;
+      const overhead = tilePad * 2 + capH + 3;
+      const footGap = 14;
+      const top = grid.getBoundingClientRect().top;
+      const barH = bar.hidden ? 0 : bar.offsetHeight;
+      const avail = Math.max(140, window.innerHeight - top - barH - footGap);
+      const width = grid.clientWidth || (main.clientWidth - 24);
+
+      let best = null;
+      for (let cols = 2; cols <= 4; cols++) {
+        const rows = Math.ceil(n / cols);
+        const rowBudget = (avail - gap * Math.max(0, rows - 1)) / rows;
+        const colBudget = (width - gap * Math.max(0, cols - 1)) / cols;
+        const score = Math.min(rowBudget - overhead, colBudget - tilePad * 2);
+        if (score < 38) continue;
+        if (!best || score > best.score) {
+          best = { cols, rows, score };
+        }
+      }
+      if (!best) {
+        const cols = n <= 6 ? 2 : 3;
+        best = { cols, rows: Math.ceil(n / cols), score: 38 };
+      }
+      grid.style.height = avail + 'px';
+      grid.style.setProperty('--deck-cols', String(best.cols));
+      grid.style.setProperty('--deck-rows', String(best.rows));
+      grid.style.setProperty('--tile-gap', gap + 'px');
+      grid.style.setProperty('--tile-pad', tilePad + 'px');
+    }
+
+    MOBILE_GRID_MQ.addEventListener('change', () => requestAnimationFrame(fitGridLayout));
+    window.addEventListener('resize', () => requestAnimationFrame(fitGridLayout));
+    window.addEventListener('orientationchange', () => setTimeout(fitGridLayout, 120));
+
     // Turn a tile element into a live casilla: load its crop, wire mark/undo. Used both for
     // reused placeholders (filled in place) and brand-new tiles (which also animate in).
     function fillTile(tile, it) {
@@ -540,6 +629,7 @@
       noteEl.hidden = false;
       bar.hidden = false;
       updateCount();
+      requestAnimationFrame(() => requestAnimationFrame(fitGridLayout));
     }
 
     // Dynamic placeholder count (5–13) so the loading state isn't always the same six tiles. The
@@ -553,6 +643,7 @@
     function renderEmpty(msg) {
       board.innerHTML = '<div class="empty"><span class="big">Gracias por participar</span>' + msg + '</div>';
       meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
+      document.body.style.overflow = '';
     }
 
     // One fetch of a fresh mesa, with a single retry so we don't serve the same mesa twice in a row.
