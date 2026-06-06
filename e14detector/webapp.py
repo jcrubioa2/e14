@@ -112,6 +112,96 @@ def ensure_n_candidates(db_path: Path) -> bool:
         con.close()
 
 
+def ensure_crop_paths(db_path: Path) -> bool:
+    """Self-heal ``candidate`` rows whose ``raw_crop_path`` was dropped by a DB rebuild.
+
+    A rebuild (e.g. the ``recover9`` slim corpus) can leave some candidate rows with a NULL/empty
+    ``raw_crop_path`` even though the crop exists — those casillas then vanish from the swipe feed
+    and the per-acta grid (both filter ``raw_crop_path IS NOT NULL``), so an acta silently shows
+    11/13 instead of 13. The path is deterministic (see ``cropper.save_field_crops``), so we
+    reconstruct it from the basename + the crops directory of a sibling non-null row in the SAME
+    document — but only when the crop file is actually present on disk.
+
+    Why the file check: a NULL crop path is ambiguous — it may be a *dropped* path (crop exists,
+    recoverable) or a *genuine* gap (no crop at all, must stay filtered out so it isn't served as a
+    broken card). We can only safely fabricate the former. So this guard self-heals where crops are
+    local (the build/repair machine) and is a deliberate no-op on the serve volume (crops live on
+    the CDN, not the disk) — which is fine, because a snapshot published after the repair script
+    has no NULLs to heal anyway. The authoritative fix (file verification + CDN upload + dedupe) is
+    ``scripts.repair_crop_integrity``; this is just belt-and-suspenders against a rebuild re-dropping
+    the column on a machine that still has the crops.
+
+    Runs BEFORE ``ensure_n_candidates`` so the count reflects the heal; also recomputes
+    ``n_candidates`` for the touched documents itself (ensure_n_candidates short-circuits when the
+    column already exists and would not pick up the change). Idempotent + best-effort: a no-op when
+    there are no NULL paths, and a read-only file just logs and returns False.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(db_path, timeout=60.0)
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_crop_paths: open failed: {exc}", flush=True)
+        return False
+    try:
+        null_rows = con.execute(
+            "SELECT id, document_id, page_number, row_number FROM vote_fields "
+            "WHERE row_type='candidate' AND (raw_crop_path IS NULL OR raw_crop_path='')"
+        ).fetchall()
+        # Surface (but never auto-delete) duplicate rows — a regression we want visible.
+        dups = con.execute(
+            "SELECT COUNT(*) FROM vote_fields v WHERE EXISTS ("
+            "SELECT 1 FROM vote_fields v2 WHERE v2.document_id=v.document_id "
+            "AND v2.page_number=v.page_number AND v2.row_number=v.row_number "
+            "AND v2.row_type=v.row_type AND IFNULL(v2.section,'')=IFNULL(v.section,'') "
+            "AND v2.id < v.id)"
+        ).fetchone()[0]
+        if dups:
+            print(f"ensure_crop_paths: WARN {dups} duplicate vote_fields row(s) on {db_path} "
+                  "(run scripts.repair_crop_integrity --apply to dedupe)", flush=True)
+        if not null_rows:
+            return True
+        dir_cache: dict[str, str | None] = {}
+        updates: list[tuple[str, int]] = []
+        touched: set[str] = set()
+        for vid, did, page, row in null_rows:
+            if did not in dir_cache:
+                sib = con.execute(
+                    "SELECT raw_crop_path FROM vote_fields WHERE document_id=? AND row_type='candidate' "
+                    "AND raw_crop_path IS NOT NULL AND raw_crop_path != '' LIMIT 1",
+                    (did,),
+                ).fetchone()
+                dir_cache[did] = (sib[0].rsplit("/", 1)[0] if sib and "/" in sib[0] else None)
+            crops_dir = dir_cache[did]
+            if not crops_dir:
+                continue  # no sibling to anchor the path; leave NULL
+            raw = f"{crops_dir}/{did}_p{page}_row{row}_candidate_field.png"
+            if not os.path.exists(raw):
+                continue  # genuine gap (or crops not local) — don't fabricate a 404 card
+            updates.append((raw, vid))
+            touched.add(did)
+        if not updates:
+            return True
+        con.executemany("UPDATE vote_fields SET raw_crop_path=? WHERE id=?", updates)
+        # Bump n_candidates for just the touched actas (column already exists -> recompute here).
+        con.executemany(
+            "UPDATE documents SET n_candidates = COALESCE("
+            "(SELECT COUNT(*) FROM vote_fields vf WHERE vf.document_id = documents.document_id "
+            "AND vf.row_type='candidate' AND vf.raw_crop_path IS NOT NULL AND vf.raw_crop_path != ''), 0) "
+            "WHERE document_id=?",
+            [(d,) for d in touched],
+        )
+        con.commit()
+        print(f"ensure_crop_paths: backfilled {len(updates)} crop path(s) across {len(touched)} "
+              f"acta(s) on {db_path}", flush=True)
+        return True
+    except sqlite3.Error as exc:  # noqa: BLE001 — a self-heal must never crash boot
+        print(f"ensure_crop_paths: backfill failed (serving read-only?): {exc}", flush=True)
+        return False
+    finally:
+        con.close()
+
+
 def ensure_browse_indexes(db_path: Path) -> bool:
     """Guarantee the served ``documents`` table carries the indexes /browse's hot path needs.
 
@@ -968,6 +1058,9 @@ def create_app(
 ) -> FastAPI:
     results_db = Path(results_db)
     output_dir = Path(output_dir).resolve()
+    # Self-heal any candidate rows a rebuild left without a crop path (so no acta silently shows
+    # <13 casillas); runs first so the n_candidates backfill below counts the restored rows.
+    ensure_crop_paths(results_db)
     # Backfill the precomputed n_candidates column if this snapshot lacks it, so /browse never
     # 500s on `no such column`. No-op for an up-to-date DB; runs again after each db-sync swap.
     ensure_n_candidates(results_db)
@@ -1096,6 +1189,8 @@ def create_app(
                     # A freshly pulled snapshot might predate the n_candidates column — backfill
                     # it before serving so /browse stays on the fast precomputed path. (Geo names
                     # need no per-swap work: they resolve from the in-memory lookup at render.)
+                    # Heal dropped crop paths first so the n_candidates backfill counts them.
+                    await asyncio.to_thread(ensure_crop_paths, results_db)
                     await asyncio.to_thread(ensure_n_candidates, results_db)
                     await asyncio.to_thread(ensure_browse_indexes, results_db)
                 return sha
