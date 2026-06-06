@@ -192,7 +192,7 @@
     const resetBtn = document.getElementById('map-reset');
     if (!mapEl || !window.L) return;
 
-    const map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true });
+    const map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true, zoomSnap: 0.25 });
     L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
       attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxZoom: 19
     }).addTo(map);
@@ -271,7 +271,12 @@
         style: (f) => styleFeature(f.properties),
         onEachFeature: bindLayer
       }).addTo(map);
-      try { map.fitBounds(layer.getBounds(), { padding: [16, 16] }); } catch (e) { map.setView([4.5, -74], 5); }
+      try {
+        map.fitBounds(layer.getBounds(), { padding: [16, 16] });
+        // The national (all-departments) view fits a wide bbox (San Andrés sits far north),
+        // leaving the mainland small — nudge it in a touch. Drill-down views stay as fitted.
+        if (view === 'departments') map.zoomIn(0.5, { animate: false });
+      } catch (e) { map.setView([4.5, -74], 5); }
     }
 
     async function loadMap() {
