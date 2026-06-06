@@ -24,7 +24,7 @@
     window.__turnstileSitekey = "{{ turnstile_sitekey }}";
   </script>
   {% if turnstile_sitekey %}
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=__tsInit" async defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=__tsInit" async defer></script>
   {% endif %}
   <style>
     :root {
@@ -398,7 +398,7 @@
       try {
         tsWidget = window.turnstile.render('#ts', {
           sitekey: window.__turnstileSitekey,
-          size: 'invisible',
+          execution: 'execute',
           callback: function (token) { establishSession(token); },
           'expired-callback': function () { window.__formToken = ''; ensureSession(); },
           'error-callback': function () { establishing = false; _settleSession(false); },
