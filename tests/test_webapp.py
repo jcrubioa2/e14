@@ -947,9 +947,10 @@ def test_client_ip_uses_cf_connecting_ip_only_behind_cloudflare() -> None:
 
 
 def test_edge_guard_requires_cloudflare_origin_when_enabled(tmp_path: Path, monkeypatch) -> None:
-    """With E14_REQUIRE_CF on, a POST /api/* is rejected unless it reached Fly from a Cloudflare IP
-    (un-spoofable Fly-Client-IP) — blocking direct-to-Fly bypass. GET/health are never gated, and
-    the guard is fail-open when off (covered by every other test)."""
+    """With E14_REQUIRE_CF on, the bare Fly origin must look dead to anyone bypassing Cloudflare:
+    ANY request (page or api) whose un-spoofable Fly-Client-IP is not a Cloudflare IP gets a bare
+    404. The sole exemption is /health (Fly's own checker reaches it directly, no Cloudflare hop).
+    Cloudflare-originated traffic passes through. Fail-open when off (covered by every other test)."""
     from e14detector import config as _config
 
     monkeypatch.setattr(_config, "REQUIRE_CF_ORIGIN", True)
@@ -959,17 +960,18 @@ def test_edge_guard_requires_cloudflare_origin_when_enabled(tmp_path: Path, monk
         app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "c.sqlite")
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-            # Direct-to-Fly (Fly-Client-IP not a Cloudflare IP) -> blocked.
-            blocked = await client.post("/api/vote", json={"cid": "x", "value": "good"},
-                                        headers={"fly-client-ip": "9.9.9.9"})
-            assert blocked.status_code == 403 and blocked.json()["error"] == "forbidden"
-            # Arrived via Cloudflare (Fly-Client-IP is a CF IP) -> passes the guard (fails later for
-            # another reason, not 'forbidden').
-            passed = await client.post("/api/vote", json={"cid": "x", "value": "good"},
-                                       headers={"fly-client-ip": "104.16.0.1", "cf-connecting-ip": "5.5.5.5"})
-            assert not (passed.status_code == 403 and passed.json().get("error") == "forbidden")
-            # GET endpoints (incl. Fly's /health check) are never gated.
-            assert (await client.get("/health")).status_code in (200, 503)
+            direct = {"fly-client-ip": "9.9.9.9"}  # connected to Fly from a non-Cloudflare IP
+            # Direct-to-Fly page hit -> 404, body indistinguishable from a normal miss.
+            page = await client.get("/votar", headers=direct)
+            assert page.status_code == 404 and page.json()["detail"] == "Not Found"
+            # Direct-to-Fly api hit -> the SAME bare 404 (previously 403 'forbidden').
+            api = await client.post("/api/vote", json={"cid": "x", "value": "good"}, headers=direct)
+            assert api.status_code == 404 and api.json()["detail"] == "Not Found"
+            # /health is exempt even from a non-CF IP (Fly's internal checker must keep it green).
+            assert (await client.get("/health", headers=direct)).status_code in (200, 503)
+            # Arrived via Cloudflare (Fly-Client-IP is a CF IP) -> guard passes, served normally.
+            feed = await client.get("/api/feed", headers={"fly-client-ip": "104.16.0.1"})
+            assert feed.status_code == 200
 
     asyncio.run(run())
 
