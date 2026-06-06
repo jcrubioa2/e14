@@ -141,11 +141,13 @@ def test_acta_crop_src_uses_cdn_when_configured(tmp_path: Path, monkeypatch) -> 
     # Default: in-app /crop endpoint.
     assert "/crop?path=" in asyncio.run(fetch())
 
-    # Configured: the CDN URL, keyed by the crops/ suffix.
+    # Configured: the CDN URL, keyed by the OPAQUE crop key (no readable path leaks).
+    from e14detector.webapp import crop_key
     monkeypatch.setattr(config, "CDN_BASE_URL", "https://cdn.example.com")
     html = asyncio.run(fetch())
-    assert 'src="https://cdn.example.com/crops/abc.png"' in html
+    assert f'src="https://cdn.example.com/{crop_key(str(crop))}"' in html
     assert "/crop?path=" not in html
+    assert "abc.png" not in html  # the readable mesa-identifying name never reaches the page
 
 
 def test_retired_verdict_routes_gone_and_crop_traversal_blocked(tmp_path: Path) -> None:
@@ -301,6 +303,69 @@ def test_feed_random_pk_sampling(tmp_path: Path) -> None:
             got = {it["cid"] for it in rest}
             assert len(got) == 4
             assert got.isdisjoint(set(cids[:4]))
+
+    asyncio.run(run())
+
+
+def test_crop_key_is_opaque_and_keyed(monkeypatch) -> None:
+    """The crop object key == the public CDN URL path, so it must reveal nothing about the acta:
+    an HMAC of the path, not the readable, mesa-identifying filename."""
+    from e14detector import config
+    from e14detector.webapp import crop_key
+
+    raw = "data/out/crops/E14_PRE_01_001_001_01_001_delegados_p1_row1_candidate_field.png"
+    key = crop_key(raw)
+    # Opaque: crops/<24 hex>.png, with no readable fragment of the original path.
+    assert key.startswith("crops/") and key.endswith(".png")
+    for leak in ("E14_PRE", "delegados", "row1", "candidate"):
+        assert leak not in key
+    name = key[len("crops/"):-len(".png")]
+    assert len(name) == 24 and all(c in "0123456789abcdef" for c in name)
+    # Deterministic, distinct per path, and secret-keyed (rotating the secret rotates the key).
+    assert crop_key(raw) == key
+    other = "data/out/crops/E14_PRE_01_001_001_01_002_delegados_p1_row1_candidate_field.png"
+    assert crop_key(other) != key
+    monkeypatch.setattr(config, "CROP_KEY_SECRET", config.CROP_KEY_SECRET + "rotated")
+    assert crop_key(raw) != key
+
+
+def test_feed_serves_opaque_cdn_url_without_leaking_path(tmp_path: Path, monkeypatch) -> None:
+    """With a CDN configured the swipe feed serves the crop straight from the CDN at its OPAQUE
+    key — no /c redirect hop, and no acta id / location / readable path anywhere in the payload."""
+    from e14detector import config
+    from e14detector.webapp import crop_cdn_url
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" /
+                 "E14_PRE_01_001_001_01_001_delegados_p1_row1_candidate_field.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(
+        document_id="E14_PRE_01_001_001_01_001", source_path="x.pdf",
+        department_name="ANTIOQUIA", municipality_name="MEDELLIN", mesa="01"))
+    store.insert_vote_field(VoteField(
+        document_id="E14_PRE_01_001_001_01_001", page_number=1, row_type="candidate",
+        row_number=1, candidate_name="A", raw_crop_path=str(crop)))
+    store.commit()
+    store.close()
+
+    monkeypatch.setattr(config, "CDN_BASE_URL", "https://cdn.example.com")
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.get("/api/feed?n=5")
+            items = r.json()["items"]
+            assert items
+            it = items[0]
+            # Direct opaque CDN URL (the fix), not a /c/{cid} redirect.
+            assert it["img_url"] == crop_cdn_url(str(crop), config.CDN_BASE_URL)
+            assert it["img_url"].startswith("https://cdn.example.com/crops/")
+            assert not it["img_url"].startswith("/c/")
+            # Nothing in the payload identifies the mesa / location / readable crop path.
+            body = r.text
+            for leak in ("E14_PRE", "delegados", "row1", "ANTIOQUIA", "MEDELLIN"):
+                assert leak not in body
 
     asyncio.run(run())
 

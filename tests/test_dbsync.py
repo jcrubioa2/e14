@@ -179,10 +179,11 @@ def test_publish_db_only_uploaded_publishes_the_frontier(tmp_path: Path) -> None
         )
     con.commit()
     con.close()
-    # Only doc-0's crop is uploaded.
+    # Only doc-0's crop is uploaded (manifest holds OPAQUE object keys, same as the bucket).
+    from e14detector.webapp import crop_key
     manifest = out / "review" / "uploaded_crops.txt"
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text("crops/doc-0.png\n")
+    manifest.write_text(crop_key("data/x/crops/doc-0.png") + "\n")
 
     class _FakeS3:
         def __init__(self) -> None:

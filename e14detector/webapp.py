@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import functools
+import hashlib
 import hmac
 import ipaddress
 import math
@@ -400,14 +401,34 @@ def crop_rel(raw_crop_path: str) -> str:
     return s[idx + len("crops/"):] if idx != -1 else s.lstrip("/")
 
 
-def crop_key(raw_crop_path: str, round: str | None = None) -> str:
-    """Object-store key for a crop. ``r1`` keeps the legacy ``crops/<file>`` key (byte-identical
-    to before round-scoping); any other round nests under ``crops/<round>/<file>``.
+def crop_obj_name(crop_rel_path: str, secret: str | None = None) -> str:
+    """OPAQUE file part of a crop's object key: ``<hmac(crop_rel)>.png``.
 
-    The manifest key == bucket object key == the CDN URL path, so this single function carries
-    crops, the upload cache, the publish frontier (``_prune_to_uploaded``), and CDN URLs together.
+    The readable crop path (``E14_PRE_<dept>_<mun>_<zone>_<puesto>_<mesa>_..._candidate_field.png``)
+    fully identifies the mesa, so exposing it as the public CDN URL de-anonymizes the acta. A
+    secret-keyed HMAC over the *round-agnostic* ``crop_rel`` gives a name that (a) reveals nothing
+    about the acta and can't be rainbow-tabled back (the path namespace is small + structured, so a
+    plain hash would be reversible — the secret is what resists that), and (b) is deterministic, so
+    the uploader and the feed compute the identical name from the same path without any lookup.
+
+    24 hex chars (96 bits) keeps collisions negligible across the ~1.58M-crop national set. The
+    secret MUST match on the webapp and every upload machine (see config.CROP_KEY_SECRET).
     """
-    return crop_prefix(round) + crop_rel(raw_crop_path)
+    secret = config.CROP_KEY_SECRET if secret is None else secret
+    digest = hmac.new(secret.encode("utf-8"), crop_rel_path.encode("utf-8"), hashlib.sha256)
+    return digest.hexdigest()[:24] + ".png"
+
+
+def crop_key(raw_crop_path: str, round: str | None = None) -> str:
+    """Object-store key for a crop: ``crops/<hmac>.png`` (r1) or ``crops/<round>/<hmac>.png``.
+
+    The file part is an OPAQUE HMAC of the path (see ``crop_obj_name``) so the CDN URL never leaks
+    the mesa; round-scoping (the ``crops/`` vs ``crops/<round>/`` prefix) is unchanged. The manifest
+    key == bucket object key == the CDN URL path, so this single function carries crops, the upload
+    cache, the publish frontier (``_prune_to_uploaded``), and CDN URLs together. The whole pipeline
+    is forward-only (path -> key), so the one-way HMAC needs no reverse index.
+    """
+    return crop_prefix(round) + crop_obj_name(crop_rel(raw_crop_path))
 
 
 def crop_cdn_url(raw_crop_path: str, cdn_base: str, round: str | None = None) -> str | None:
@@ -1784,7 +1805,9 @@ def create_app(
                         continue
                     seen.add(cid)
                     reg.append((cid, fkey, r["raw_crop_path"], r["document_id"]))
-                    out.append({"cid": cid, "img_url": f"/c/{cid}"})
+                    # Opaque CDN URL straight from the path (no /c redirect hop); the key is an
+                    # HMAC so it leaks no acta identity. Falls back to /c/{cid} when no CDN is set.
+                    out.append({"cid": cid, "img_url": crop_cdn_url(r["raw_crop_path"], config.CDN_BASE_URL) or f"/c/{cid}"})
                     if len(out) >= n:
                         break
         community.register_cids(reg)
@@ -1844,7 +1867,7 @@ def create_app(
             fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
             cid = crop_id(poll_cfg.form_token_secret, fkey)
             reg.append((cid, fkey, fr["raw_crop_path"], document_id))
-            items.append({"cid": cid, "img_url": f"/c/{cid}"})
+            items.append({"cid": cid, "img_url": crop_cdn_url(fr["raw_crop_path"], config.CDN_BASE_URL) or f"/c/{cid}"})
         community.register_cids(reg)
         random.shuffle(items)  # break ballot order so position can't hint the candidate
         return items
@@ -2055,11 +2078,11 @@ def create_app(
             fkey = field_key_of(document_id, fr["page_number"], fr["row_number"], fr["section"])
             scid = crop_id(poll_cfg.form_token_secret, fkey)
             reg.append((scid, fkey, fr["raw_crop_path"], document_id))
-            siblings.append({"field_key": fkey, "cid": scid})
+            siblings.append({"field_key": fkey, "cid": scid, "crop": fr["raw_crop_path"]})
         community.register_cids(reg)
         counts = counts_among_cached([s["field_key"] for s in siblings])
         items = [
-            {"cid": s["cid"], "img_url": f"/c/{s['cid']}",
+            {"cid": s["cid"], "img_url": crop_cdn_url(s["crop"], config.CDN_BASE_URL) or f"/c/{s['cid']}",
              "good": counts[s["field_key"]]["good"], "strange": counts[s["field_key"]]["strange"]}
             for s in siblings
         ]
