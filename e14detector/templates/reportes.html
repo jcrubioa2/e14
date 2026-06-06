@@ -95,8 +95,7 @@
     .stats-note { color:var(--ink-faint); font-size:12.5px; margin:0 0 12px; line-height:1.5; }
 
     .map-block { margin-top:0; }
-    /* Segmented switch, top-right above the map, toggling the percentage base (total vs revisadas). */
-    .map-head { align-items:center; flex-wrap:wrap; }
+    /* Segmented switch on the controls row (right edge, just above the map): percentage base. */
     .map-base-switch { margin-left:auto; display:inline-flex; align-items:center; gap:2px; padding:2px;
                        border:1px solid var(--line); border-radius:99px; background:var(--paper-2); }
     .map-base-switch button { border:0; background:transparent; color:var(--ink-soft); font:inherit;
@@ -107,8 +106,8 @@
     .map-controls { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:flex-end; margin-bottom:12px; }
     .map-controls label { display:flex; flex-direction:column; gap:5px; font-size:12px; font-weight:700; color:var(--ink-soft); }
     .map-controls select { min-width:220px; padding:9px 11px; border:1px solid var(--line); border-radius:10px; font:inherit; background:var(--card); }
-    .map-controls button { padding:9px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; font-weight:700; cursor:pointer; }
-    .map-controls button:hover { border-color:var(--red-line); }
+    .map-controls > button { padding:9px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; font-weight:700; cursor:pointer; }
+    .map-controls > button:hover { border-color:var(--red-line); }
     #reportes-map { height:min(420px, 55vh); border:1px solid var(--line); border-radius:14px; background:var(--paper-2); box-shadow:var(--shadow); }
     .map-legend { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--ink-soft); }
     .map-legend-bar { height:8px; flex:1; min-width:140px; max-width:280px; border-radius:99px;
@@ -172,13 +171,7 @@
       <div class="sec-head"><h2 id="stats-h">Estad&iacute;sticas</h2></div>
 
       <div class="map-block" aria-labelledby="map-h">
-        <div class="sec-head map-head">
-          <h3 id="map-h" style="margin:0;font-family:'Fraunces',serif;font-size:19px">Mapa por municipio</h3>
-          <div class="map-base-switch" role="group" aria-label="Base del porcentaje">
-            <button type="button" id="map-base-total" class="is-on" aria-pressed="true">Total</button>
-            <button type="button" id="map-base-reviewed" aria-pressed="false">Revisadas</button>
-          </div>
-        </div>
+        <div class="sec-head"><h3 id="map-h" style="margin:0;font-family:'Fraunces',serif;font-size:19px">Mapa por municipio</h3></div>
         <p class="stats-note">Mesas con al menos un reporte de la comunidad (&ldquo;se ve extra&ntilde;a&rdquo;), sobre el total de mesas de la veedur&iacute;a (o sobre las mesas revisadas) en ese municipio. No incluye veredictos del modelo.</p>
         <div class="map-controls">
           <label>Vista
@@ -187,6 +180,10 @@
             </select>
           </label>
           <button type="button" id="map-reset">Ver todo el pa&iacute;s</button>
+          <div class="map-base-switch" role="group" aria-label="Base del porcentaje">
+            <button type="button" id="map-base-total" class="is-on" aria-pressed="true">Total</button>
+            <button type="button" id="map-base-reviewed" aria-pressed="false">Revisadas</button>
+          </div>
         </div>
         <div id="reportes-map" role="img" aria-label="Mapa de reportes por municipio"></div>
         <div class="map-legend" aria-hidden="true">
