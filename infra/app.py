@@ -20,6 +20,14 @@ env = cdk.Environment(
     region=os.environ.get("CDK_DEFAULT_REGION", "us-east-1"),
 )
 
-VoteStack(app, "E14VoteStack", env=env)
+# R1 (first round) — the LIVE stack. Unchanged id/prefix/exports so `cdk deploy E14VoteStack`
+# never replaces the running cluster.
+VoteStack(app, "E14VoteStack", round="r1", env=env)
+
+# R2 (runoff) — a SEPARATE, single-round stack: its own Aurora + SQS + drain Lambda under the
+# "e14-vote-r2-" prefix, reusing infra/schema.sql unchanged (no election_round column). Synthesized
+# always but deployed only on demand: `cdk deploy E14VoteStackR2`. Aurora Serverless v2 scale-to-
+# zero keeps it cheap before the runoff; freeze/retire R1's stack after baking its verdicts.
+VoteStack(app, "E14VoteStackR2", round="r2", env=env)
 
 app.synth()

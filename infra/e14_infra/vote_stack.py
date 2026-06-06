@@ -66,8 +66,19 @@ DRAIN_MAX_CONCURRENCY = 20
 
 
 class VoteStack(Stack):
-    def __init__(self, scope: Construct, cid: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, cid: str, *, round: str = "r1", **kwargs) -> None:
         super().__init__(scope, cid, **kwargs)
+
+        # Per-round physical isolation: each round gets its OWN Aurora + SQS + drain Lambda, so a
+        # round is single-round by construction (no election_round discriminator column needed) and
+        # an R2 deploy/incident can never touch the R1 record. r1 keeps the LEGACY names/exports so
+        # the live first-round stack stays byte-identical at the CloudFormation level (a prefix
+        # change would REPLACE the running cluster); r2 nests under an "-r2-" prefix + "R2" export
+        # suffix. Resource names must be globally unique, hence both the prefix and the export
+        # suffix vary by round.
+        self.round = (round or "r1").strip().lower()
+        self.prefix = PREFIX if self.round == "r1" else f"{PREFIX}{self.round}-"
+        self.export_suffix = "" if self.round == "r1" else self.round.upper()
 
         vpc = self._vpc()
         cluster, secret = self._aurora(vpc)
@@ -76,10 +87,11 @@ class VoteStack(Stack):
         self._drain_lambda(queue, cluster, secret)
         self._alarms(queue, dlq, cluster)
 
-        CfnOutput(self, "SqsQueueUrl", value=queue.queue_url, export_name="E14SqsQueueUrl")
+        sfx = self.export_suffix
+        CfnOutput(self, "SqsQueueUrl", value=queue.queue_url, export_name=f"E14SqsQueueUrl{sfx}")
         CfnOutput(self, "SqsDlqUrl", value=dlq.queue_url)
-        CfnOutput(self, "AuroraClusterArn", value=cluster.cluster_arn, export_name="E14AuroraClusterArn")
-        CfnOutput(self, "AuroraSecretArn", value=secret.secret_arn, export_name="E14AuroraSecretArn")
+        CfnOutput(self, "AuroraClusterArn", value=cluster.cluster_arn, export_name=f"E14AuroraClusterArn{sfx}")
+        CfnOutput(self, "AuroraSecretArn", value=secret.secret_arn, export_name=f"E14AuroraSecretArn{sfx}")
         CfnOutput(self, "AwsRegion", value=self.region)
 
     # --- VPC -----------------------------------------------------------------
@@ -89,7 +101,7 @@ class VoteStack(Stack):
         return ec2.Vpc(
             self,
             "Vpc",
-            vpc_name=f"{PREFIX}vpc",
+            vpc_name=f"{self.prefix}vpc",
             max_azs=2,
             nat_gateways=0,
             subnet_configuration=[
@@ -110,9 +122,9 @@ class VoteStack(Stack):
             engine=rds.DatabaseClusterEngine.aurora_postgres(
                 version=rds.AuroraPostgresEngineVersion.VER_16_4
             ),
-            cluster_identifier=f"{PREFIX}cluster",
+            cluster_identifier=f"{self.prefix}cluster",
             credentials=rds.Credentials.from_generated_secret(
-                "e14admin", secret_name=f"{PREFIX}db-credentials"
+                "e14admin", secret_name=f"{self.prefix}db-credentials"
             ),
             default_database_name="e14",
             vpc=vpc,
@@ -134,13 +146,13 @@ class VoteStack(Stack):
         dlq = sqs.Queue(
             self,
             "VoteDlq",
-            queue_name=f"{PREFIX}events-dlq",
+            queue_name=f"{self.prefix}events-dlq",
             retention_period=QUEUE_RETENTION,
         )
         queue = sqs.Queue(
             self,
             "VoteQueue",
-            queue_name=f"{PREFIX}events",
+            queue_name=f"{self.prefix}events",
             visibility_timeout=QUEUE_VISIBILITY,
             retention_period=QUEUE_RETENTION,
             dead_letter_queue=sqs.DeadLetterQueue(max_receive_count=DLQ_MAX_RECEIVE, queue=dlq),
@@ -151,7 +163,7 @@ class VoteStack(Stack):
     def _fly_user(self, queue: sqs.Queue, cluster: rds.DatabaseCluster, secret) -> None:
         # No access key here on purpose: minting it out-of-band (see README)
         # keeps the secret out of CloudFormation state. CDK only grants the perms.
-        user = iam.User(self, "FlyUser", user_name=f"{PREFIX}fly")
+        user = iam.User(self, "FlyUser", user_name=f"{self.prefix}fly")
 
         user.add_to_policy(
             iam.PolicyStatement(
@@ -193,7 +205,7 @@ class VoteStack(Stack):
         fn = _lambda.Function(
             self,
             "VoteDrain",
-            function_name=f"{PREFIX}drain",
+            function_name=f"{self.prefix}drain",
             runtime=_lambda.Runtime.PYTHON_3_12,
             handler="handler.handler",
             code=_lambda.Code.from_asset(_LAMBDA_DIR),
@@ -233,7 +245,7 @@ class VoteStack(Stack):
         # An SNS topic so the alarms below actually notify someone (they were previously silent
         # — they'd flip to ALARM in the console but page nobody). Set E14_ALERT_EMAIL at deploy
         # time to get email; a Telegram forwarder Lambda can subscribe to this same topic later.
-        topic = sns.Topic(self, "AlertTopic", topic_name=f"{PREFIX}alerts")
+        topic = sns.Topic(self, "AlertTopic", topic_name=f"{self.prefix}alerts")
         email = os.environ.get("E14_ALERT_EMAIL", "").strip()
         if email:
             topic.add_subscription(subs.EmailSubscription(email))
@@ -249,7 +261,7 @@ class VoteStack(Stack):
 
         _alarm(
             "DlqNotEmpty",
-            alarm_name=f"{PREFIX}dlq-not-empty",
+            alarm_name=f"{self.prefix}dlq-not-empty",
             metric=dlq.metric_approximate_number_of_messages_visible(
                 period=Duration.minutes(1), statistic="Maximum"
             ),
@@ -260,7 +272,7 @@ class VoteStack(Stack):
         )
         _alarm(
             "QueueBacklogAge",
-            alarm_name=f"{PREFIX}queue-age-high",
+            alarm_name=f"{self.prefix}queue-age-high",
             metric=queue.metric_approximate_age_of_oldest_message(
                 period=Duration.minutes(1), statistic="Maximum"
             ),
@@ -271,7 +283,7 @@ class VoteStack(Stack):
         )
         _alarm(
             "AuroraCapacityHigh",
-            alarm_name=f"{PREFIX}aurora-acu-high",
+            alarm_name=f"{self.prefix}aurora-acu-high",
             metric=cw.Metric(
                 namespace="AWS/RDS",
                 metric_name="ServerlessDatabaseCapacity",
