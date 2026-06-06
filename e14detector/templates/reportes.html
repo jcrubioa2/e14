@@ -171,11 +171,17 @@
               <option value="">Colombia (departamentos)</option>
             </select>
           </label>
+          <label>Base
+            <select id="map-mode" aria-label="Base del porcentaje">
+              <option value="total">Sobre total de mesas</option>
+              <option value="reviewed">Sobre mesas revisadas</option>
+            </select>
+          </label>
           <button type="button" id="map-reset">Ver todo el pa&iacute;s</button>
         </div>
         <div id="reportes-map" role="img" aria-label="Mapa de reportes por municipio"></div>
         <div class="map-legend" aria-hidden="true">
-          <span>Menos</span><span class="map-legend-bar"></span><span>M&aacute;s mesas reportadas</span>
+          <span>Menos</span><span class="map-legend-bar"></span><span id="map-legend-max">M&aacute;s mesas reportadas</span>
         </div>
         <p class="map-foot">Los municipios sin mesas en la veedur&iacute;a aparecen en gris. Pasa el cursor para ver cifras; haz clic para buscar actas en ese lugar.</p>
       </div>
@@ -189,7 +195,9 @@
   (function () {
     const mapEl = document.getElementById('reportes-map');
     const deptSel = document.getElementById('map-dept');
+    const modeSel = document.getElementById('map-mode');
     const resetBtn = document.getElementById('map-reset');
+    const legendMaxEl = document.getElementById('map-legend-max');
     if (!mapEl || !window.L) return;
 
     const map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true, zoomSnap: 0.25 });
@@ -199,6 +207,13 @@
     let layer = null;
     let statsRows = [];
     let view = 'departments';
+    let lastGeo = null;   // last loaded GeoJSON, so the Base toggle re-renders without refetching
+
+    // The "Base" toggle switches the percentage denominator: reported/total (every browsable mesa)
+    // vs reported/reviewed (only mesas someone has voted on). Both come pre-computed in each row.
+    const reviewedMode = () => modeSel && modeSel.value === 'reviewed';
+    const modeBase = (row) => reviewedMode() ? row.reviewed : row.total;
+    const modePct = (row) => reviewedMode() ? row.pct_reviewed : row.pct;
 
     // GeoJSON place names are static/trusted DANE data, but escape before injecting into tooltip
     // HTML so a stray '<' or '&' in a name can never break markup (defensive, not load-bearing).
@@ -234,16 +249,20 @@
 
     function styleFeature(props) {
       const row = lookup(props);
-      if (!row || !row.total) return { fillColor: '#e8e4da', fillOpacity: 0.75, color: '#c8c2b4', weight: 1 };
-      return { fillColor: pctColor(row.pct), fillOpacity: 0.82, color: '#8a8478', weight: 1 };
+      if (!row || !modeBase(row)) return { fillColor: '#e8e4da', fillOpacity: 0.75, color: '#c8c2b4', weight: 1 };
+      return { fillColor: pctColor(modePct(row)), fillOpacity: 0.82, color: '#8a8478', weight: 1 };
     }
 
     function bindLayer(feature, lyr) {
       const row = lookup(feature.properties);
       const name = feature.properties.name || feature.properties.dep_name || '';
       let html;
-      if (!row || !row.total) {
-        html = `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`;
+      if (!row || !modeBase(row)) {
+        html = reviewedMode()
+          ? `<b>${esc(name)}</b><br>Sin mesas revisadas a&uacute;n`
+          : `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`;
+      } else if (reviewedMode()) {
+        html = `<b>${esc(name)}</b><br>${row.reported} de ${row.reviewed} mesas revisadas reportadas (${row.pct_reviewed}%)`;
       } else {
         html = `<b>${esc(name)}</b><br>${row.reported} de ${row.total} mesas reportadas (${row.pct}%)`;
       }
@@ -291,7 +310,15 @@
         fetchJson(geoUrl)
       ]);
       statsRows = view === 'departments' ? stats.departments : stats.municipios;
+      lastGeo = geo;
       renderGeo(geo);
+    }
+
+    function applyMode() {
+      if (legendMaxEl) {
+        legendMaxEl.innerHTML = reviewedMode() ? 'M&aacute;s mesas revisadas reportadas' : 'M&aacute;s mesas reportadas';
+      }
+      if (lastGeo) renderGeo(lastGeo);   // re-color from cached GeoJSON — no network request
     }
 
     function fillDeptOptions(departments) {
@@ -312,6 +339,7 @@
     }).catch(() => { mapEl.textContent = 'No se pudo cargar el mapa.'; });
 
     deptSel.addEventListener('change', () => loadMap().catch(console.error));
+    if (modeSel) modeSel.addEventListener('change', applyMode);
     resetBtn.addEventListener('click', () => { deptSel.value = ''; loadMap().catch(console.error); });
     setTimeout(() => map.invalidateSize(), 200);
   })();

@@ -480,6 +480,17 @@ class CommunityStore:
                     seen.add((r["voter_token"], r["field_key"].rsplit(":", 3)[0]))
         return len(seen)
 
+    def reviewed_actas(self) -> set[str]:
+        """Doc ids any voter has reviewed (flagged OR marked good) — the 'reviewed' denominator
+        for the /reportes map. Mirrors ``acta_popularity``'s doc id (field key minus its last 3
+        page:row:section parts); unions flags + appeals so all-"se ve bien" mesas count too."""
+        docs: set[str] = set()
+        with self._lock:
+            for tbl in ("flags", "appeals"):
+                for r in self.conn.execute(f"SELECT field_key FROM {tbl}"):
+                    docs.add(r["field_key"].rsplit(":", 3)[0])
+        return docs
+
     def published_keys(self) -> list[str]:
         """All field keys currently published as strange (few — only confirmed ones)."""
         with self._lock:

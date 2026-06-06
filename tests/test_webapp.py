@@ -863,6 +863,21 @@ def test_municipio_report_stats_aggregation(tmp_path: Path) -> None:
     assert m05["total"] == 1 and m05["reported"] == 0 and m05["pct"] == 0.0
     d01 = next(d for d in stats["departments"] if d["dep"] == "01")
     assert d01["total"] == 2 and d01["reported"] == 1
+    # Backward-compat: callers that omit reviewed_docs get reviewed counts of 0.
+    assert m01["reviewed"] == 0 and m01["pct_reviewed"] == 0.0
+    assert stats["summary"]["reviewed_mesas"] == 0
+
+    # Reviewed denominator: pct is reported/reviewed instead of reported/total.
+    rev = municipio_report_stats(idx, {"doc-a"}, load_geo_names(), reviewed_docs={"doc-a", "doc-b"})
+    r01 = next(m for m in rev["municipios"] if m["dep"] == "01" and m["muni"] == "001")
+    assert r01["reviewed"] == 2 and r01["pct_reviewed"] == 50.0  # 1 reported of 2 reviewed
+    assert rev["summary"]["reviewed_mesas"] == 2
+    rd01 = next(d for d in rev["departments"] if d["dep"] == "01")
+    assert rd01["reviewed"] == 2 and rd01["pct_reviewed"] == 50.0
+    # One mesa reviewed and that same mesa reported -> 100%.
+    one = municipio_report_stats(idx, {"doc-a"}, load_geo_names(), reviewed_docs={"doc-a"})
+    o01 = next(m for m in one["municipios"] if m["dep"] == "01" and m["muni"] == "001")
+    assert o01["reviewed"] == 1 and o01["pct_reviewed"] == 100.0
 
 
 def test_api_reportes_map_national_and_drilldown(tmp_path: Path) -> None:
@@ -884,6 +899,7 @@ def test_api_reportes_map_national_and_drilldown(tmp_path: Path) -> None:
 
     cs = CommunityStore(community_db)
     cs.record_flag(field_key_of("doc-x", 1, 1, None), "v1")
+    cs.record_appeal(field_key_of("doc-x", 1, 1, None), "v2")  # also reviewed via "se ve bien"
     cs.close()
 
     async def run() -> None:
@@ -893,10 +909,13 @@ def test_api_reportes_map_national_and_drilldown(tmp_path: Path) -> None:
             nat = (await client.get("/api/reportes/map")).json()
             assert nat["view"] == "departments"
             assert any(d["dep"] == "11" for d in nat["departments"])
+            assert nat["summary"]["reviewed_mesas"] == 1
             drill = (await client.get("/api/reportes/map?department=11")).json()
             assert drill["view"] == "municipios"
             assert drill["department"] == "11"
             assert drill["municipios"][0]["reported"] == 1
+            assert drill["municipios"][0]["reviewed"] == 1
+            assert drill["municipios"][0]["pct_reviewed"] == 100.0
             geo = await client.get("/geo/colombia_departamentos.geojson")
             assert geo.status_code == 200
             assert geo.headers["content-type"].startswith("application/")

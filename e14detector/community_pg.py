@@ -299,6 +299,23 @@ class PgCommunityStore:
         )
         return int(rows[0]["n"]) if rows else 0
 
+    def reviewed_actas(self) -> set[str]:
+        # Doc ids reviewed (flagged OR marked good) — the 'reviewed' denominator for the /reportes
+        # map. doc = field_key minus its last 3 ':'-parts, as in acta_popularity; UNION ALL folds
+        # flags + appeals so all-"se ve bien" mesas count too.
+        rows = self._rows(
+            """
+            SELECT DISTINCT array_to_string(
+                       (string_to_array(field_key, ':'))
+                           [1 : array_length(string_to_array(field_key, ':'), 1) - 3],
+                       ':') AS doc
+            FROM (SELECT field_key FROM flags
+                  UNION ALL
+                  SELECT field_key FROM appeals) u
+            """
+        )
+        return {r["doc"] for r in rows}
+
     def published_keys(self) -> list[str]:
         rows = self._rows("SELECT field_key FROM field_state WHERE published=1")
         return [r["field_key"] for r in rows]
