@@ -50,6 +50,18 @@
                 transform:rotate(45deg); opacity:0; transition:opacity .14s; }
   .appbar-tab.is-active .appbar-tab-dot { opacity:1; }
 
+  /* Runoff archive link: shown ONLY when this app serves a round other than r1, so a citizen on
+     the second-round page is always one click from the frozen first-round record. A thin full-width
+     bar above the progress strip; never rendered on the R1 app itself. */
+  .appbar-r1link { display:flex; align-items:center; gap:8px; padding:7px 0; text-decoration:none;
+                   font-size:12px; color:var(--ink-soft); border-bottom:1px solid var(--line); }
+  .appbar-r1link:hover { color:var(--ink); text-decoration:none; }
+  .appbar-r1link-tag { flex:0 0 auto; font-weight:800; font-size:10px; letter-spacing:.04em;
+                   text-transform:uppercase; color:#fff; background:var(--red); border-radius:999px; padding:2px 7px; }
+  .appbar-r1link-text { flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; }
+  .appbar-r1link-go { flex:0 0 auto; color:var(--link); font-weight:800; font-size:14px; line-height:1; transition:transform .14s; }
+  .appbar-r1link:hover .appbar-r1link-go { transform:translateX(2px); }
+
   @media (max-width:480px) {
     .appbar-reviews-more { display:none; }
     .appbar-tab { padding:11px 12px; font-size:13.5px; }
@@ -59,6 +71,13 @@
 </style>
 <div class="appbar-wrap">
   <div class="appbar-inner">
+    {% if election_round is defined and election_round and election_round != 'r1' and r1_archive_url %}
+    <a class="appbar-r1link" href="{{ r1_archive_url }}" aria-label="Ver los resultados de la primera vuelta">
+      <span class="appbar-r1link-tag">2&ordf; vuelta</span>
+      <span class="appbar-r1link-text">Ver resultados de la primera vuelta</span>
+      <span class="appbar-r1link-go" aria-hidden="true">&rsaquo;</span>
+    </a>
+    {% endif %}
     {% if progress or total_reviews %}
     {% set strip_link = active != 'transparencia' %}
     <{{ 'a' if strip_link else 'div' }} class="appbar-progress {% if progress and progress.complete %}done{% endif %}"{% if strip_link %} href="/transparencia" aria-label="Ver c&oacute;mo cuadran los conteos de actas"{% endif %} aria-live="polite">

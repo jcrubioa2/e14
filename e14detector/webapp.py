@@ -857,6 +857,11 @@ def create_app(
     # names resolved at render time (see enrich_doc_names) instead of duplicating them per row.
     geo = load_geo_names()
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+    # Round-aware appbar (Phase 2): exposed once as Jinja globals so every page's shared appbar can
+    # show the "primera vuelta" archive button when this process serves the runoff — no per-route
+    # context churn. On the R1 app r1_archive_url is empty, so the button never renders (byte-identical).
+    templates.env.globals["election_round"] = config.ELECTION_ROUND
+    templates.env.globals["r1_archive_url"] = config.R1_ARCHIVE_URL
     poll_cfg = poll or PollConfig.from_config()
     community = make_store(community_db or (output_dir / "community.sqlite"))
     # Durable vote path: when SQS is configured, votes are enqueued (worker drains to

@@ -67,6 +67,13 @@ CDN_BASE_URL = os.environ.get("E14_CDN_BASE_URL", "").rstrip("/")
 # (avoids stacking ~730MB×2 of SQLite in RAM). See e14detector/dbsync.py round-key helpers.
 ELECTION_ROUND = os.environ.get("E14_ELECTION_ROUND", "r1").strip().lower() or "r1"
 
+# Public URL of the frozen first-round (R1) archive app. When this process serves a round OTHER
+# than r1 (i.e. the runoff), the appbar shows a persistent "Ver resultados de la primera vuelta"
+# button linking here (see _appbar.html). Empty on the R1 app itself, so the button never renders
+# there and R1 output stays byte-identical. Set on the R2 app at cutover, e.g.
+# https://primera-vuelta.veeduria-ciudadana-elecciones-colombia-2026.com
+R1_ARCHIVE_URL = os.environ.get("E14_R1_ARCHIVE_URL", "").rstrip("/")
+
 DEFAULT_DPI = 300
 DEFAULT_WORKERS = 4
 DEFAULT_VLM_MODE = "off"
