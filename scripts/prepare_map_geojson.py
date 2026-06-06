@@ -109,8 +109,20 @@ def main() -> int:
     dpto_raw = _fetch(SOURCES["dpto"])
     mpio_out = GEO_DIR / "colombia_municipios.geojson"
     dpto_out = GEO_DIR / "colombia_departamentos.geojson"
-    write_geojson(mpio_out, build_municipios(mpio_raw))
-    write_geojson(dpto_out, build_departamentos(dpto_raw))
+    mpio_data = build_municipios(mpio_raw)
+    dpto_data = build_departamentos(dpto_raw)
+
+    # The source codes above are DANE; the app joins the map on Registraduría DIVIPOL codes.
+    # Relabel before writing so a fresh download never reintroduces the code-system mismatch.
+    from relabel_geojson_divipol import Crosswalk, relabel_departamentos, relabel_municipios
+    xw = Crosswalk()
+    dm, dmiss = relabel_departamentos(dpto_data, xw)
+    mm, mmiss = relabel_municipios(mpio_data, xw)
+    print(f"relabeled to DIVIPOL — departamentos {dm}/{dm + len(dmiss)}, "
+          f"municipios {mm}/{mm + len(mmiss)} ({len(mmiss)} gray)")
+
+    write_geojson(mpio_out, mpio_data)
+    write_geojson(dpto_out, dpto_data)
     return 0
 
 
