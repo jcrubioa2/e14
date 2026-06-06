@@ -12,7 +12,8 @@
      Kept above the tabs so it informs without being protagonist. Doubles as the doorway to
      /transparencia (the page that explains this very number), so the whole strip is a link
      except on /transparencia itself, where it renders as a plain block (no self-link). */
-  .appbar-progress { display:block; padding:9px 0 8px; color:inherit; text-decoration:none; }
+  .appbar-progress-section { padding:9px 0 8px; }
+  .appbar-progress { display:block; padding:0; color:inherit; text-decoration:none; }
   a.appbar-progress { cursor:pointer; }
   a.appbar-progress:hover { text-decoration:none; }
   a.appbar-progress:hover .appbar-progress-label { color:var(--ink); }
@@ -35,6 +36,23 @@
   .appbar-progress-bar > span { display:block; height:100%; min-width:4px; border-radius:999px;
                          background:linear-gradient(90deg, var(--red), var(--red-deep)); transition:width .6s cubic-bezier(.2,.7,.2,1); }
   .appbar-progress.done .appbar-progress-bar > span { background:var(--green); }
+
+  /* POC: mesas revisadas por profundidad (cuántas personas revisaron cada acta). Mock data only. */
+  .appbar-depth-poc { margin-top:10px; padding-top:8px; border-top:1px dashed var(--line); }
+  .appbar-depth-poc-head { font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+                           color:var(--ink-faint); margin-bottom:6px; }
+  .appbar-depth-poc-head em { font-style:normal; color:var(--ink-soft); font-weight:600; text-transform:none;
+                              letter-spacing:0; }
+  .appbar-depth-row { display:grid; grid-template-columns:26px 1fr auto; gap:8px; align-items:center;
+                      min-height:18px; margin-bottom:3px; }
+  .appbar-depth-row:last-child { margin-bottom:0; }
+  .appbar-depth-label { font-size:11px; font-weight:800; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+  .appbar-depth-bar { height:7px; border-radius:999px; background:var(--paper-2); overflow:hidden;
+                      box-shadow:inset 0 0 0 1px rgba(28,26,21,.04); }
+  .appbar-depth-bar > i { display:block; height:100%; min-width:2px; border-radius:999px;
+                          background:linear-gradient(90deg, #0E8C7E, var(--link)); }
+  .appbar-depth-num { font-size:10.5px; font-weight:700; color:var(--ink-faint); font-variant-numeric:tabular-nums;
+                      white-space:nowrap; }
 
   /* Tab index: three equal links, active = ink text + red underline. Scrolls horizontally on
      the narrowest phones (longest label is "Reportes globales") instead of wrapping. */
@@ -64,6 +82,9 @@
 
   @media (max-width:480px) {
     .appbar-reviews-more { display:none; }
+    .appbar-depth-poc-head em { display:none; }
+    .appbar-depth-num { display:none; }
+    .appbar-depth-row { grid-template-columns:24px 1fr; gap:6px; }
     .appbar-tab { padding:11px 12px; font-size:13.5px; }
     .appbar-tab .appbar-tab-dot { display:none; }
   }
@@ -80,21 +101,45 @@
     {% endif %}
     {% if progress or total_reviews %}
     {% set strip_link = active != 'transparencia' %}
-    <{{ 'a' if strip_link else 'div' }} class="appbar-progress {% if progress and progress.complete %}done{% endif %}"{% if strip_link %} href="/transparencia" aria-label="Ver c&oacute;mo cuadran los conteos de actas"{% endif %} aria-live="polite">
-      <div class="appbar-progress-top">
-        <span class="appbar-progress-lead">
-          <span class="appbar-progress-label">{% if progress %}{% if progress.complete %}Todas las actas est&aacute;n disponibles{% else %}Cargando las actas a nivel nacional &middot; {{ progress.pct }}%{% endif %}{% endif %}</span>
-          {% if strip_link %}<span class="appbar-progress-go" aria-hidden="true">&rsaquo;</span>{% endif %}
-        </span>
-        {% if total_reviews %}
-        <span class="appbar-reviews" title="Mesas revisadas por la comunidad en total">
-          <span class="appbar-reviews-tick" aria-hidden="true"></span>
-          <b data-count="{{ total_reviews }}">{{ "{:,}".format(total_reviews).replace(",", ".") }}</b> revisiones<span class="appbar-reviews-more"> de la comunidad</span>
-        </span>
-        {% endif %}
+    <div class="appbar-progress-section" aria-live="polite">
+      <{{ 'a' if strip_link else 'div' }} class="appbar-progress {% if progress and progress.complete %}done{% endif %}"{% if strip_link %} href="/transparencia" aria-label="Ver c&oacute;mo cuadran los conteos de actas"{% endif %}>
+        <div class="appbar-progress-top">
+          <span class="appbar-progress-lead">
+            <span class="appbar-progress-label">{% if progress %}{% if progress.complete %}Todas las actas est&aacute;n disponibles{% else %}Cargando las actas a nivel nacional &middot; {{ progress.pct }}%{% endif %}{% endif %}</span>
+            {% if strip_link %}<span class="appbar-progress-go" aria-hidden="true">&rsaquo;</span>{% endif %}
+          </span>
+          {% if total_reviews %}
+          <span class="appbar-reviews" title="Mesas revisadas por la comunidad en total">
+            <span class="appbar-reviews-tick" aria-hidden="true"></span>
+            <b data-count="{{ total_reviews }}">{{ "{:,}".format(total_reviews).replace(",", ".") }}</b> revisiones<span class="appbar-reviews-more"> de la comunidad</span>
+          </span>
+          {% endif %}
+        </div>
+        {% if progress %}<div class="appbar-progress-bar"><span style="width: {{ progress.pct }}%"></span></div>{% endif %}
+      </{{ 'a' if strip_link else 'div' }}>
+      {# Mock review-depth histogram (POC) — replace with live buckets when wired to community store. #}
+      {% set depth_counts = [
+        ('1\u00d7', 4200),
+        ('2\u00d7', 1850),
+        ('3\u00d7', 620),
+        ('4\u00d7', 180),
+        ('5+', 95),
+      ] %}
+      {% set ns = namespace(max=1) %}
+      {% for _lbl, _cnt in depth_counts %}
+        {% if _cnt > ns.max %}{% set ns.max = _cnt %}{% endif %}
+      {% endfor %}
+      <div class="appbar-depth-poc" aria-label="Vista previa: mesas revisadas por profundidad">
+        <div class="appbar-depth-poc-head">Mesas por veces revisadas <em>&middot; vista previa (datos de ejemplo)</em></div>
+        {% for label, count in depth_counts %}
+        <div class="appbar-depth-row">
+          <span class="appbar-depth-label">{{ label }}</span>
+          <span class="appbar-depth-bar" aria-hidden="true"><i style="width:{{ (100.0 * count / ns.max)|round(1) }}%"></i></span>
+          <span class="appbar-depth-num">{{ "{:,}".format(count).replace(",", ".") }}</span>
+        </div>
+        {% endfor %}
       </div>
-      {% if progress %}<div class="appbar-progress-bar"><span style="width: {{ progress.pct }}%"></span></div>{% endif %}
-    </{{ 'a' if strip_link else 'div' }}>
+    </div>
     {% endif %}
     <nav class="appbar-tabs" aria-label="Secciones">
       <a class="appbar-tab {% if active == 'revisar' %}is-active{% endif %}" href="/votar"{% if active == 'revisar' %} aria-current="page"{% endif %}><span class="appbar-tab-dot" aria-hidden="true"></span>Revisar</a>
