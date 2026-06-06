@@ -477,18 +477,29 @@ def municipio_report_stats(
     doc_index: dict[str, tuple[str, str]],
     reported_docs: set[str],
     geo: GeoNames,
+    reviewed_docs: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Per-municipio and per-department mesa counts with crowd-reported mesas."""
+    """Per-municipio and per-department mesa counts with crowd-reported mesas.
+
+    Each row carries two denominators: ``pct`` = reported/total (every browsable mesa) and
+    ``pct_reviewed`` = reported/reviewed (only mesas someone has voted on). The /reportes map
+    toggles between them client-side. ``reviewed_docs`` defaults to empty (callers that don't
+    pass it get reviewed counts of 0)."""
+    reviewed_docs = reviewed_docs or set()
     totals: collections.Counter[tuple[str, str]] = collections.Counter()
     reported: collections.Counter[tuple[str, str]] = collections.Counter()
+    reviewed: collections.Counter[tuple[str, str]] = collections.Counter()
     for doc_id, key in doc_index.items():
         totals[key] += 1
         if doc_id in reported_docs:
             reported[key] += 1
+        if doc_id in reviewed_docs:
+            reviewed[key] += 1
 
     municipios: list[dict[str, Any]] = []
     for (dep, muni), total in totals.items():
         rep = reported.get((dep, muni), 0)
+        rev = reviewed.get((dep, muni), 0)
         municipios.append({
             "dep": dep,
             "muni": muni,
@@ -496,26 +507,33 @@ def municipio_report_stats(
             "dep_name": geo.dept(dep) or dep,
             "total": total,
             "reported": rep,
+            "reviewed": rev,
             "pct": round(100.0 * rep / total, 1) if total else 0.0,
+            "pct_reviewed": round(100.0 * rep / rev, 1) if rev else 0.0,
         })
     municipios.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"], r["muni"]))
 
     dept_totals: collections.Counter[str] = collections.Counter()
     dept_reported: collections.Counter[str] = collections.Counter()
+    dept_reviewed: collections.Counter[str] = collections.Counter()
     for (dep, _muni), total in totals.items():
         dept_totals[dep] += total
         dept_reported[dep] += reported.get((dep, _muni), 0)
+        dept_reviewed[dep] += reviewed.get((dep, _muni), 0)
 
     departments: list[dict[str, Any]] = []
     for dep in sorted(dept_totals.keys()):
         total = dept_totals[dep]
         rep = dept_reported[dep]
+        rev = dept_reviewed[dep]
         departments.append({
             "dep": dep,
             "name": geo.dept(dep) or dep,
             "total": total,
             "reported": rep,
+            "reviewed": rev,
             "pct": round(100.0 * rep / total, 1) if total else 0.0,
+            "pct_reviewed": round(100.0 * rep / rev, 1) if rev else 0.0,
         })
     departments.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"]))
 
@@ -525,6 +543,7 @@ def municipio_report_stats(
         "summary": {
             "total_mesas": sum(dept_totals.values()),
             "reported_mesas": len(reported_docs & doc_index.keys()),
+            "reviewed_mesas": len(reviewed_docs & doc_index.keys()),
         },
     }
 
@@ -1634,11 +1653,12 @@ def create_app(
     def _map_stats_all() -> dict[str, Any]:
         pop = _agg_cached("popularity", community.acta_popularity)
         reported = set(pop.keys())
+        reviewed = _agg_cached("review_popularity", community.reviewed_actas)
 
         def build() -> dict[str, Any]:
             with conn() as db:
                 idx = doc_muni_index(db)
-            return municipio_report_stats(idx, reported, geo)
+            return municipio_report_stats(idx, reported, geo, reviewed_docs=reviewed)
 
         return _agg_cached("map_stats_all", build)
 

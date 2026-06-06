@@ -95,11 +95,19 @@
     .stats-note { color:var(--ink-faint); font-size:12.5px; margin:0 0 12px; line-height:1.5; }
 
     .map-block { margin-top:0; }
+    /* Segmented switch on the controls row (right edge, just above the map): percentage base. */
+    .map-base-switch { margin-left:auto; display:inline-flex; align-items:center; gap:2px; padding:2px;
+                       border:1px solid var(--line); border-radius:99px; background:var(--paper-2); }
+    .map-base-switch button { border:0; background:transparent; color:var(--ink-soft); font:inherit;
+                       font-weight:700; font-size:12.5px; padding:5px 14px; border-radius:99px; cursor:pointer;
+                       transition:background .15s, color .15s, box-shadow .15s; }
+    .map-base-switch button:hover { color:var(--ink); }
+    .map-base-switch button.is-on { background:var(--card); color:var(--ink); box-shadow:var(--shadow); }
     .map-controls { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:flex-end; margin-bottom:12px; }
     .map-controls label { display:flex; flex-direction:column; gap:5px; font-size:12px; font-weight:700; color:var(--ink-soft); }
     .map-controls select { min-width:220px; padding:9px 11px; border:1px solid var(--line); border-radius:10px; font:inherit; background:var(--card); }
-    .map-controls button { padding:9px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; font-weight:700; cursor:pointer; }
-    .map-controls button:hover { border-color:var(--red-line); }
+    .map-controls > button { padding:9px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; font-weight:700; cursor:pointer; }
+    .map-controls > button:hover { border-color:var(--red-line); }
     #reportes-map { height:min(420px, 55vh); border:1px solid var(--line); border-radius:14px; background:var(--paper-2); box-shadow:var(--shadow); }
     .map-legend { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--ink-soft); }
     .map-legend-bar { height:8px; flex:1; min-width:140px; max-width:280px; border-radius:99px;
@@ -164,7 +172,7 @@
 
       <div class="map-block" aria-labelledby="map-h">
         <div class="sec-head"><h3 id="map-h" style="margin:0;font-family:'Fraunces',serif;font-size:19px">Mapa por municipio</h3></div>
-        <p class="stats-note">Mesas con al menos un reporte de la comunidad (&ldquo;se ve extra&ntilde;a&rdquo;), sobre el total de mesas de la veedur&iacute;a en ese municipio. No incluye veredictos del modelo.</p>
+        <p class="stats-note">Mesas con al menos un reporte de la comunidad (&ldquo;se ve extra&ntilde;a&rdquo;), sobre el total de mesas de la veedur&iacute;a (o sobre las mesas revisadas) en ese municipio. No incluye veredictos del modelo.</p>
         <div class="map-controls">
           <label>Vista
             <select id="map-dept" aria-label="Departamento">
@@ -172,10 +180,14 @@
             </select>
           </label>
           <button type="button" id="map-reset">Ver todo el pa&iacute;s</button>
+          <div class="map-base-switch" role="group" aria-label="Base del porcentaje">
+            <button type="button" id="map-base-total" class="is-on" aria-pressed="true">Total</button>
+            <button type="button" id="map-base-reviewed" aria-pressed="false">Revisadas</button>
+          </div>
         </div>
         <div id="reportes-map" role="img" aria-label="Mapa de reportes por municipio"></div>
         <div class="map-legend" aria-hidden="true">
-          <span>Menos</span><span class="map-legend-bar"></span><span>M&aacute;s mesas reportadas</span>
+          <span>Menos</span><span class="map-legend-bar"></span><span id="map-legend-max">M&aacute;s mesas reportadas</span>
         </div>
         <p class="map-foot">Los municipios sin mesas en la veedur&iacute;a aparecen en gris. Pasa el cursor para ver cifras; haz clic para buscar actas en ese lugar.</p>
       </div>
@@ -189,7 +201,10 @@
   (function () {
     const mapEl = document.getElementById('reportes-map');
     const deptSel = document.getElementById('map-dept');
+    const baseTotalBtn = document.getElementById('map-base-total');
+    const baseReviewedBtn = document.getElementById('map-base-reviewed');
     const resetBtn = document.getElementById('map-reset');
+    const legendMaxEl = document.getElementById('map-legend-max');
     if (!mapEl || !window.L) return;
 
     const map = L.map(mapEl, { scrollWheelZoom: false, attributionControl: true, zoomSnap: 0.25 });
@@ -199,6 +214,14 @@
     let layer = null;
     let statsRows = [];
     let view = 'departments';
+    let lastGeo = null;   // last loaded GeoJSON, so the Base toggle re-renders without refetching
+
+    // The base switch toggles the percentage denominator: reported/total (every browsable mesa)
+    // vs reported/reviewed (only mesas someone has voted on). Both come pre-computed in each row.
+    let pctMode = 'total';
+    const reviewedMode = () => pctMode === 'reviewed';
+    const modeBase = (row) => reviewedMode() ? row.reviewed : row.total;
+    const modePct = (row) => reviewedMode() ? row.pct_reviewed : row.pct;
 
     // GeoJSON place names are static/trusted DANE data, but escape before injecting into tooltip
     // HTML so a stray '<' or '&' in a name can never break markup (defensive, not load-bearing).
@@ -234,16 +257,20 @@
 
     function styleFeature(props) {
       const row = lookup(props);
-      if (!row || !row.total) return { fillColor: '#e8e4da', fillOpacity: 0.75, color: '#c8c2b4', weight: 1 };
-      return { fillColor: pctColor(row.pct), fillOpacity: 0.82, color: '#8a8478', weight: 1 };
+      if (!row || !modeBase(row)) return { fillColor: '#e8e4da', fillOpacity: 0.75, color: '#c8c2b4', weight: 1 };
+      return { fillColor: pctColor(modePct(row)), fillOpacity: 0.82, color: '#8a8478', weight: 1 };
     }
 
     function bindLayer(feature, lyr) {
       const row = lookup(feature.properties);
       const name = feature.properties.name || feature.properties.dep_name || '';
       let html;
-      if (!row || !row.total) {
-        html = `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`;
+      if (!row || !modeBase(row)) {
+        html = reviewedMode()
+          ? `<b>${esc(name)}</b><br>Sin mesas revisadas a&uacute;n`
+          : `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`;
+      } else if (reviewedMode()) {
+        html = `<b>${esc(name)}</b><br>${row.reported} de ${row.reviewed} mesas revisadas reportadas (${row.pct_reviewed}%)`;
       } else {
         html = `<b>${esc(name)}</b><br>${row.reported} de ${row.total} mesas reportadas (${row.pct}%)`;
       }
@@ -291,7 +318,25 @@
         fetchJson(geoUrl)
       ]);
       statsRows = view === 'departments' ? stats.departments : stats.municipios;
+      lastGeo = geo;
       renderGeo(geo);
+    }
+
+    function applyMode() {
+      if (legendMaxEl) {
+        legendMaxEl.innerHTML = reviewedMode() ? 'M&aacute;s mesas revisadas reportadas' : 'M&aacute;s mesas reportadas';
+      }
+      if (lastGeo) renderGeo(lastGeo);   // re-color from cached GeoJSON — no network request
+    }
+
+    function setMode(mode) {
+      pctMode = mode === 'reviewed' ? 'reviewed' : 'total';
+      const on = reviewedMode();
+      baseReviewedBtn.classList.toggle('is-on', on);
+      baseReviewedBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      baseTotalBtn.classList.toggle('is-on', !on);
+      baseTotalBtn.setAttribute('aria-pressed', !on ? 'true' : 'false');
+      applyMode();
     }
 
     function fillDeptOptions(departments) {
@@ -312,6 +357,8 @@
     }).catch(() => { mapEl.textContent = 'No se pudo cargar el mapa.'; });
 
     deptSel.addEventListener('change', () => loadMap().catch(console.error));
+    baseTotalBtn.addEventListener('click', () => setMode('total'));
+    baseReviewedBtn.addEventListener('click', () => setMode('reviewed'));
     resetBtn.addEventListener('click', () => { deptSel.value = ''; loadMap().catch(console.error); });
     setTimeout(() => map.invalidateSize(), 200);
   })();

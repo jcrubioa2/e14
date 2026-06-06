@@ -41,6 +41,17 @@ def test_good_and_strange_tallies_are_independent(tmp_path: Path) -> None:
     store.close()
 
 
+def test_reviewed_actas_unions_flags_and_appeals(tmp_path: Path) -> None:
+    """reviewed_actas() = mesas anyone voted on (flag OR 'se ve bien'), deduped by doc id."""
+    store = CommunityStore(tmp_path / "c.sqlite")
+    store.record_flag(field_key_of("doc1", 1, 1, None), "a")    # flagged
+    store.record_appeal(field_key_of("doc2", 1, 1, None), "b")  # only "se ve bien"
+    store.record_flag(field_key_of("doc3", 1, 1, None), "a")    # same mesa, both directions
+    store.record_appeal(field_key_of("doc3", 1, 2, None), "b")
+    assert store.reviewed_actas() == {"doc1", "doc2", "doc3"}
+    store.close()
+
+
 def test_counts_among_batches_both_directions(tmp_path: Path) -> None:
     store = CommunityStore(tmp_path / "c.sqlite")
     store.record_flag("k1", "a"); store.record_flag("k1", "b")  # 2 strange
