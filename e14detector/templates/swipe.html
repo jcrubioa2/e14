@@ -577,26 +577,26 @@
       document.body.style.paddingBottom = (barH + footGap) + 'px';
       const width = board.getBoundingClientRect().width || board.clientWidth || window.innerWidth;
 
+      // Choose columns by how large the (wide) ballot crop actually RENDERS, instead of by the most
+      // "square" cell. The old objective maximized the smallest cell side, so on a phone 4 narrow-tall
+      // tiles edged out 3 wide-short ones. Here, for each candidate column count, the crop lays out
+      // object-fit:contain inside the cell, so its rendered width = min(cellWidth, cellHeight * CROP_AR);
+      // we keep the count that maximizes that. Because the crops are wide (handwritten number rows),
+      // this naturally prefers fewer, wider, shorter tiles — leaning to 3-up on phones — yet stays fully
+      // adaptive (it still responds to width AND height, so it picks 2-up on a tiny screen or 4-up when
+      // the geometry genuinely favors it). No hard-wired width breakpoints. CROP_AR is the only knob:
+      // higher => leans wider/shorter, lower => squarer. Ties go to fewer columns (wider).
+      const CROP_AR = 2.0;
       let best = null;
-      for (let cols = 2; cols <= 4; cols++) {
-        const rows = Math.ceil(n / cols);
-        const rowBudget = (avail - gap * Math.max(0, rows - 1)) / rows;
-        const colBudget = (width - gap * Math.max(0, cols - 1)) / cols;
-        // Bias toward wider, shorter tiles: give the height term extra credit so the chooser tolerates
-        // shorter rows in exchange for fewer, wider columns — e.g. 3-up instead of 4-up on a phone —
-        // while genuinely wide screens still land on 4-up. Crops are object-fit:contain, so wider/
-        // shorter cells only change letterboxing, never cut the image. Nudge widthBias to taste.
-        const widthBias = 1.2;
-        const score = Math.min((rowBudget - overhead) * widthBias, colBudget - tilePad * 2);
-        if (score < 38) continue;
-        if (!best || score > best.score) {
-          best = { cols, rows, score };
-        }
+      for (let c = 2; c <= Math.min(4, n); c++) {
+        const r = Math.ceil(n / c);
+        const cellW = (width - gap * (c - 1)) / c - tilePad * 2;
+        const cellH = (avail - gap * (r - 1)) / r - overhead;   // height left for the crop after caption+pad
+        if (cellW <= 0 || cellH <= 0) continue;
+        const renderedW = Math.min(cellW, cellH * CROP_AR);     // how wide the contained crop shows
+        if (!best || renderedW > best.renderedW + 1) best = { cols: c, rows: r, renderedW };
       }
-      if (!best) {
-        const cols = n <= 6 ? 2 : 3;
-        best = { cols, rows: Math.ceil(n / cols), score: 38 };
-      }
+      if (!best) { const c = Math.min(n, 3); best = { cols: c, rows: Math.ceil(n / c), renderedW: 0 }; }
       const cols = best.cols;
       const rows = best.rows;
       grid.style.width = (width > 0 ? width + 'px' : '100%');
