@@ -178,7 +178,7 @@
         </div>
         {% if hot_actas %}
         {% set hot_max = (hot_actas|map(attribute='reporters')|max) or 1 %}
-        <p class="rblock-sub"><b>Top {{ hot_actas|length }}</b> &middot; ordenadas por cu&aacute;ntas personas las marcaron como extra&ntilde;as &middot; desliza para ver m&aacute;s</p>
+        <p class="rblock-sub">Las <b>{{ hot_actas|length }}</b> mesas donde m&aacute;s gente marc&oacute; algo extra&ntilde;o</p>
         <div class="hot-reel" id="hot-reel" tabindex="0" aria-label="Actas m&aacute;s reportadas, desliza para ver m&aacute;s">
           {% for a in hot_actas %}
           <a class="hot-row{{ ' top' if loop.first else '' }}" style="--flag:{{ '%.3f'|format(a.flag_level) }}; --w:{{ '%.3f'|format(a.reporters / hot_max) }}; animation-delay:{{ loop.index0 * 40 }}ms" href="/acta/{{ a.document_id }}">
