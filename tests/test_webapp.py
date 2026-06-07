@@ -1094,7 +1094,7 @@ def test_reportes_includes_map_assets(tmp_path: Path) -> None:
             html = (await client.get("/reportes")).text
             assert "reportes-map" in html
             assert "leaflet" in html
-            assert "Mapa por municipio" in html
+            assert 'data-panel="panel-map"' in html  # the map viz tab
 
     asyncio.run(run())
 
@@ -1132,10 +1132,8 @@ def test_reportes_billboard_caps_at_top_n(tmp_path: Path) -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             html = (await client.get("/reportes")).text
-            # class="board-item (no closing quote) matches both plain and podium "board-item top"
-            # tiles, and avoids the CSS rules (which use .board-item).
-            assert html.count('class="board-item') == REPORTES_TOP_N    # capped, not all n_docs
-            assert html.count('class="board-rank"') == REPORTES_TOP_N   # one rank badge per tile
+            assert html.count('class="hot-num"') == REPORTES_TOP_N      # one rank numeral per row, capped
+            assert html.count('class="hot-bar"') == REPORTES_TOP_N      # one intensity bar per row
             assert "/buscar?filter=reportadas" in html                  # "Ver todas" link to full list
             assert "?page=" not in html                                 # no pager anymore
 

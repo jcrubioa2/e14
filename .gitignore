@@ -8,7 +8,9 @@ __pycache__/
 .env
 logs/
 files/
-.claude/
+.claude/*
+!.claude/skills/
+
 
 # acta integrity-monitor artifacts (already under data/, listed for clarity/defense)
 data/snapshots/
