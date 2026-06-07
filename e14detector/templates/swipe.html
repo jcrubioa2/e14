@@ -582,7 +582,12 @@
         const rows = Math.ceil(n / cols);
         const rowBudget = (avail - gap * Math.max(0, rows - 1)) / rows;
         const colBudget = (width - gap * Math.max(0, cols - 1)) / cols;
-        const score = Math.min(rowBudget - overhead, colBudget - tilePad * 2);
+        // Bias toward wider, shorter tiles: give the height term extra credit so the chooser tolerates
+        // shorter rows in exchange for fewer, wider columns — e.g. 3-up instead of 4-up on a phone —
+        // while genuinely wide screens still land on 4-up. Crops are object-fit:contain, so wider/
+        // shorter cells only change letterboxing, never cut the image. Nudge widthBias to taste.
+        const widthBias = 1.2;
+        const score = Math.min((rowBudget - overhead) * widthBias, colBudget - tilePad * 2);
         if (score < 38) continue;
         if (!best || score > best.score) {
           best = { cols, rows, score };
