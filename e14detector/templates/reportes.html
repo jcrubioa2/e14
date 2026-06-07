@@ -172,7 +172,7 @@
 
       <div class="map-block" aria-labelledby="map-h">
         <div class="sec-head"><h3 id="map-h" style="margin:0;font-family:'Fraunces',serif;font-size:19px">Mapa por municipio</h3></div>
-        <p class="stats-note">Mesas con al menos un reporte de la comunidad (&ldquo;se ve extra&ntilde;a&rdquo;), sobre el total de mesas de la veedur&iacute;a (o sobre las mesas revisadas) en ese municipio. No incluye veredictos del modelo.</p>
+        <p class="stats-note">Mesas con al menos un reporte de la comunidad (&ldquo;se ve extra&ntilde;a&rdquo;) entre las mesas revisadas. El color est&aacute; <b>ajustado por tama&ntilde;o de muestra</b>: un par de reportes en un municipio peque&ntilde;o no se pinta como una ola, y los lugares con pocas mesas revisadas se ven m&aacute;s tenues. Cambia a &ldquo;Cobertura&rdquo; para ver cu&aacute;nto se ha revisado del total. No incluye veredictos del modelo.</p>
         <div class="map-controls">
           <label>Vista
             <select id="map-dept" aria-label="Departamento">
@@ -180,9 +180,9 @@
             </select>
           </label>
           <button type="button" id="map-reset">Ver todo el pa&iacute;s</button>
-          <div class="map-base-switch" role="group" aria-label="Base del porcentaje">
-            <button type="button" id="map-base-total" class="is-on" aria-pressed="true">Total</button>
-            <button type="button" id="map-base-reviewed" aria-pressed="false">Revisadas</button>
+          <div class="map-base-switch" role="group" aria-label="Qu&eacute; mostrar en el mapa">
+            <button type="button" id="map-base-signal" class="is-on" aria-pressed="true">Reportadas (ajustado)</button>
+            <button type="button" id="map-base-coverage" aria-pressed="false">Cobertura</button>
           </div>
         </div>
         <div id="reportes-map" role="img" aria-label="Mapa de reportes por municipio"></div>
@@ -201,8 +201,8 @@
   (function () {
     const mapEl = document.getElementById('reportes-map');
     const deptSel = document.getElementById('map-dept');
-    const baseTotalBtn = document.getElementById('map-base-total');
-    const baseReviewedBtn = document.getElementById('map-base-reviewed');
+    const baseSignalBtn = document.getElementById('map-base-signal');
+    const baseCoverageBtn = document.getElementById('map-base-coverage');
     const resetBtn = document.getElementById('map-reset');
     const legendMaxEl = document.getElementById('map-legend-max');
     if (!mapEl || !window.L) return;
@@ -216,12 +216,16 @@
     let view = 'departments';
     let lastGeo = null;   // last loaded GeoJSON, so the Base toggle re-renders without refetching
 
-    // The base switch toggles the percentage denominator: reported/total (every browsable mesa)
-    // vs reported/reviewed (only mesas someone has voted on). Both come pre-computed in each row.
-    let pctMode = 'total';
-    const reviewedMode = () => pctMode === 'reviewed';
-    const modeBase = (row) => reviewedMode() ? row.reviewed : row.total;
-    const modePct = (row) => reviewedMode() ? row.pct_reviewed : row.pct;
+    // The base switch toggles what the map shows:
+    //  - 'signal':   reported/reviewed adjusted by sample size (row.score), opacity = confidence
+    //                (row.conf). A zone needs reviewed > 0 to count as signal.
+    //  - 'coverage': reviewed/total (row.coverage) — how much of the zone has been reviewed at all.
+    // All values come pre-computed per row from /api/reportes/map.
+    let pctMode = 'signal';
+    const coverageMode = () => pctMode === 'coverage';
+    // Denominator that decides whether a zone has data at all (else it renders grey "no data").
+    const modeBase = (row) => coverageMode() ? row.total : row.reviewed;
+    const modePct = (row) => coverageMode() ? row.coverage : row.score;
 
     // GeoJSON place names are static/trusted DANE data, but escape before injecting into tooltip
     // HTML so a stray '<' or '&' in a name can never break markup (defensive, not load-bearing).
@@ -239,11 +243,22 @@
       return r.json();
     }
 
+    // Signal ramp: light paper -> red, by adjusted report rate.
     function pctColor(pct) {
       const t = Math.max(0, Math.min(100, pct)) / 100;
       const r = Math.round(232 + (217 - 232) * t);
       const g = Math.round(228 + (58 - 228) * t);
       const b = Math.round(218 + (40 - 218) * t);
+      return `rgb(${r},${g},${b})`;
+    }
+
+    // Coverage ramp: light paper -> teal (--link), by reviewed/total. Distinct hue so the two
+    // modes never read as the same scale.
+    function covColor(pct) {
+      const t = Math.max(0, Math.min(100, pct)) / 100;
+      const r = Math.round(232 + (14 - 232) * t);
+      const g = Math.round(228 + (110 - 228) * t);
+      const b = Math.round(218 + (100 - 218) * t);
       return `rgb(${r},${g},${b})`;
     }
 
@@ -258,7 +273,13 @@
     function styleFeature(props) {
       const row = lookup(props);
       if (!row || !modeBase(row)) return { fillColor: '#e8e4da', fillOpacity: 0.75, color: '#c8c2b4', weight: 1 };
-      return { fillColor: pctColor(modePct(row)), fillOpacity: 0.82, color: '#8a8478', weight: 1 };
+      if (coverageMode()) {
+        return { fillColor: covColor(row.coverage), fillOpacity: 0.82, color: '#8a8478', weight: 1 };
+      }
+      // Signal: color = adjusted rate, opacity = confidence (more reviewed -> more solid). The
+      // 0.18 floor keeps a low-confidence zone faintly visible without reading as a wave.
+      const fillOpacity = 0.18 + 0.64 * Math.max(0, Math.min(1, row.conf || 0));
+      return { fillColor: pctColor(row.score), fillOpacity, color: '#8a8478', weight: 1 };
     }
 
     function bindLayer(feature, lyr) {
@@ -266,13 +287,14 @@
       const name = feature.properties.name || feature.properties.dep_name || '';
       let html;
       if (!row || !modeBase(row)) {
-        html = reviewedMode()
-          ? `<b>${esc(name)}</b><br>Sin mesas revisadas a&uacute;n`
-          : `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`;
-      } else if (reviewedMode()) {
-        html = `<b>${esc(name)}</b><br>${row.reported} de ${row.reviewed} mesas revisadas reportadas (${row.pct_reviewed}%)`;
+        html = coverageMode()
+          ? `<b>${esc(name)}</b><br>Sin mesas en la veedur&iacute;a`
+          : `<b>${esc(name)}</b><br>Sin mesas revisadas a&uacute;n`;
+      } else if (coverageMode()) {
+        html = `<b>${esc(name)}</b><br>${row.reviewed} de ${row.total} mesas revisadas (${row.coverage}%)`;
       } else {
-        html = `<b>${esc(name)}</b><br>${row.reported} de ${row.total} mesas reportadas (${row.pct}%)`;
+        html = `<b>${esc(name)}</b><br>${row.reported} de ${row.reviewed} revisadas marcadas como extra&ntilde;as (${row.pct_reviewed}%)`
+          + `<br><span style="color:#9A9488">color ajustado por tama&ntilde;o de muestra</span>`;
       }
       lyr.bindTooltip(html, { sticky: true });
       lyr.on('click', () => {
@@ -322,20 +344,27 @@
       renderGeo(geo);
     }
 
+    const legendBarEl = document.querySelector('.map-legend-bar');
     function applyMode() {
+      const cov = coverageMode();
       if (legendMaxEl) {
-        legendMaxEl.innerHTML = reviewedMode() ? 'M&aacute;s mesas revisadas reportadas' : 'M&aacute;s mesas reportadas';
+        legendMaxEl.innerHTML = cov ? 'M&aacute;s mesas revisadas' : 'M&aacute;s reportadas (ajustado)';
+      }
+      if (legendBarEl) {
+        legendBarEl.style.background = cov
+          ? 'linear-gradient(90deg, #e8e4da 0%, #8fc3bc 50%, #0E6E64 100%)'
+          : 'linear-gradient(90deg, #e8e4da 0%, #f0b5ab 35%, #d93a28 100%)';
       }
       if (lastGeo) renderGeo(lastGeo);   // re-color from cached GeoJSON — no network request
     }
 
     function setMode(mode) {
-      pctMode = mode === 'reviewed' ? 'reviewed' : 'total';
-      const on = reviewedMode();
-      baseReviewedBtn.classList.toggle('is-on', on);
-      baseReviewedBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-      baseTotalBtn.classList.toggle('is-on', !on);
-      baseTotalBtn.setAttribute('aria-pressed', !on ? 'true' : 'false');
+      pctMode = mode === 'coverage' ? 'coverage' : 'signal';
+      const cov = coverageMode();
+      baseCoverageBtn.classList.toggle('is-on', cov);
+      baseCoverageBtn.setAttribute('aria-pressed', cov ? 'true' : 'false');
+      baseSignalBtn.classList.toggle('is-on', !cov);
+      baseSignalBtn.setAttribute('aria-pressed', !cov ? 'true' : 'false');
       applyMode();
     }
 
@@ -357,8 +386,8 @@
     }).catch(() => { mapEl.textContent = 'No se pudo cargar el mapa.'; });
 
     deptSel.addEventListener('change', () => loadMap().catch(console.error));
-    baseTotalBtn.addEventListener('click', () => setMode('total'));
-    baseReviewedBtn.addEventListener('click', () => setMode('reviewed'));
+    baseSignalBtn.addEventListener('click', () => setMode('signal'));
+    baseCoverageBtn.addEventListener('click', () => setMode('coverage'));
     resetBtn.addEventListener('click', () => { deptSel.value = ''; loadMap().catch(console.error); });
     setTimeout(() => map.invalidateSize(), 200);
   })();
