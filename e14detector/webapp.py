@@ -381,6 +381,20 @@ def _connect(db_path: Path, same_thread: bool = True) -> sqlite3.Connection:
 
 _FLAG_K = 8.0
 
+# Prior strength for the /reportes map's empirical-Bayes adjusted report rate (see _eb_rate).
+# Like _FLAG_K, a fixed "pinch of the national average" that keeps tiny samples from screaming.
+_MAP_PRIOR_K = 25.0
+
+
+def _eb_rate(reported: int, reviewed: int, baseline: float, k: float = _MAP_PRIOR_K) -> float:
+    """Empirical-Bayes adjusted report rate (reported/reviewed) in 0..1, shrunk toward the national
+    ``baseline`` by a fixed-strength Beta prior worth ``k`` mesas. Same philosophy as ``_flag_level``:
+    a few reports in a tiny municipio shouldn't read as a wave. With ``reviewed`` small the result
+    sits near ``baseline``; as ``reviewed`` grows past ``k`` it converges to the raw rate. A zone with
+    ``reviewed == 0`` (so ``reported == 0`` too, since reported ⊆ reviewed) lands exactly on
+    ``baseline`` — the map renders it transparent via ``conf`` so it never shows as signal."""
+    return (reported + k * baseline) / (reviewed + k)
+
 
 def _flag_level(strange: int, good: int) -> float:
     """How red an "extraña" marker gets, 0..1. Scales with the NET margin (extrañas minus
@@ -607,22 +621,40 @@ def municipio_report_stats(
         if doc_id in reviewed_docs:
             reviewed[key] += 1
 
-    municipios: list[dict[str, Any]] = []
-    for (dep, muni), total in totals.items():
-        rep = reported.get((dep, muni), 0)
-        rev = reviewed.get((dep, muni), 0)
-        municipios.append({
+    # National baseline report rate (reported/reviewed) — the mean each zone's adjusted score is
+    # shrunk toward, so a 1-of-1 municipio sits near the average instead of at a screaming 100%.
+    k = _MAP_PRIOR_K
+    tot_reviewed = sum(reviewed.values())
+    p0 = sum(reported.values()) / tot_reviewed if tot_reviewed else 0.0
+
+    def _row(name: str, dep: str, muni: str | None, total: int, rep: int, rev: int) -> dict[str, Any]:
+        row: dict[str, Any] = {
             "dep": dep,
-            "muni": muni,
-            "name": geo.muni(dep, muni) or muni,
+            "name": name,
             "dep_name": geo.dept(dep) or dep,
             "total": total,
             "reported": rep,
             "reviewed": rev,
+            # Literal ratios (kept for tooltips, /transparencia, back-compat).
             "pct": round(100.0 * rep / total, 1) if total else 0.0,
             "pct_reviewed": round(100.0 * rep / rev, 1) if rev else 0.0,
-        })
-    municipios.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"], r["muni"]))
+            # Coverage: how much of the zone has been reviewed at all.
+            "coverage": round(100.0 * rev / total, 1) if total else 0.0,
+            # Sample-size-aware report rate (drives map color + sort) and its confidence (opacity).
+            "score": round(100.0 * _eb_rate(rep, rev, p0, k), 1),
+            "conf": round(rev / (rev + k), 3),
+        }
+        if muni is not None:
+            row["muni"] = muni
+        return row
+
+    municipios: list[dict[str, Any]] = []
+    for (dep, muni), total in totals.items():
+        municipios.append(_row(
+            geo.muni(dep, muni) or muni, dep, muni,
+            total, reported.get((dep, muni), 0), reviewed.get((dep, muni), 0),
+        ))
+    municipios.sort(key=lambda r: (-r["score"], -r["reviewed"], r["dep"], r["muni"]))
 
     dept_totals: collections.Counter[str] = collections.Counter()
     dept_reported: collections.Counter[str] = collections.Counter()
@@ -634,27 +666,23 @@ def municipio_report_stats(
 
     departments: list[dict[str, Any]] = []
     for dep in sorted(dept_totals.keys()):
-        total = dept_totals[dep]
-        rep = dept_reported[dep]
-        rev = dept_reviewed[dep]
-        departments.append({
-            "dep": dep,
-            "name": geo.dept(dep) or dep,
-            "total": total,
-            "reported": rep,
-            "reviewed": rev,
-            "pct": round(100.0 * rep / total, 1) if total else 0.0,
-            "pct_reviewed": round(100.0 * rep / rev, 1) if rev else 0.0,
-        })
-    departments.sort(key=lambda r: (-r["pct"], -r["reported"], r["dep"]))
+        departments.append(_row(
+            geo.dept(dep) or dep, dep, None,
+            dept_totals[dep], dept_reported[dep], dept_reviewed[dep],
+        ))
+    departments.sort(key=lambda r: (-r["score"], -r["reviewed"], r["dep"]))
 
+    total_mesas = sum(dept_totals.values())
     return {
         "municipios": municipios,
         "departments": departments,
         "summary": {
-            "total_mesas": sum(dept_totals.values()),
+            "total_mesas": total_mesas,
             "reported_mesas": len(reported_docs & doc_index.keys()),
             "reviewed_mesas": len(reviewed_docs & doc_index.keys()),
+            "baseline_pct": round(100.0 * p0, 1),
+            "coverage_pct": round(100.0 * tot_reviewed / total_mesas, 1) if total_mesas else 0.0,
+            "prior_k": k,
         },
     }
 

@@ -939,10 +939,49 @@ def test_municipio_report_stats_aggregation(tmp_path: Path) -> None:
     assert rev["summary"]["reviewed_mesas"] == 2
     rd01 = next(d for d in rev["departments"] if d["dep"] == "01")
     assert rd01["reviewed"] == 2 and rd01["pct_reviewed"] == 50.0
+    # New fields ride alongside the literal ratios: coverage = reviewed/total, an adjusted score,
+    # a confidence in 0..1, and a national baseline. Here baseline = 1 reported / 2 reviewed = 50%.
+    assert r01["coverage"] == 100.0 and 0.0 < r01["conf"] < 1.0
+    assert r01["score"] == 50.0  # (1 + 25*0.5) / (2 + 25) = 50%
+    assert rev["summary"]["baseline_pct"] == 50.0 and rev["summary"]["prior_k"] == 25.0
+    assert rev["summary"]["coverage_pct"] == 66.7  # 2 reviewed of 3 total mesas
     # One mesa reviewed and that same mesa reported -> 100%.
     one = municipio_report_stats(idx, {"doc-a"}, load_geo_names(), reviewed_docs={"doc-a"})
     o01 = next(m for m in one["municipios"] if m["dep"] == "01" and m["muni"] == "001")
     assert o01["reviewed"] == 1 and o01["pct_reviewed"] == 100.0
+
+
+def test_municipio_report_stats_shrinkage() -> None:
+    """Small-sample shrinkage: a 1-of-1 (raw 100%) municipio must NOT outrank a well-sampled one.
+
+    Reproduces the user's concern — a tiny zone with a single report shouldn't paint as a wave.
+    With many clean reviewed mesas pulling the national baseline low, the 1/1 zone shrinks toward
+    that baseline while a 30-of-100 zone keeps most of its rate, so the well-sampled zone scores
+    higher and sorts first."""
+    idx: dict[str, tuple[str, str]] = {}
+    reviewed: set[str] = set()
+    reported: set[str] = set()
+    # Zone A (01/001): 1 reviewed, 1 reported -> raw 100%, but n = 1.
+    idx["a0"] = ("01", "001"); reviewed.add("a0"); reported.add("a0")
+    # Zone B (02/001): 100 reviewed, 30 reported -> raw 30%, n = 100 (the real signal).
+    for i in range(100):
+        d = f"b{i}"; idx[d] = ("02", "001"); reviewed.add(d)
+        if i < 30:
+            reported.add(d)
+    # Zone C (03/001): 100 reviewed, 0 reported -> drags the national baseline down.
+    for i in range(100):
+        d = f"c{i}"; idx[d] = ("03", "001"); reviewed.add(d)
+
+    stats = municipio_report_stats(idx, reported, load_geo_names(), reviewed_docs=reviewed)
+    a = next(m for m in stats["municipios"] if m["dep"] == "01")
+    b = next(m for m in stats["municipios"] if m["dep"] == "02")
+    assert a["pct_reviewed"] == 100.0 and b["pct_reviewed"] == 30.0  # raw ratios unchanged
+    assert a["score"] < a["pct_reviewed"]      # the 1/1 fluke is shrunk hard, not left at 100%
+    assert a["score"] < b["score"]             # ...below the well-sampled 30% zone
+    assert a["conf"] < b["conf"]               # and carries far less confidence (faint on the map)
+    # Sort is by adjusted score: the well-sampled zone comes before the 1/1 fluke.
+    order = [m["dep"] for m in stats["municipios"]]
+    assert order.index("02") < order.index("01")
 
 
 def test_api_reportes_map_national_and_drilldown(tmp_path: Path) -> None:
@@ -975,12 +1014,14 @@ def test_api_reportes_map_national_and_drilldown(tmp_path: Path) -> None:
             assert nat["view"] == "departments"
             assert any(d["dep"] == "11" for d in nat["departments"])
             assert nat["summary"]["reviewed_mesas"] == 1
+            assert nat["summary"]["baseline_pct"] == 100.0  # 1 reported of 1 reviewed
             drill = (await client.get("/api/reportes/map?department=11")).json()
             assert drill["view"] == "municipios"
             assert drill["department"] == "11"
-            assert drill["municipios"][0]["reported"] == 1
-            assert drill["municipios"][0]["reviewed"] == 1
-            assert drill["municipios"][0]["pct_reviewed"] == 100.0
+            m = drill["municipios"][0]
+            assert m["reported"] == 1 and m["reviewed"] == 1 and m["pct_reviewed"] == 100.0
+            # New fields ride through the API for the frontend's two-channel encoding.
+            assert m["coverage"] == 100.0 and "score" in m and 0.0 < m["conf"] < 1.0
             geo = await client.get("/geo/colombia_departamentos.geojson")
             assert geo.status_code == 200
             assert geo.headers["content-type"].startswith("application/")
