@@ -287,6 +287,9 @@
         document.getElementById('onboard-close').addEventListener('click', function () {
           ob.classList.add('is-dismissed');
           try { localStorage.setItem(KEY, '1'); } catch (e) {}
+          // The steps strip sat above the deck; removing it frees vertical space, so re-fit the
+          // grid to the now-taller viewport (otherwise the deck stays collapsed until a reload).
+          window.dispatchEvent(new Event('resize'));
         });
       })();
     </script>
@@ -557,7 +560,7 @@
       const top = grid.getBoundingClientRect().top;
       const barH = bar.hidden ? 0 : bar.offsetHeight;
       const avail = Math.max(140, window.innerHeight - top - barH - footGap);
-      const width = board.getBoundingClientRect().width || board.clientWidth || main.clientWidth;
+      const width = board.getBoundingClientRect().width || board.clientWidth || window.innerWidth;
 
       let best = null;
       for (let cols = 2; cols <= 4; cols++) {
@@ -588,9 +591,13 @@
       grid.style.setProperty('--tile-pad', tilePad + 'px');
     }
 
-    MOBILE_GRID_MQ.addEventListener('change', () => requestAnimationFrame(fitGridLayout));
-    window.addEventListener('resize', () => requestAnimationFrame(fitGridLayout));
-    window.addEventListener('orientationchange', () => setTimeout(fitGridLayout, 120));
+    // NB: pass an explicit count — a bare `requestAnimationFrame(fitGridLayout)` would hand the
+    // rAF timestamp in as `tileCount`, blowing the row count up to thousands and collapsing every
+    // tile to a sliver. Fall back to the skeleton count so a resize during loading still fits.
+    const refitGrid = () => fitGridLayout(deck.length || guessSkeletonCount());
+    MOBILE_GRID_MQ.addEventListener('change', () => requestAnimationFrame(refitGrid));
+    window.addEventListener('resize', () => requestAnimationFrame(refitGrid));
+    window.addEventListener('orientationchange', () => setTimeout(refitGrid, 120));
 
     // Turn a tile element into a live casilla: load its crop, wire mark/undo. Used both for
     // reused placeholders (filled in place) and brand-new tiles (which also animate in).
