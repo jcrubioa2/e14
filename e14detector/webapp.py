@@ -1127,6 +1127,9 @@ def create_app(
     # context churn. On the R1 app r1_archive_url is empty, so the button never renders (byte-identical).
     templates.env.globals["election_round"] = config.ELECTION_ROUND
     templates.env.globals["r1_archive_url"] = config.R1_ARCHIVE_URL
+    # Absolute site origin, exposed once so the shared head partial can build absolute social-card
+    # (og:image) URLs on every page without each route threading it through context.
+    templates.env.globals["site_url"] = config.SITE_URL
     poll_cfg = poll or PollConfig.from_config()
     community = make_store(community_db or (output_dir / "community.sqlite"))
     # Durable vote path: when SQS is configured, votes are enqueued (worker drains to

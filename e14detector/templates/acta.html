@@ -13,7 +13,7 @@
   <meta property="og:title" content="{{ page_title }}">
   <meta property="og:description" content="{{ meta_description }}">
   <meta property="og:url" content="{{ canonical }}">
-  <meta name="twitter:card" content="summary">
+  <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="{{ page_title }}">
   <meta name="twitter:description" content="{{ meta_description }}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -54,6 +54,18 @@
          line-height:1.05; letter-spacing:-.012em; }
     .acta-meta { color:var(--ink-soft); font-size:13px; line-height:1.6; margin-top:7px; }
     .acta-meta a { font-weight:700; }
+
+    /* Share affordance: this app exists to spread, and an installed PWA hides the browser's own
+       share button — so give the acta its own. Uses the native share sheet (WhatsApp/Telegram/…)
+       on mobile, falls back to copy-to-clipboard on desktop. Pill matches the editorial chrome. */
+    .share-row { margin-top:14px; }
+    .share-btn { display:inline-flex; align-items:center; gap:8px; font:inherit; font-size:13.5px; font-weight:700;
+           color:var(--ink); background:var(--card); border:1.5px solid var(--line-strong); border-radius:999px;
+           padding:9px 16px; min-height:40px; cursor:pointer; transition:border-color .15s, color .15s, transform .1s; }
+    .share-btn:hover { border-color:var(--red); color:var(--red-deep); }
+    .share-btn:active { transform:translateY(1px); }
+    .share-btn svg { width:16px; height:16px; flex:0 0 auto; }
+    .share-btn.is-done { border-color:var(--green); color:var(--green); }
 
     main { padding-top:22px; padding-bottom:40px; }
 
@@ -112,6 +124,15 @@
         {% if doc.place_name %}{{ doc.place_name }}<br>{% endif %}
         {% if doc.zone %}zona {{ doc.zone }} &middot; {% endif %}{% if doc.puesto %}puesto {{ doc.puesto }} &middot; {% endif %}{% if doc.mesa %}mesa {{ doc.mesa }} &middot; {% endif %}{{ doc.document_id }}
       </div>
+      <div class="share-row">
+        <button type="button" class="share-btn" id="shareBtn"
+                data-url="{{ canonical }}"
+                data-title="{{ page_title }}"
+                data-text="Revisa esta acta E-14 en la veedur&iacute;a ciudadana: {{ doc.department_name or doc.department_code or '' }}{% if doc.municipality_name %} &middot; {{ doc.municipality_name }}{% endif %}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>
+          <span class="share-btn-label">Compartir acta</span>
+        </button>
+      </div>
     </div>
   </header>
   <main>
@@ -150,5 +171,41 @@
   </main>
 
   {% include "_footer.html" %}
+  <script>
+    // Share this acta. Native share sheet where available (mobile + installed PWA → WhatsApp,
+    // Telegram, etc.), copy-to-clipboard fallback on desktop. The whole point of the tool is to
+    // circulate suspicious actas, so this is one tap from every acta page.
+    (function () {
+      var btn = document.getElementById('shareBtn');
+      if (!btn) return;
+      var label = btn.querySelector('.share-btn-label');
+      var url = btn.getAttribute('data-url') || location.href;
+      var title = btn.getAttribute('data-title') || document.title;
+      var text = btn.getAttribute('data-text') || '';
+      var resetT = null;
+
+      function flash(msg) {
+        if (resetT) clearTimeout(resetT);
+        var prev = label.textContent;
+        label.textContent = msg;
+        btn.classList.add('is-done');
+        resetT = setTimeout(function () { label.textContent = 'Compartir acta'; btn.classList.remove('is-done'); }, 2200);
+      }
+
+      btn.addEventListener('click', function () {
+        if (navigator.share) {
+          navigator.share({ title: title, text: text, url: url }).catch(function () {});
+          return;
+        }
+        // Desktop fallback: copy the link.
+        var done = function () { flash('¡Enlace copiado!'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(done).catch(function () { window.prompt('Copia el enlace:', url); });
+        } else {
+          window.prompt('Copia el enlace:', url);
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
