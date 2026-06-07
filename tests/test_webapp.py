@@ -1132,8 +1132,8 @@ def test_reportes_billboard_caps_at_top_n(tmp_path: Path) -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             html = (await client.get("/reportes")).text
-            assert html.count('class="lead-row"') == REPORTES_TOP_N     # capped, not all n_docs
-            assert html.count('class="lead-rank"') == REPORTES_TOP_N    # one rank per row
+            assert html.count('class="hot-card"') == REPORTES_TOP_N     # capped, not all n_docs
+            assert html.count('class="hot-num"') == REPORTES_TOP_N      # one rank numeral per card
             assert "/buscar?filter=reportadas" in html                  # "Ver todas" link to full list
             assert "?page=" not in html                                 # no pager anymore
 

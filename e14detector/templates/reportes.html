@@ -66,51 +66,59 @@
     .sec-head a { font-size:13.5px; font-weight:700; white-space:nowrap; }
     .sec-sub { color:var(--ink-soft); font-size:13.5px; margin:0 0 14px; }
 
-    /* ===== Unified reports dashboard: one card holding the "most reported" leaderboard rail and
-       the tabbed stats viz, so they read as a single thing instead of two stacked widgets. ===== */
-    .dash { border:1px solid var(--line); border-radius:18px; background:var(--card);
-            box-shadow:var(--shadow); overflow:hidden; }
-    .dash-grid { display:grid; }
-    @media (min-width:860px) { .dash-grid { grid-template-columns:336px 1fr; } }
+    /* ===== One cohesive "reports" surface: a ranked carousel of the most-reported actas on top,
+       the tabbed stats viz below, sharing a single bordered card. Editorial broadsheet feel:
+       oversized Fraunces rank numerals as the through-line, warm paper palette, quiet motion. ===== */
+    .surface { border:1px solid var(--line); border-radius:20px; background:var(--card);
+               box-shadow:0 1px 1px rgba(28,26,21,.03), 0 10px 30px -12px rgba(28,26,21,.18); overflow:hidden; }
+    .rblock { padding:18px 20px; }
+    .rblock + .rblock { border-top:1px solid var(--line); }
+    .rblock-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:14px; }
+    .rblock-head h2 { margin:0; font-family:"Fraunces", serif; font-weight:600; font-size:19px; letter-spacing:-.01em; }
+    .rblock-head .rmore { font-size:12.5px; font-weight:800; color:var(--link); text-decoration:none; white-space:nowrap; }
+    .rblock-head .rmore:hover { text-decoration:underline; }
 
-    /* Left: compact ranked leaderboard, always present. Scrolls within its own panel (a tidy
-       dashboard widget) rather than pushing the map down the page. */
-    .rail { display:flex; flex-direction:column; min-width:0; padding:15px 15px 13px;
-            border-bottom:1px solid var(--line); }
-    @media (min-width:860px) { .rail { border-bottom:0; border-right:1px solid var(--line); } }
-    .rail-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:9px; }
-    .rail-head h2 { margin:0; font-family:"Fraunces", serif; font-weight:600; font-size:17px; letter-spacing:-.01em; }
-    .rail-head a { font-size:12.5px; font-weight:700; color:var(--link); white-space:nowrap; }
-    .lead { list-style:none; margin:0; padding:0; overflow-y:auto; max-height:312px; scrollbar-width:thin; }
-    @media (min-width:860px) { .lead { max-height:432px; } }
-    .lead::-webkit-scrollbar { width:7px; }
-    .lead::-webkit-scrollbar-thumb { background:var(--line-strong); border-radius:99px; }
-    .lead li + li { border-top:1px solid var(--line); }
-    /* Each row: rank (red, fading with the acta's "extraña" tone --flag), a small casilla thumbnail,
-       location, and the reporter count. */
-    .lead-row { display:flex; align-items:center; gap:11px; padding:9px 7px; color:inherit;
-                text-decoration:none; border-radius:9px; transition:background .12s; }
-    .lead-row:hover { background:var(--paper-2); }
-    .lead-rank { flex:0 0 1.7em; text-align:right; font-family:"Fraunces", serif; font-weight:600;
-                 font-size:15px; line-height:1; font-variant-numeric:tabular-nums;
-                 color:rgba(217,58,40, calc(.5 + .5 * var(--flag, 0))); }
-    .lead-thumb { flex:0 0 44px; width:44px; height:30px; border:1px solid var(--line); border-radius:6px;
-                  background:#fff; overflow:hidden; display:flex; align-items:center; justify-content:center; }
-    .lead-thumb img { width:100%; height:100%; object-fit:contain; }
-    .lead-info { min-width:0; display:flex; flex-direction:column; gap:2px; }
-    .lead-loc { font-size:12.5px; font-weight:700; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .lead-sub { font-size:11px; color:var(--ink-soft); }
-    .lead-sub b { color:var(--red-deep); font-variant-numeric:tabular-nums; }
-    .rail-empty { color:var(--ink-soft); font-size:13px; padding:10px 6px 4px; }
+    /* Carousel: horizontal snap scroller with faded edges + a red scroll-progress bar. */
+    .rail-wrap { position:relative; }
+    .hot-rail { display:flex; gap:14px; overflow-x:auto; scroll-snap-type:x proximity; padding:4px 2px 14px;
+                scrollbar-width:none; -webkit-overflow-scrolling:touch;
+                -webkit-mask-image:linear-gradient(90deg, transparent, #000 26px, #000 calc(100% - 26px), transparent);
+                        mask-image:linear-gradient(90deg, transparent, #000 26px, #000 calc(100% - 26px), transparent); }
+    .hot-rail::-webkit-scrollbar { display:none; }
+    .hot-card { position:relative; flex:0 0 198px; scroll-snap-align:start; display:flex; flex-direction:column;
+                border:1px solid var(--line); border-radius:15px; background:var(--card); overflow:hidden;
+                text-decoration:none; color:inherit;
+                transition:transform .18s cubic-bezier(.2,.7,.2,1), box-shadow .18s, border-color .18s;
+                opacity:0; transform:translateY(10px); animation:hot-rise .5s forwards; }
+    @keyframes hot-rise { to { opacity:1; transform:none; } }
+    .hot-card:hover { transform:translateY(-4px); border-color:var(--red-line);
+                      box-shadow:0 2px 2px rgba(168,42,27,.05), 0 22px 40px -18px rgba(168,42,27,.4); }
+    .hot-crop { aspect-ratio:4/3; background:#fff; display:flex; align-items:center; justify-content:center;
+                overflow:hidden; border-bottom:1px solid var(--line); }
+    .hot-crop img { width:100%; height:100%; object-fit:contain; transition:transform .35s cubic-bezier(.2,.7,.2,1); }
+    .hot-card:hover .hot-crop img { transform:scale(1.07); }
+    .hot-meta { display:flex; align-items:flex-start; gap:10px; padding:11px 12px 13px; }
+    /* Oversized editorial rank numeral, red fading with the acta's "extraña" tone (--flag). */
+    .hot-num { font-family:"Fraunces", serif; font-weight:600; font-size:30px; line-height:.86; letter-spacing:-.02em;
+               color:rgba(217,58,40, calc(.45 + .55 * var(--flag, 0))); }
+    .hot-info { min-width:0; }
+    .hot-loc { font-size:12.5px; font-weight:700; line-height:1.2; display:-webkit-box; -webkit-line-clamp:2;
+               -webkit-box-orient:vertical; overflow:hidden; }
+    .hot-hits { font-size:11px; color:var(--ink-soft); margin-top:4px; }
+    .hot-hits b { color:var(--red-deep); font-variant-numeric:tabular-nums; }
+    .rail-prog { height:3px; border-radius:99px; background:var(--paper-2); margin:0 2px; overflow:hidden; }
+    .rail-prog i { display:block; height:100%; width:18%; border-radius:99px;
+                   background:linear-gradient(90deg, var(--red), var(--red-deep)); transition:width .1s linear; }
+    .rail-empty { color:var(--ink-soft); font-size:13.5px; padding:6px 2px 12px; }
 
-    /* Right: the viz, with underline tabs (map today, more later). */
-    .viz { min-width:0; padding:15px; }
-    .viz-tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin:0 0 13px; overflow-x:auto; }
-    .viz-tab { border:0; background:none; font:inherit; font-weight:700; font-size:14px; color:var(--ink-soft);
-               padding:6px 6px 9px; margin-bottom:-1px; white-space:nowrap; cursor:pointer;
+    /* Stats tabs (map today; a quiet "más análisis pronto" placeholder hints there's more to come). */
+    .viz-tabs { display:flex; align-items:center; gap:8px; border-bottom:1px solid var(--line); margin:0 0 14px; overflow-x:auto; }
+    .viz-tab { border:0; background:none; font:inherit; font-weight:800; font-size:13.5px; color:var(--ink-soft);
+               padding:6px 4px 10px; margin-bottom:-1px; white-space:nowrap; cursor:pointer; letter-spacing:.01em;
                border-bottom:2px solid transparent; transition:color .15s, border-color .15s; }
     .viz-tab:hover { color:var(--ink); }
     .viz-tab.is-on { color:var(--ink); border-bottom-color:var(--red); }
+    .viz-tab.ghost { color:var(--ink-faint); font-weight:600; cursor:default; }
     .viz-panel[hidden] { display:none; }
 
     .stats-note { color:var(--ink-faint); font-size:12.5px; margin:0 0 12px; line-height:1.5; }
@@ -153,43 +161,47 @@
   </header>
 
   <main>
-    <!-- One dashboard: the "most reported" leaderboard rail + the tabbed stats viz live in a single
-         card so they read as one unit. The rail is always present; tabs swap the viz on the right. -->
-    <section class="dash" aria-label="Panorama de reportes de la comunidad">
-      <div class="dash-grid">
-        <aside class="rail" aria-labelledby="board-h">
-          <div class="rail-head">
-            <h2 id="board-h">M&aacute;s reportadas</h2>
-            {% if hot_actas %}<a href="/buscar?filter=reportadas">Ver todas &rarr;</a>{% endif %}
-          </div>
-          {% if hot_actas %}
-          <ol class="lead">
+    <!-- One cohesive reports surface: a ranked carousel of the most-reported actas on top, the
+         tabbed stats viz below — sharing a single card so they read as one thing. -->
+    <section class="surface" aria-label="Reportes de la comunidad">
+      <div class="rblock">
+        <div class="rblock-head">
+          <h2 id="board-h">Las m&aacute;s reportadas</h2>
+          {% if hot_actas %}<a class="rmore" href="/buscar?filter=reportadas">Ver todas &rarr;</a>{% endif %}
+        </div>
+        {% if hot_actas %}
+        <div class="rail-wrap">
+          <div class="hot-rail" id="hot-rail" tabindex="0" aria-label="Actas m&aacute;s reportadas, desliza para ver m&aacute;s">
             {% for a in hot_actas %}
-            <li>
-              <a class="lead-row" style="--flag:{{ '%.3f'|format(a.flag_level) }}" href="/acta/{{ a.document_id }}">
-                <span class="lead-rank">{{ loop.index }}</span>
-                <span class="lead-thumb"><img loading="lazy" src="{{ a.img_url }}" alt="casilla reportada"></span>
-                <span class="lead-info">
-                  <span class="lead-loc">{{ a.loc }}</span>
-                  <span class="lead-sub"><b>{{ a.reporters }}</b> persona{{ "s" if a.reporters != 1 else "" }} la reportaron</span>
-                </span>
-              </a>
-            </li>
+            <a class="hot-card" style="--flag:{{ '%.3f'|format(a.flag_level) }}; animation-delay:{{ loop.index0 * 55 }}ms" href="/acta/{{ a.document_id }}">
+              <div class="hot-crop"><img loading="lazy" src="{{ a.img_url }}" alt="casilla reportada de esta mesa"></div>
+              <div class="hot-meta">
+                <span class="hot-num">{{ loop.index }}</span>
+                <div class="hot-info">
+                  <div class="hot-loc">{{ a.loc }}</div>
+                  <div class="hot-hits"><b>{{ a.reporters }}</b> persona{{ "s" if a.reporters != 1 else "" }} la reportaron</div>
+                </div>
+              </div>
+            </a>
             {% endfor %}
-          </ol>
-          {% else %}
-          <p class="rail-empty">A&uacute;n no hay reportes. S&eacute; de las primeras personas en revisar una mesa y marcar lo que se vea extra&ntilde;o.</p>
-          {% endif %}
-        </aside>
-
-        <!-- Tabs pick which viz shows; the map is the only one today. Add a <button class="viz-tab">
-             + matching <div class="viz-panel" id="..."> pair to introduce a new viz. -->
-        <div class="viz">
-          <div class="viz-tabs" role="tablist" aria-label="Vistas de estad&iacute;sticas">
-            <button type="button" class="viz-tab is-on" id="tab-map" role="tab" aria-selected="true" aria-controls="panel-map" data-panel="panel-map">Mapa por municipio</button>
           </div>
+          <div class="rail-prog"><i id="hot-prog"></i></div>
+        </div>
+        {% else %}
+        <p class="rail-empty">A&uacute;n no hay reportes. S&eacute; de las primeras personas en revisar una mesa y marcar lo que se vea extra&ntilde;o.</p>
+        {% endif %}
+      </div>
 
-          <div class="map-block viz-panel" id="panel-map" role="tabpanel" aria-labelledby="tab-map">
+      <div class="rblock">
+        <!-- Tabs pick which viz shows; the map is the only one today, with a quiet placeholder hinting
+             more is coming. To add a viz: append a real button.viz-tab plus a matching panel
+             (div.viz-panel) with the same id wired via data-panel. -->
+        <div class="viz-tabs" role="tablist" aria-label="Vistas de estad&iacute;sticas">
+          <button type="button" class="viz-tab is-on" id="tab-map" role="tab" aria-selected="true" aria-controls="panel-map" data-panel="panel-map">Mapa por municipio</button>
+          <span class="viz-tab ghost" aria-hidden="true">M&aacute;s an&aacute;lisis pronto</span>
+        </div>
+
+        <div class="map-block viz-panel" id="panel-map" role="tabpanel" aria-labelledby="tab-map">
         <p class="stats-note">Mesas con al menos un reporte de la comunidad (&ldquo;se ve extra&ntilde;a&rdquo;) entre las mesas revisadas. El color est&aacute; <b>ajustado por tama&ntilde;o de muestra</b>: un par de reportes en un municipio peque&ntilde;o no se pinta como una ola, y los lugares con pocas mesas revisadas se ven m&aacute;s tenues. Cambia a &ldquo;Cobertura&rdquo; para ver cu&aacute;nto se ha revisado del total. No incluye veredictos del modelo.</p>
         <div class="map-controls">
           <label>Vista
@@ -208,7 +220,6 @@
           <span>Menos</span><span class="map-legend-bar"></span><span id="map-legend-max">M&aacute;s mesas reportadas</span>
         </div>
         <p class="map-foot">Los municipios sin mesas en la veedur&iacute;a aparecen en gris. Pasa el cursor para ver cifras; haz clic para buscar actas en ese lugar.</p>
-          </div>
         </div>
       </div>
     </section>
@@ -416,11 +427,25 @@
   })();
   </script>
   <script>
-  // Stats viz tabs: show the selected panel, hide the rest. Generic over any number of
-  // .viz-tab buttons (each data-panel -> a .viz-panel id), so new viz need no JS changes.
+  // Carousel scroll-progress bar: fill tracks how far through the "most reported" rail you are.
   (function () {
-    const tabs = [...document.querySelectorAll('.viz-tab')];
-    if (tabs.length < 2) return;   // a lone tab is just a label — nothing to switch
+    const rail = document.getElementById('hot-rail');
+    const bar = document.getElementById('hot-prog');
+    if (!rail || !bar) return;
+    const update = () => {
+      const max = rail.scrollWidth - rail.clientWidth;
+      bar.style.width = (max > 0 ? Math.max(14, (rail.scrollLeft / max) * 100) : 100) + '%';
+    };
+    rail.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    update();
+  })();
+
+  // Stats viz tabs: show the selected panel, hide the rest. Generic over any number of real
+  // .viz-tab buttons (each data-panel -> a .viz-panel id); the ghost "pronto" tab is skipped.
+  (function () {
+    const tabs = [...document.querySelectorAll('.viz-tab:not(.ghost)')];
+    if (tabs.length < 2) return;   // a lone real tab is just a label — nothing to switch
     tabs.forEach((tab) => tab.addEventListener('click', () => {
       tabs.forEach((t) => {
         const on = t === tab;
