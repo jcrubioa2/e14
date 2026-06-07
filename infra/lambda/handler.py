@@ -35,9 +35,19 @@ import boto3
 
 _VALID = {"good", "strange"}
 
-# Created at import (warm across invocations on a reused execution environment).
-_client = boto3.client("rds-data")
+# Created lazily on the first invocation, then warm across invocations on a reused execution
+# environment. Lazy (not at import) so the module imports with no AWS region/creds — e.g. in tests,
+# which drive ``process`` directly with a fake Data API client.
+_client = None
 _base_cache: dict | None = None
+
+
+def _get_client():
+    """The RDS Data API client, built once on first use and reused on warm invocations."""
+    global _client
+    if _client is None:
+        _client = boto3.client("rds-data")
+    return _client
 
 
 def _base() -> dict:
@@ -122,4 +132,4 @@ def process(event: dict, client, base: dict) -> dict:
 
 
 def handler(event: dict, context=None) -> dict:
-    return process(event, _client, _base())
+    return process(event, _get_client(), _base())

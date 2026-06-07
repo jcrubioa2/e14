@@ -144,15 +144,23 @@
 
   <main>
     <section>
-    {% if review %}
-      <div class="sec-head"><h2>Actas m&aacute;s votadas por la comunidad</h2></div>
-      <p class="sec-sub">Las actas con m&aacute;s votos de la comunidad. Puedes filtrarlas por ubicaci&oacute;n.</p>
+    {% if show_cards %}
+      <div class="sec-head"><h2>Actas reportadas por la comunidad</h2></div>
+      <p class="sec-sub">Las actas que la comunidad ha marcado como extra&ntilde;as, las m&aacute;s reportadas primero. Puedes filtrarlas por ubicaci&oacute;n.</p>
     {% else %}
       <div class="sec-head"><h2>Filtra el directorio</h2></div>
-      <p class="sec-sub">Filtra por ubicaci&oacute;n &mdash; como en el sitio oficial &mdash; o escribe un lugar, mesa o c&oacute;digo.</p>
+      <p class="sec-sub">Filtra por ubicaci&oacute;n y estado &mdash; como en el sitio oficial &mdash; o escribe un lugar, mesa o c&oacute;digo.</p>
     {% endif %}
     <form class="filters" method="get" action="/buscar" id="drill">
-      {% if review %}<input type="hidden" name="review" value="1">{% endif %}
+      <label>Estado
+        <select name="filter" id="filter-sel">
+          <option value="" {% if not filters.filter %}selected{% endif %}>Todas</option>
+          <option value="reportadas" {% if filters.filter == 'reportadas' %}selected{% endif %}>Reportadas</option>
+          <option value="muy_reportadas" {% if filters.filter == 'muy_reportadas' %}selected{% endif %}>Muy reportadas</option>
+          <option value="revisadas" {% if filters.filter == 'revisadas' %}selected{% endif %}>Revisadas</option>
+          <option value="sin_revisar" {% if filters.filter == 'sin_revisar' %}selected{% endif %}>Sin revisar</option>
+        </select>
+      </label>
       <label>Departamento
         <select name="department" data-level="0">
           <option value="">Todos</option>
@@ -197,6 +205,9 @@
       // next level's options from /api/places and fills its dropdown. The acta list only
       // reloads when you press "Filtrar" (avoids a heavy full-page render per selection).
       const drill = document.getElementById('drill');
+      // The crowd-signal filter is a top-level facet — changing it re-runs the search immediately.
+      const fsel = document.getElementById('filter-sel');
+      if (fsel) fsel.addEventListener('change', () => drill.submit());
       const sels = [...drill.querySelectorAll('select[data-level]')];
       sels.forEach((sel) => sel.addEventListener('change', async () => {
         const lvl = +sel.dataset.level;
@@ -228,9 +239,9 @@
     </script>
 
     <div class="count-line">{{ total }} acta(s) &middot; p&aacute;gina {{ page }} de {{ pages }}. Abre cualquier acta para ver sus casillas y lo que la comunidad ha votado.</div>
-    {% if review %}
-    <!-- "Ver todas" preserves the same tile as the "Actas más reportadas" billboard: crop thumb
-         + location + crowd tally. -->
+    {% if show_cards %}
+    <!-- The reported families preserve the same tile as the "Actas más reportadas" billboard:
+         crop thumb + location + crowd tally. -->
     <div class="board-list">
       {% for a in voted_cards %}
       <a class="board-item" style="--flag:{{ '%.3f'|format(a.flag_level) }}" href="/acta/{{ a.document_id }}">
@@ -266,7 +277,7 @@
     </div>
     {% endif %}
 
-    {% set qs = "department=" ~ filters.department|urlencode ~ "&municipality=" ~ filters.municipality|urlencode ~ "&zone=" ~ filters.zone|urlencode ~ "&puesto=" ~ filters.puesto|urlencode ~ "&q=" ~ filters.q|urlencode ~ ("&review=1" if review else "") %}
+    {% set qs = "department=" ~ filters.department|urlencode ~ "&municipality=" ~ filters.municipality|urlencode ~ "&zone=" ~ filters.zone|urlencode ~ "&puesto=" ~ filters.puesto|urlencode ~ "&q=" ~ filters.q|urlencode ~ (("&filter=" ~ filters.filter) if filters.filter else "") %}
     <nav class="pager">
       {% if page > 1 %}<a href="/buscar?{{ qs }}&page={{ page - 1 }}">&larr; Anterior</a>{% endif %}
       {% if page < pages %}<a href="/buscar?{{ qs }}&page={{ page + 1 }}">Siguiente &rarr;</a>{% endif %}

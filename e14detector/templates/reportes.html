@@ -137,7 +137,7 @@
     <section aria-labelledby="board-h">
       <div class="sec-head">
         <h2 id="board-h">Actas m&aacute;s reportadas como extra&ntilde;as</h2>
-        <a href="/buscar?review=1">Ver en el buscador &rarr;</a>
+        <a href="/buscar?filter=reportadas">Ver en el buscador &rarr;</a>
       </div>
       <p class="sec-sub">Las mesas donde m&aacute;s gente ha marcado casillas como extra&ntilde;as. Toca una para abrir su acta.</p>
       <div class="board-list">
@@ -307,6 +307,9 @@
           department: feature.properties.dep,
           municipality: feature.properties.muni
         });
+        // In the report (signal) mode, drill into the reported actas of that municipio; in
+        // coverage mode show the whole directory (no crowd filter).
+        if (!coverageMode()) q.set('filter', 'reportadas');
         window.location.href = '/buscar?' + q;
       });
     }

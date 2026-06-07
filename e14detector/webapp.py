@@ -406,6 +406,26 @@ def _flag_level(strange: int, good: int) -> float:
     return net / (net + _FLAG_K) if net > 0 else 0.0
 
 
+# Crowd-signal filters for /buscar. Each maps to a cheap, already-cached aggregate (see
+# _search_context); "" means no filter (the default directory).
+_BUSCAR_FILTERS = ("reportadas", "muy_reportadas", "revisadas", "sin_revisar")
+_BUSCAR_TITLES = {
+    "reportadas": "Actas reportadas por la comunidad — Veeduría ciudadana 2026",
+    "muy_reportadas": "Actas muy reportadas por la comunidad — Veeduría ciudadana 2026",
+    "revisadas": "Actas revisadas por la comunidad — Veeduría ciudadana 2026",
+    "sin_revisar": "Actas sin revisar todavía — Veeduría ciudadana 2026",
+}
+_BUSCAR_DEFAULT_TITLE = "Busca un acta E-14 — Veeduría ciudadana elecciones Colombia 2026"
+
+
+def _norm_buscar_filter(filt: str | None, review: int = 0) -> str:
+    """Normalize the /buscar crowd-signal filter to a known value (or "" for none). ``review=1``
+    stays a back-compat alias for 'reportadas' (the old "Ver todas / más votadas" list)."""
+    if filt in _BUSCAR_FILTERS:
+        return filt
+    return "reportadas" if review else ""
+
+
 def _warm_db(db_path: Path) -> None:
     """Pull the served DB's pages into the OS page cache by reading the file through.
 
@@ -1564,7 +1584,7 @@ def create_app(
             f"{config.SITE_URL}/votar",
             f"{config.SITE_URL}/reportes",
             f"{config.SITE_URL}/buscar",
-            f"{config.SITE_URL}/buscar?review=1",
+            f"{config.SITE_URL}/buscar?filter=reportadas",
             f"{config.SITE_URL}/transparencia",
         ]
         for d in deps:
@@ -1618,11 +1638,12 @@ def create_app(
         # few minutes stale, and this keeps it off the per-request hot path.
         return _agg_cached("total_reviews", community.total_reviews, ttl=300.0)
 
-    def _search_context(department, municipality, zone, puesto, q, review, page):
+    def _search_context(department, municipality, zone, puesto, q, filt, page):
         # LEVEL 1: a browsable directory, one entry per ACTA (a polling table). Drill down
         # department -> municipio -> zona -> puesto (like the official site). Acta identity
         # IS visible here (this is the lookup view; anonymization is only for /votar). Actas
-        # the crowd has voted on float to the top. ``review=1`` narrows to just those.
+        # the crowd has voted on float to the top. ``filt`` narrows by crowd signal (see
+        # _BUSCAR_FILTERS): reportadas / muy_reportadas / revisadas / sin_revisar, or "" for all.
         # Cascading: ignore a child filter whose parent isn't set.
         if not department:
             municipality = zone = puesto = None
@@ -1652,12 +1673,30 @@ def create_app(
         clause = " AND ".join(where)
         offset = (page - 1) * BROWSE_ACTAS_PER_PAGE
         region_order = "ORDER BY d.department_code, d.document_id"
+        # Only the "reported" families carry a popularity tally worth a billboard tile; the rest
+        # render the plain directory list.
+        show_cards = filt in ("reportadas", "muy_reportadas")
         with conn() as db:
             popularity = _agg_cached("popularity", community.acta_popularity)
-            if review:
-                # Only actas the crowd has voted on, most-voted first. A bounded set, so
-                # order + paginate in Python.
-                id_list = list(popularity)
+            # Resolve the doc-id set this crowd filter selects. All four are cheap, already-cached
+            # aggregates — a filtered search adds no new crowd computation.
+            include_ids: set[str] | None = None   # keep only these ids (bounded set)
+            exclude_ids: set[str] | None = None   # drop these ids (sin_revisar = complement)
+            if filt == "reportadas":
+                include_ids = set(popularity)                       # flagged "se ve extraña" >= 1x
+            elif filt == "muy_reportadas":
+                include_ids = {k.rsplit(":", 3)[0] for k in _agg_cached(
+                    "high_voted", lambda: community.high_voted_fields(config.HIGH_VOTE_THRESHOLD))}
+            elif filt == "revisadas":
+                include_ids = _agg_cached("review_popularity", community.reviewed_actas)
+            elif filt == "sin_revisar":
+                exclude_ids = _agg_cached("review_popularity", community.reviewed_actas)
+
+            if include_ids is not None:
+                # Bounded set -> fetch with IN, then order (reporters desc, then region) + paginate
+                # in Python. Reported actas float by popularity; reviewed-only ones (popularity 0)
+                # fall to region order after them.
+                id_list = list(include_ids)
                 ph = ",".join("?" for _ in id_list) or "NULL"
                 rows = db.execute(
                     f"{_ACTA_SUMMARY_SELECT} WHERE {clause} AND d.document_id IN ({ph})",
@@ -1669,6 +1708,18 @@ def create_app(
                 ))
                 total_actas = len(rows)
                 doc_rows = rows[offset : offset + BROWSE_ACTAS_PER_PAGE]
+            elif exclude_ids:
+                # "Sin revisar": every browsable acta minus the (bounded) reviewed set. SQL NOT IN
+                # + region order + SQL pagination — the reviewed set is small, so this stays cheap.
+                ex_clause = clause + f" AND d.document_id NOT IN ({','.join('?' for _ in exclude_ids)})"
+                ex_params = [*params, *exclude_ids]
+                total_actas = db.execute(
+                    f"SELECT COUNT(*) c FROM documents d WHERE {ex_clause}", ex_params,
+                ).fetchone()["c"]
+                doc_rows = db.execute(
+                    f"{_ACTA_SUMMARY_SELECT} WHERE {ex_clause} {region_order} LIMIT ? OFFSET ?",
+                    [*ex_params, BROWSE_ACTAS_PER_PAGE, offset],
+                ).fetchall()
             else:
                 total_actas = db.execute(
                     f"SELECT COUNT(*) c FROM documents d WHERE {clause}",
@@ -1692,15 +1743,15 @@ def create_app(
                         [*rest_params, rest_count, max(0, offset - len(voted_rows))],
                     ).fetchall()
                 doc_rows = list(head) + list(rest_rows)
-            # "Ver todas" (review) renders the same billboard tile (thumb + loc + tally) as the
+            # The reported families render the same billboard tile (thumb + loc + tally) as the
             # "Actas más reportadas" strip — build a card per acta on this page (bounded to
             # BROWSE_ACTAS_PER_PAGE). Each card costs a vote_fields lookup + a counts_among
             # round-trip, so cache the page's cards for the same 45s window as the other crowd
-            # aggregates (keyed by filters+page; tallies tolerate slight staleness).
+            # aggregates (keyed by filter+filters+page; tallies tolerate slight staleness).
             voted_cards = []
-            if review:
+            if show_cards:
                 ck = "voted_cards:" + "|".join(
-                    str(x or "") for x in (department, municipality, zone, puesto, q, page))
+                    str(x or "") for x in (filt, department, municipality, zone, puesto, q, page))
                 voted_cards = _agg_cached(ck, lambda: [
                     c for c in (
                         _acta_card(db, r["document_id"], popularity.get(r["document_id"], 0), r)
@@ -1742,8 +1793,9 @@ def create_app(
                 "zone": zone or "",
                 "puesto": puesto or "",
                 "q": q or "",
+                "filter": filt or "",
             },
-            "review": bool(review),
+            "show_cards": show_cards,
             "page": page,
             "pages": max(1, math.ceil(total_actas / BROWSE_ACTAS_PER_PAGE)),
             "total": total_actas,
@@ -1886,23 +1938,22 @@ def create_app(
         zone: str | None = None,
         puesto: str | None = None,
         q: str | None = None,
+        filt: str | None = Query(None, alias="filter"),
         review: int = 0,
         page: int = Query(1, ge=1),
     ):
         # TAB 3 — Search a specific acta: the filterable directory (drill down dep -> muni ->
-        # zona -> puesto, like the official site). ``review=1`` narrows to the most-voted list.
-        ctx = _search_context(department, municipality, zone, puesto, q, review, page)
+        # zona -> puesto, like the official site). ``?filter=`` narrows by crowd signal; ``review=1``
+        # is a back-compat alias for ``filter=reportadas``.
+        filt = _norm_buscar_filter(filt, review)
+        ctx = _search_context(department, municipality, zone, puesto, q, filt, page)
         ctx.update({
             "progress": _progress_ctx(),
             "total_reviews": _total_reviews(),
             "active": "buscar",
             "site_url": config.SITE_URL,
-            "canonical": config.SITE_URL + ("/buscar?review=1" if review else "/buscar"),
-            "page_title": (
-                "Actas más votadas por la comunidad — Veeduría ciudadana 2026"
-                if review else
-                "Busca un acta E-14 — Veeduría ciudadana elecciones Colombia 2026"
-            ),
+            "canonical": config.SITE_URL + (f"/buscar?filter={filt}" if filt else "/buscar"),
+            "page_title": _BUSCAR_TITLES.get(filt, _BUSCAR_DEFAULT_TITLE),
             "meta_description": (
                 "Busca y revisa las actas E-14 de las elecciones presidenciales de Colombia "
                 "2026 por departamento, municipio o código. Mira los votos escritos a mano y "
