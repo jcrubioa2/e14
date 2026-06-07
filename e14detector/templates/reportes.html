@@ -66,31 +66,32 @@
     .sec-head a { font-size:13.5px; font-weight:700; white-space:nowrap; }
     .sec-sub { color:var(--ink-soft); font-size:13.5px; margin:0 0 14px; }
 
-    /* Billboard — most reported actas */
-    .board-list { display:grid; grid-template-columns:repeat(auto-fill, minmax(255px, 1fr)); gap:13px; }
-    /* The outer left bar scales with the acta's "extraña" tone (--flag, 0..1): faint when the crowd
-       barely leans extraña, full red when it overwhelmingly does. */
-    .board-item { display:flex; gap:13px; align-items:center; border:1px solid var(--line);
-                  border-left:3px solid rgba(217,58,40, calc(var(--flag, 0)));
-                  border-radius:13px; padding:12px; background:var(--card); color:inherit; box-shadow:var(--shadow);
-                  transition:transform .14s, box-shadow .14s, border-color .14s; }
-    .board-item:hover { transform:translateY(-2px); text-decoration:none; border-color:var(--red-line);
-                  border-left-color:rgba(217,58,40, calc(var(--flag, 0)));
-                  box-shadow:0 2px 2px rgba(168,42,27,.04), 0 16px 30px -14px rgba(168,42,27,.34); }
-    .board-thumb { flex:0 0 86px; height:60px; border:1px solid var(--line); border-radius:9px; background:#fff;
+    /* Billboard — Top-N most reported actas, a ranked tile grid (the page's centerpiece).
+       2-up on phones (clean 5 rows for a top-10) -> 5-up on desktop (clean 2 rows). */
+    .board-list { list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(2, 1fr); gap:12px; }
+    @media (min-width:820px) { .board-list { grid-template-columns:repeat(5, 1fr); gap:14px; } }
+    /* Portrait tile: rank badge over a thumbnail, location + tally below. A left stripe scales with
+       the acta's "extraña" tone (--flag, 0..1): faint when the crowd barely leans extraña, full red
+       when it overwhelmingly does. */
+    .board-item { position:relative; display:flex; flex-direction:column; border:1px solid var(--line);
+                  border-radius:14px; background:var(--card); color:inherit; box-shadow:var(--shadow);
+                  overflow:hidden; transition:transform .14s, box-shadow .14s, border-color .14s; }
+    .board-item::before { content:""; position:absolute; top:0; bottom:0; left:0; width:3px; z-index:1;
+                  background:rgba(217,58,40, calc(var(--flag, 0))); }
+    .board-item:hover { transform:translateY(-3px); text-decoration:none; border-color:var(--red-line);
+                  box-shadow:0 2px 2px rgba(168,42,27,.04), 0 18px 32px -14px rgba(168,42,27,.34); }
+    .board-rank { position:absolute; top:8px; left:8px; z-index:2; font-family:"Fraunces", Georgia, serif;
+                  font-weight:600; font-size:16px; line-height:1; color:#fff; background:rgba(28,26,21,.66);
+                  border-radius:8px; padding:4px 8px; font-variant-numeric:tabular-nums; }
+    .board-item.top .board-rank { background:var(--red); }   /* podium #1–#3 pop red */
+    .board-thumb { width:100%; aspect-ratio:16 / 10; background:#fff; border-bottom:1px solid var(--line);
                   display:flex; align-items:center; justify-content:center; overflow:hidden; }
-    .board-thumb img { max-width:100%; max-height:100%; object-fit:contain; }
-    .board-info { min-width:0; }
-    .board-loc { font-size:13.5px; font-weight:700; line-height:1.25; overflow:hidden; text-overflow:ellipsis;
+    .board-thumb img { width:100%; height:100%; object-fit:contain; }
+    .board-info { padding:9px 11px 11px; min-width:0; }
+    .board-loc { font-size:13px; font-weight:700; line-height:1.25; overflow:hidden;
                  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
-    .board-tally { font-size:12.5px; color:var(--ink-soft); margin-top:4px; }
+    .board-tally { font-size:11.5px; color:var(--ink-soft); margin-top:5px; }
     .board-tally b { color:var(--red-deep); font-variant-numeric:tabular-nums; }
-
-    /* Pager + count line under the billboard */
-    .board-foot { display:flex; align-items:baseline; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-top:18px; }
-    .count-line { color:var(--ink-soft); font-size:13px; }
-    .pager { display:flex; gap:12px; justify-content:flex-end; }
-    .pager a { font-weight:700; font-size:14px; }
 
     .stats-note { color:var(--ink-faint); font-size:12.5px; margin:0 0 12px; line-height:1.5; }
 
@@ -136,26 +137,21 @@
     {% if hot_actas %}
     <section aria-labelledby="board-h">
       <div class="sec-head">
-        <h2 id="board-h">Actas m&aacute;s reportadas como extra&ntilde;as</h2>
-        <a href="/buscar?filter=reportadas">Ver en el buscador &rarr;</a>
+        <h2 id="board-h">Las {{ hot_actas|length }} m&aacute;s reportadas</h2>
+        <a href="/buscar?filter=reportadas">Ver todas &rarr;</a>
       </div>
-      <p class="sec-sub">Las mesas donde m&aacute;s gente ha marcado casillas como extra&ntilde;as. Toca una para abrir su acta, o ve la lista completa en el buscador.</p>
+      <p class="sec-sub">Las mesas donde m&aacute;s gente ha marcado casillas como extra&ntilde;as. Toca una para abrir su acta.</p>
       <div class="board-list">
         {% for a in hot_actas %}
-        <a class="board-item" style="--flag:{{ '%.3f'|format(a.flag_level) }}" href="/acta/{{ a.document_id }}">
+        <a class="board-item{% if loop.index <= 3 %} top{% endif %}" style="--flag:{{ '%.3f'|format(a.flag_level) }}" href="/acta/{{ a.document_id }}">
+          <span class="board-rank">{{ loop.index }}</span>
           <div class="board-thumb"><img loading="lazy" src="{{ a.img_url }}" alt="casilla reportada de esta mesa"></div>
           <div class="board-info">
             <div class="board-loc">{{ a.loc }}</div>
-            <div class="board-tally"><b>{{ a.reporters }}</b> persona{{ "s" if a.reporters != 1 else "" }} la reportaron &middot; <b>{{ a.flagged }}</b> casilla{{ "s" if a.flagged != 1 else "" }} marcada{{ "s" if a.flagged != 1 else "" }}</div>
+            <div class="board-tally"><b>{{ a.reporters }}</b> persona{{ "s" if a.reporters != 1 else "" }} la reportaron</div>
           </div>
         </a>
         {% endfor %}
-      </div>
-      <div class="board-foot">
-        <span class="count-line">{% if total > hot_actas|length %}Las {{ hot_actas|length }} m&aacute;s reportadas de {{ total }} en total{% else %}{{ total }} acta{{ "s" if total != 1 else "" }} reportada{{ "s" if total != 1 else "" }}{% endif %}</span>
-        {% if total > hot_actas|length %}
-        <nav class="pager"><a href="/buscar?filter=reportadas">Ver todas &rarr;</a></nav>
-        {% endif %}
       </div>
     </section>
     {% else %}
