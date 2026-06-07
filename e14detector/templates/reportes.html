@@ -139,7 +139,7 @@
         <h2 id="board-h">Actas m&aacute;s reportadas como extra&ntilde;as</h2>
         <a href="/buscar?filter=reportadas">Ver en el buscador &rarr;</a>
       </div>
-      <p class="sec-sub">Las mesas donde m&aacute;s gente ha marcado casillas como extra&ntilde;as. Toca una para abrir su acta.</p>
+      <p class="sec-sub">Las mesas donde m&aacute;s gente ha marcado casillas como extra&ntilde;as. Toca una para abrir su acta, o ve la lista completa en el buscador.</p>
       <div class="board-list">
         {% for a in hot_actas %}
         <a class="board-item" style="--flag:{{ '%.3f'|format(a.flag_level) }}" href="/acta/{{ a.document_id }}">
@@ -152,12 +152,9 @@
         {% endfor %}
       </div>
       <div class="board-foot">
-        <span class="count-line">{{ total }} acta{{ "s" if total != 1 else "" }} reportada{{ "s" if total != 1 else "" }} &middot; p&aacute;gina {{ page }} de {{ pages }}</span>
-        {% if pages > 1 %}
-        <nav class="pager" aria-label="P&aacute;ginas">
-          {% if page > 1 %}<a href="/reportes{{ '?page=' ~ (page - 1) if page - 1 > 1 else '' }}">&larr; Anterior</a>{% endif %}
-          {% if page < pages %}<a href="/reportes?page={{ page + 1 }}">Siguiente &rarr;</a>{% endif %}
-        </nav>
+        <span class="count-line">{% if total > hot_actas|length %}Las {{ hot_actas|length }} m&aacute;s reportadas de {{ total }} en total{% else %}{{ total }} acta{{ "s" if total != 1 else "" }} reportada{{ "s" if total != 1 else "" }}{% endif %}</span>
+        {% if total > hot_actas|length %}
+        <nav class="pager"><a href="/buscar?filter=reportadas">Ver todas &rarr;</a></nav>
         {% endif %}
       </div>
     </section>

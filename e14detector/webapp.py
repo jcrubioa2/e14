@@ -40,8 +40,9 @@ from .vote_queue import make_publisher
 # /browse paginates over ACTAS (grouped), not individual crops.
 BROWSE_ACTAS_PER_PAGE = 12
 HOTLIST_SIZE = 8
-# /reportes pages through ALL reported actas (the billboard is no longer a fixed top-N).
-REPORTES_PER_PAGE = 12
+# /reportes shows a fixed top-N quick view of the most-reported actas; the full, searchable list
+# lives at /buscar?filter=reportadas. 12 tiles the 3-/4-column billboard grid cleanly.
+REPORTES_TOP_N = 12
 # The most-voted actas float silently to the top of /browse (crowd attention compounds).
 # Capped well under SQLite's bound-parameter limit so the "exclude these" clause is safe.
 VOTED_FLOAT_CAP = 300
@@ -1814,30 +1815,22 @@ def create_app(
         return RedirectResponse("/buscar?" + qs, status_code=308)
 
     @app.get("/reportes")
-    async def reportes(request: Request, page: int = Query(1, ge=1)):
-        # TAB 2 — Global reports: the paginated "most reported as extraña" billboard + room for
-        # future statistics. Pages through every reported acta, not just a fixed top-N.
-        # Clamp the page to the real page count BEFORE it becomes a cache key: _agg_cache is an
-        # unbounded, never-evicted process dict, so keying on a raw ?page= would let "?page=<huge>"
-        # mint endless entries. Clamping bounds the distinct keys to the actual number of pages
-        # (which the popularity dict — already cached, also used by /buscar?review=1 — gives cheaply).
-        pages = max(1, math.ceil(len(_agg_cached("popularity", community.acta_popularity)) / REPORTES_PER_PAGE))
-        page = max(1, min(page, pages))
-        board = _agg_cached(f"hot_actas_p{page}", lambda: _hot_actas_page(page))
-        canon = config.SITE_URL + "/reportes" + (f"?page={board['page']}" if board["page"] > 1 else "")
+    async def reportes(request: Request):
+        # TAB 2 — Global reports: a fixed top-N "most reported as extraña" billboard + the map
+        # stats. The full, filterable list lives at /buscar?filter=reportadas (linked in-page), so
+        # this stays a quick overview — no pager, and a single stable cache key.
+        board = _agg_cached("hot_actas_top", _hot_actas_top)
         return templates.TemplateResponse(
             request,
             "reportes.html",
             {
                 "hot_actas": board["cards"],
-                "page": board["page"],
-                "pages": board["pages"],
                 "total": board["total"],
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
                 "active": "reportes",
                 "site_url": config.SITE_URL,
-                "canonical": canon,
+                "canonical": config.SITE_URL + "/reportes",
                 "page_title": "Reportes — actas más reportadas como extrañas | Veeduría ciudadana E-14 2026",
                 "meta_description": (
                     "Las mesas donde más gente ha marcado casillas como extrañas en las actas "
@@ -2259,8 +2252,8 @@ def create_app(
     def _acta_card(db, doc_id: str, reporters: int, doc_row=None) -> dict | None:
         """One billboard-style card for an acta: a representative thumbnail (its most-flagged
         casilla), a location label, and a crowd tally (distinct reporters + how many casillas were
-        flagged). Shared by the public billboard (``_hot_actas_page``) and the
-        ``/buscar?review=1`` list so both render the identical tile. Pass ``doc_row``
+        flagged). Shared by the public billboard (``_hot_actas_top``) and the
+        ``/buscar?filter=reportadas`` list so both render the identical tile. Pass ``doc_row``
         to reuse a row already fetched (the review list already has it) and skip the geo lookup.
         """
         if doc_row is None:
@@ -2338,11 +2331,12 @@ def create_app(
             out[doc_id] = _flag_level(s, g)
         return out
 
-    def _hot_actas_page(page: int) -> dict:
-        """Paginated "most-reported-as-extraña" billboard for /reportes. Ranks EVERY acta the crowd
-        has flagged by how many distinct people reported it, then builds one ``_acta_card`` per acta
-        on the requested page. Only a page's worth of cards is built (each costs a vote_fields +
-        counts_among round-trip), and the ranked list comes from the cached popularity dict."""
+    def _hot_actas_top() -> dict:
+        """Top-N "most-reported-as-extraña" billboard for /reportes. Ranks EVERY acta the crowd has
+        flagged by how many distinct people reported it and builds one ``_acta_card`` for the top
+        ``REPORTES_TOP_N`` (each costs a vote_fields + counts_among round-trip); the ranked list
+        comes from the cached popularity dict. ``total`` is every qualifying reported acta, so the
+        page can link to the full list at /buscar?filter=reportadas."""
         pop = _agg_cached("popularity", community.acta_popularity)
         # Promotion floor: only rank actas reported by >= MIN_PROMOTE_VOTERS distinct voters, so a
         # single identity can't push an acta onto the public "most reported" board (see _hot_crops_payload).
@@ -2351,17 +2345,14 @@ def create_app(
             ((d, r) for d, r in pop.items() if r >= floor), key=lambda kv: kv[1], reverse=True
         ) if pop else []
         total = len(ranked)
-        pages = max(1, math.ceil(total / REPORTES_PER_PAGE))
-        page = max(1, min(page, pages))
-        window = ranked[(page - 1) * REPORTES_PER_PAGE: page * REPORTES_PER_PAGE]
         cards: list[dict] = []
-        if window:
+        if ranked:
             with conn() as db:
-                for doc_id, reporters in window:
+                for doc_id, reporters in ranked[:REPORTES_TOP_N]:
                     card = _acta_card(db, doc_id, reporters)
                     if card:
                         cards.append(card)
-        return {"cards": cards, "page": page, "pages": pages, "total": total}
+        return {"cards": cards, "total": total}
 
     @app.get("/api/billboard")
     async def api_billboard():

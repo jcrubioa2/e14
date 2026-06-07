@@ -1099,6 +1099,47 @@ def test_reportes_includes_map_assets(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_reportes_billboard_caps_at_top_n(tmp_path: Path) -> None:
+    """/reportes is a quick top-N view (no pager); when more reported actas exist it links to the
+    full list at /buscar?filter=reportadas instead of paginating."""
+    from e14detector.community import CommunityStore, field_key_of
+    from e14detector.webapp import REPORTES_TOP_N
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    cs = CommunityStore(community_db)
+    n_docs = REPORTES_TOP_N + 2  # more reported actas than the board shows
+    for i in range(n_docs):
+        doc_id = f"doc-{i:02d}"
+        store.upsert_document(DocumentMetadata(
+            document_id=doc_id, source_path=f"{doc_id}.pdf",
+            department_code="11", municipality_code="001",
+        ))
+        store.insert_vote_field(VoteField(
+            document_id=doc_id, page_number=1, row_type="candidate", row_number=1,
+            candidate_name="A", raw_crop_path=str(crop),
+        ))
+        cs.record_flag(field_key_of(doc_id, 1, 1, None), f"v{i}")
+    store.commit()
+    store.close()
+    cs.close()
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            html = (await client.get("/reportes")).text
+            assert html.count('class="board-item"') == REPORTES_TOP_N   # capped, not all n_docs
+            assert "/buscar?filter=reportadas" in html                  # link to the full list
+            assert f"de {n_docs} en total" in html                      # honest total
+            assert "?page=" not in html                                 # no pager anymore
+
+    asyncio.run(run())
+
+
 def test_colombia_geojson_bundled() -> None:
     from e14detector.webapp import DEPARTAMENTOS_GEOJSON, MUNICIPIOS_GEOJSON
 
