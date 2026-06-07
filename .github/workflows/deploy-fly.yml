@@ -1,0 +1,31 @@
+name: Deploy to Fly
+
+# Manual deploy only — press "Run workflow" in the Actions tab. The repo sandbox used
+# for development can't reach fly.io (allowlisted egress), so deploys run here on a
+# GitHub-hosted runner, which can. Requires a FLY_API_TOKEN repo secret (a Fly deploy
+# token created from the dashboard).
+on:
+  workflow_dispatch:
+
+concurrency: deploy-fly
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runtime pulls the results DB from the /data volume (E14_DB_SYNC) and crops
+      # from the Tigris CDN, so the Dockerfile's `COPY data/detector/` is vestigial — but
+      # it still needs the path to exist in the build context. An empty dir satisfies it
+      # without baking any data into the image.
+      - name: Ensure baked-data path exists
+        run: mkdir -p data/detector
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # App name + config come from fly.toml. --remote-only builds on Fly's builder, so the
+      # runner needs no Docker.
+      - run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
