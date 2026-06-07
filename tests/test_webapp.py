@@ -524,6 +524,60 @@ def test_browse_shows_billboard(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_buscar_crowd_filters(tmp_path: Path) -> None:
+    """/buscar?filter= narrows by crowd signal: reportadas (flagged >=1), revisadas (any vote),
+    sin_revisar (never voted). review=1 stays a back-compat alias for reportadas."""
+    from e14detector.community import CommunityStore, field_key_of
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    for doc_id in ("doc-rep", "doc-good", "doc-clean"):
+        store.upsert_document(DocumentMetadata(
+            document_id=doc_id, source_path=f"{doc_id}.pdf",
+            department_code="11", municipality_code="001",
+        ))
+        store.insert_vote_field(VoteField(
+            document_id=doc_id, page_number=1, row_type="candidate", row_number=1,
+            candidate_name="A", raw_crop_path=str(crop),
+        ))
+    store.commit()
+    store.close()
+
+    cs = CommunityStore(community_db)
+    cs.record_flag(field_key_of("doc-rep", 1, 1, None), "v1")     # reportada (-> also revisada)
+    cs.record_appeal(field_key_of("doc-good", 1, 1, None), "v2")  # revisada, "se ve bien" only
+    cs.close()                                                    # doc-clean: never touched
+
+    async def run() -> None:
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            rep = (await client.get("/buscar?filter=reportadas")).text
+            assert "/acta/doc-rep" in rep
+            assert "/acta/doc-good" not in rep and "/acta/doc-clean" not in rep
+
+            rev = (await client.get("/buscar?filter=revisadas")).text
+            assert "/acta/doc-rep" in rev and "/acta/doc-good" in rev
+            assert "/acta/doc-clean" not in rev
+
+            sin = (await client.get("/buscar?filter=sin_revisar")).text
+            assert "/acta/doc-clean" in sin
+            assert "/acta/doc-rep" not in sin and "/acta/doc-good" not in sin
+
+            # HIGH_VOTE_THRESHOLD (100) unmet -> muy_reportadas is empty but still 200.
+            muy = await client.get("/buscar?filter=muy_reportadas")
+            assert muy.status_code == 200 and "/acta/doc-rep" not in muy.text
+
+            # Back-compat: review=1 behaves exactly like filter=reportadas.
+            alias = (await client.get("/buscar?review=1")).text
+            assert "/acta/doc-rep" in alias and "/acta/doc-clean" not in alias
+
+    asyncio.run(run())
+
+
 def test_compute_sync_progress_separates_browsable_from_total(tmp_path: Path) -> None:
     """The served headline counts browsable actas only; docs with no candidate crop widen the
     served_total gap, never the served count. This is the reconciliation the admin board renders,
