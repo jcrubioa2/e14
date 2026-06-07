@@ -577,22 +577,28 @@
       document.body.style.paddingBottom = (barH + footGap) + 'px';
       const width = board.getBoundingClientRect().width || board.clientWidth || window.innerWidth;
 
-      // Pick the column count from a target tile WIDTH so the deck leans wide and stays predictable
-      // across screens (the ask): phones land on 3-up, only genuinely wide screens reach 4-up. This is
-      // decoupled from vertical space on purpose — basing it on height is what made the earlier bias
-      // unreliable (a phone's tight height pushed it back to 4-up). Tile HEIGHT then just follows from
-      // avail/rows; crops are object-fit:contain and the page can scroll, so shorter rows never cut
-      // content. IDEAL_TILE_W is the knob: larger => fewer, wider columns. (~3-up for width 340-470.)
-      const IDEAL_TILE_W = 128;
-      const MIN_TILE_H = 24;
-      let cols = Math.max(2, Math.min(4, Math.round((width + gap) / (IDEAL_TILE_W + gap))));
-      cols = Math.min(cols, n);                       // never more columns than casillas
-      let rows = Math.ceil(n / cols);
-      // Backstop for high-casilla decks only: add a column if rows would be unreadably short.
-      while (cols < Math.min(4, n) && (avail - gap * (rows - 1)) / rows - overhead < MIN_TILE_H) {
-        cols++;
-        rows = Math.ceil(n / cols);
+      // Choose columns by how large the (wide) ballot crop actually RENDERS, instead of by the most
+      // "square" cell. The old objective maximized the smallest cell side, so on a phone 4 narrow-tall
+      // tiles edged out 3 wide-short ones. Here, for each candidate column count, the crop lays out
+      // object-fit:contain inside the cell, so its rendered width = min(cellWidth, cellHeight * CROP_AR);
+      // we keep the count that maximizes that. Because the crops are wide (handwritten number rows),
+      // this naturally prefers fewer, wider, shorter tiles — leaning to 3-up on phones — yet stays fully
+      // adaptive (it still responds to width AND height, so it picks 2-up on a tiny screen or 4-up when
+      // the geometry genuinely favors it). No hard-wired width breakpoints. CROP_AR is the only knob:
+      // higher => leans wider/shorter, lower => squarer. Ties go to fewer columns (wider).
+      const CROP_AR = 2.0;
+      let best = null;
+      for (let c = 2; c <= Math.min(4, n); c++) {
+        const r = Math.ceil(n / c);
+        const cellW = (width - gap * (c - 1)) / c - tilePad * 2;
+        const cellH = (avail - gap * (r - 1)) / r - overhead;   // height left for the crop after caption+pad
+        if (cellW <= 0 || cellH <= 0) continue;
+        const renderedW = Math.min(cellW, cellH * CROP_AR);     // how wide the contained crop shows
+        if (!best || renderedW > best.renderedW + 1) best = { cols: c, rows: r, renderedW };
       }
+      if (!best) { const c = Math.min(n, 3); best = { cols: c, rows: Math.ceil(n / c), renderedW: 0 }; }
+      const cols = best.cols;
+      const rows = best.rows;
       grid.style.width = (width > 0 ? width + 'px' : '100%');
       grid.style.maxWidth = 'none';
       grid.style.height = avail + 'px';
