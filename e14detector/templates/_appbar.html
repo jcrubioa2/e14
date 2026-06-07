@@ -163,3 +163,104 @@
     }, 90000);
   })();
 </script>
+
+{# ── PWA: service-worker registration + install affordance ─────────────────────────────
+   A self-contained, namespaced (.e14pwa*) bottom banner that is injected only when the app
+   is actually installable, so it never disturbs the appbar's 3-tab layout. Two paths:
+   Android/desktop capture `beforeinstallprompt` and offer a real one-tap install button;
+   iOS Safari (no such event) gets the "Compartir → Agregar a inicio" instruction instead.
+   Hidden when already installed, and dismissals stick for a week so it never nags. #}
+<style>
+  .e14pwa { position:fixed; left:12px; right:12px; bottom:12px; z-index:9000; max-width:560px; margin:0 auto;
+            display:none; align-items:center; gap:12px; padding:12px 14px; background:var(--card,#fff);
+            border:1px solid var(--line,#E6E1D4); border-radius:14px;
+            box-shadow:0 10px 30px rgba(28,26,21,.16), 0 2px 6px rgba(28,26,21,.08);
+            font-family:inherit; animation:e14pwa-in .28s cubic-bezier(.2,.7,.2,1); }
+  .e14pwa.is-on { display:flex; }
+  @keyframes e14pwa-in { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:none; } }
+  .e14pwa-ic { flex:0 0 auto; width:38px; height:38px; border-radius:10px; }
+  .e14pwa-tx { flex:1 1 auto; min-width:0; }
+  .e14pwa-tx b { display:block; font-size:14px; font-weight:800; color:var(--ink,#1C1A15); line-height:1.25; }
+  .e14pwa-tx span { display:block; font-size:12.5px; color:var(--ink-soft,#6E695E); line-height:1.35; margin-top:1px; }
+  .e14pwa-go { flex:0 0 auto; font:inherit; font-weight:800; font-size:14px; color:#fff; background:var(--red,#D93A28);
+               border:0; border-radius:999px; padding:10px 18px; min-height:42px; cursor:pointer; }
+  .e14pwa-go:active { transform:translateY(1px); }
+  .e14pwa-x { flex:0 0 auto; width:30px; height:30px; border:0; background:transparent; cursor:pointer;
+              color:var(--ink-faint,#9A9488); font-size:20px; line-height:1; border-radius:8px; }
+  .e14pwa-x:hover { color:var(--ink,#1C1A15); }
+  @media (prefers-reduced-motion: reduce) { .e14pwa { animation:none; } }
+</style>
+<div class="e14pwa" id="e14pwa" role="dialog" aria-label="Instalar la aplicación">
+  <img class="e14pwa-ic" src="/static/icons/icon-192.png" alt="" aria-hidden="true">
+  <div class="e14pwa-tx">
+    <b>Instala la veeduría</b>
+    <span id="e14pwa-sub">Acceso directo desde tu pantalla de inicio.</span>
+  </div>
+  <button class="e14pwa-go" id="e14pwa-go" type="button">Instalar</button>
+  <button class="e14pwa-x" id="e14pwa-x" type="button" aria-label="Cerrar">&times;</button>
+</div>
+<script>
+  (function () {
+    // 1) Register the service worker (installability + instant repeat loads). Best-effort.
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js').catch(function () {});
+      });
+    }
+
+    var banner = document.getElementById('e14pwa');
+    if (!banner) return;
+    var sub = document.getElementById('e14pwa-sub');
+    var goBtn = document.getElementById('e14pwa-go');
+    var xBtn = document.getElementById('e14pwa-x');
+    var DISMISS_KEY = 'e14pwa_dismissed';
+    var WEEK = 7 * 24 * 60 * 60 * 1000;
+
+    function installed() {
+      return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+             window.navigator.standalone === true;
+    }
+    function dismissedRecently() {
+      try {
+        var t = parseInt(localStorage.getItem(DISMISS_KEY), 10);
+        return t && (Date.now() - t) < WEEK;
+      } catch (e) { return false; }
+    }
+    function hide() { banner.classList.remove('is-on'); }
+    function show() { if (!installed() && !dismissedRecently()) banner.classList.add('is-on'); }
+
+    xBtn.addEventListener('click', function () {
+      hide();
+      try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch (e) {}
+    });
+
+    var isiOS = /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var isSafari = /^((?!chrome|crios|fxios|android).)*safari/i.test(navigator.userAgent);
+
+    if (isiOS && isSafari) {
+      // iOS Safari has no install event — guide the manual Share → Add to Home Screen flow.
+      goBtn.style.display = 'none';
+      sub.textContent = 'Toca Compartir y luego “Agregar a inicio”.';
+      show();
+      return;
+    }
+
+    // Android / desktop Chromium: capture the prompt and drive it from our button.
+    var deferred = null;
+    window.addEventListener('beforeinstallprompt', function (e) {
+      e.preventDefault();
+      deferred = e;
+      show();
+    });
+    goBtn.addEventListener('click', function () {
+      if (!deferred) { hide(); return; }
+      deferred.prompt();
+      deferred.userChoice.finally(function () { deferred = null; hide(); });
+    });
+    window.addEventListener('appinstalled', function () {
+      hide();
+      try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch (e) {}
+    });
+  })();
+</script>

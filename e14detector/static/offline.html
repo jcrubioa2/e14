@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es-CO">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#FBFAF6">
+  <title>Sin conexión · Veeduría E-14</title>
+  <style>
+    :root { --paper:#FBFAF6; --ink:#1C1A15; --ink-soft:#6E695E; --red:#D93A28; --line:#E6E1D4; }
+    * { box-sizing:border-box; }
+    html,body { margin:0; height:100%; }
+    body { background:var(--paper); color:var(--ink); display:flex; align-items:center; justify-content:center;
+           padding:28px; text-align:center;
+           font-family:"Hanken Grotesk", system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .card { max-width:440px; }
+    .glyph { width:84px; height:84px; margin:0 auto 20px; }
+    h1 { font-size:24px; margin:0 0 10px; letter-spacing:-0.01em; }
+    p { font-size:15.5px; line-height:1.55; color:var(--ink-soft); margin:0 0 22px; }
+    button { font:inherit; font-weight:700; font-size:15px; color:#fff; background:var(--red);
+             border:0; border-radius:999px; padding:13px 26px; cursor:pointer; min-height:46px; }
+    button:active { transform:translateY(1px); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <svg class="glyph" viewBox="0 0 100 100" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="96" height="96" rx="22" fill="#D93A28"/>
+      <circle cx="44" cy="44" r="22" stroke="#fff" stroke-width="6"/>
+      <line x1="37" y1="34" x2="37" y2="54" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+      <line x1="44" y1="34" x2="44" y2="54" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+      <line x1="51" y1="34" x2="51" y2="54" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+      <line x1="60" y1="60" x2="76" y2="76" stroke="#fff" stroke-width="7" stroke-linecap="round"/>
+    </svg>
+    <h1>Estás sin conexión</h1>
+    <p>No pudimos cargar las actas porque no hay conexión a internet. Los datos de la
+       veeduría son en vivo, así que necesitas estar conectado para revisarlos. Reintenta
+       cuando vuelva tu señal.</p>
+    <button onclick="location.reload()">Reintentar</button>
+  </div>
+</body>
+</html>
