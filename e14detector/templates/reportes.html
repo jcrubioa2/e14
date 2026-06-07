@@ -145,9 +145,14 @@
     .map-controls > button { padding:9px 14px; border:1px solid var(--line); border-radius:10px; background:var(--card); font:inherit; font-weight:700; cursor:pointer; }
     .map-controls > button:hover { border-color:var(--red-line); }
     #reportes-map { height:min(420px, 55vh); border:1px solid var(--line); border-radius:14px; background:var(--paper-2); box-shadow:var(--shadow); }
-    .map-legend { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--ink-soft); }
-    .map-legend-bar { height:8px; flex:1; min-width:140px; max-width:280px; border-radius:99px;
+    /* Legend stacks the bar over its two end-labels so "Menos" and "Más …" always sit at the
+       gradient's ends (space-between) — on a narrow phone they'd otherwise wrap onto the left and
+       read as if both describe the low end. */
+    .map-legend { display:flex; flex-direction:column; gap:6px; max-width:420px; margin-top:10px; font-size:12px; color:var(--ink-soft); }
+    .map-legend-bar { width:100%; height:8px; border-radius:99px;
       background:linear-gradient(90deg, #e8e4da 0%, #f0b5ab 35%, #d93a28 100%); }
+    .map-legend-ends { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; }
+    .map-legend-ends > span:last-child { text-align:right; }
     .map-foot { color:var(--ink-faint); font-size:12px; line-height:1.5; margin-top:8px; }
 
     .empty { text-align:center; color:var(--ink-soft); padding:48px 18px; font-size:15px; }
@@ -225,7 +230,8 @@
         </div>
         <div id="reportes-map" role="img" aria-label="Mapa de reportes por municipio"></div>
         <div class="map-legend" aria-hidden="true">
-          <span>Menos</span><span class="map-legend-bar"></span><span id="map-legend-max">M&aacute;s mesas reportadas</span>
+          <span class="map-legend-bar"></span>
+          <div class="map-legend-ends"><span>Menos</span><span id="map-legend-max">M&aacute;s mesas reportadas</span></div>
         </div>
         <p class="map-foot">Los municipios sin mesas en la veedur&iacute;a aparecen en gris. Pasa el cursor para ver cifras; haz clic para buscar actas en ese lugar.</p>
         </div>
