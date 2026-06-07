@@ -1,0 +1,26 @@
+{
+  "id": "/votar",
+  "name": "Veeduría ciudadana E-14 2026",
+  "short_name": "Veeduría E-14",
+  "description": "Revisa las actas E-14 de la elección presidencial 2026 y reporta posibles irregularidades. Veeduría ciudadana, acta por acta.",
+  "lang": "es-CO",
+  "dir": "ltr",
+  "start_url": "/votar?utm_source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#FBFAF6",
+  "theme_color": "#FBFAF6",
+  "categories": ["news", "government", "utilities"],
+  "icons": [
+    { "src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/static/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Revisar actas", "short_name": "Revisar", "url": "/votar?utm_source=pwa-shortcut", "icons": [{ "src": "/static/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Reportes globales", "short_name": "Reportes", "url": "/reportes?utm_source=pwa-shortcut" },
+    { "name": "Buscar acta", "short_name": "Buscar", "url": "/buscar?utm_source=pwa-shortcut" }
+  ]
+}

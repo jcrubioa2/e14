@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import alerts, config
@@ -1120,6 +1121,7 @@ def create_app(
     # names resolved at render time (see enrich_doc_names) instead of duplicating them per row.
     geo = load_geo_names()
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+    static_dir = Path(__file__).resolve().parent / "static"
     # Round-aware appbar (Phase 2): exposed once as Jinja globals so every page's shared appbar can
     # show the "primera vuelta" archive button when this process serves the runoff — no per-route
     # context churn. On the R1 app r1_archive_url is empty, so the button never renders (byte-identical).
@@ -1358,6 +1360,12 @@ def create_app(
     # queued votes. Best-effort, in-memory (per machine, resets on deploy) — watch it in /health.
     app.state.telemetry: collections.Counter = collections.Counter()
 
+    # PWA static assets (icons, sw.js, manifest, offline page). Long-cached and immutable enough
+    # that StaticFiles' ETag/Last-Modified handling is fine; the service worker itself is served
+    # by its own route below so it can carry no-cache + root scope.
+    if static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     def conn() -> sqlite3.Connection:
         if not results_db.exists():
             raise HTTPException(status_code=500, detail=f"results DB not found: {results_db}")
@@ -1558,6 +1566,27 @@ def create_app(
         lock = await asyncio.to_thread(
             set_db_lock, want, reason="admin console toggle", n_docs=n_docs, by="admin")
         return JSONResponse({"ok": True, "lock": lock})
+
+    @app.get("/manifest.webmanifest")
+    async def manifest():
+        """Web app manifest — installability metadata. Served from a stable root path with the
+        spec content-type so Android/desktop browsers offer the install prompt."""
+        path = static_dir / "manifest.webmanifest"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="manifest not found")
+        return FileResponse(path, media_type="application/manifest+json",
+                            headers={"Cache-Control": "public, max-age=3600"})
+
+    @app.get("/sw.js")
+    async def service_worker():
+        """Service worker. MUST live at the origin root so its default scope is '/'. Sent with
+        no-store so a new deploy's SW is picked up on the next visit (the SW then versions its
+        own caches). Service-Worker-Allowed is belt-and-suspenders for the root scope."""
+        path = static_dir / "sw.js"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="service worker not found")
+        return FileResponse(path, media_type="text/javascript",
+                            headers={"Cache-Control": "no-store", "Service-Worker-Allowed": "/"})
 
     @app.get("/robots.txt")
     async def robots():
