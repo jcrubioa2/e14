@@ -66,9 +66,9 @@
     .sec-head a { font-size:13.5px; font-weight:700; white-space:nowrap; }
     .sec-sub { color:var(--ink-soft); font-size:13.5px; margin:0 0 14px; }
 
-    /* ===== One cohesive "reports" surface: a ranked reel of the most-reported actas on top,
-       the tabbed stats viz below, sharing a single bordered card. Editorial broadsheet feel:
-       oversized Fraunces rank numerals as the through-line, warm paper palette, quiet motion. ===== */
+    /* ===== Two stacked cards: a ranked reel of the most-reported actas, then the tabbed stats
+       viz below — decoupled into separate surfaces. Editorial broadsheet feel: oversized Fraunces
+       rank numerals as the through-line, warm paper palette, quiet motion. ===== */
     .surface { border:1px solid var(--line); border-radius:20px; background:var(--card);
                box-shadow:0 1px 1px rgba(28,26,21,.03), 0 10px 30px -12px rgba(28,26,21,.18); overflow:hidden; }
     .rblock { padding:16px 18px; }
@@ -80,10 +80,10 @@
     .rblock-sub { color:var(--ink-faint); font-size:12px; margin:0 0 12px; line-height:1.45; }
     .rblock-sub b { color:var(--red-deep); font-weight:800; }
 
-    /* Reel: a height-capped, internally-scrolling ranked list. The billboard never grows past a
-       few rows, so the stats tabs below stay within reach no matter how many actas there are; a
-       bottom fade hints there's more to scroll. Each row is full width, so nothing truncates. */
-    .hot-reel { max-height:246px; overflow-y:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;
+    /* Reel: a height-capped, internally-scrolling ranked list. ~3 rows show at once and the rest
+       scroll inside, so the billboard stays compact no matter how many actas there are; a bottom
+       fade hints there's more. Each row is full width, so nothing truncates. */
+    .hot-reel { max-height:202px; overflow-y:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none;
                 scroll-snap-type:y proximity; margin:0 -4px;
                 -webkit-mask-image:linear-gradient(180deg, #000 calc(100% - 24px), transparent);
                         mask-image:linear-gradient(180deg, #000 calc(100% - 24px), transparent); }
@@ -169,9 +169,8 @@
   </header>
 
   <main>
-    <!-- One cohesive reports surface: a ranked carousel of the most-reported actas on top, the
-         tabbed stats viz below — sharing a single card so they read as one thing. -->
-    <section class="surface" aria-label="Reportes de la comunidad">
+    <!-- Billboard card: a ranked reel of the most-reported actas, decoupled into its own surface. -->
+    <section class="surface" aria-label="Actas m&aacute;s reportadas">
       <div class="rblock">
         <div class="rblock-head">
           <h2 id="board-h">Las m&aacute;s reportadas</h2>
@@ -198,11 +197,13 @@
         <p class="rail-empty">A&uacute;n no hay reportes. S&eacute; de las primeras personas en revisar una mesa y marcar lo que se vea extra&ntilde;o.</p>
         {% endif %}
       </div>
+    </section>
 
+    <!-- Stats card: tabbed viz, decoupled from the billboard into its own surface. The map is the
+         only viz today, with a quiet placeholder hinting more is coming. To add a viz: append a real
+         button.viz-tab plus a matching panel (div.viz-panel) with the same id wired via data-panel. -->
+    <section class="surface" aria-label="Estad&iacute;sticas de reportes">
       <div class="rblock">
-        <!-- Tabs pick which viz shows; the map is the only one today, with a quiet placeholder hinting
-             more is coming. To add a viz: append a real button.viz-tab plus a matching panel
-             (div.viz-panel) with the same id wired via data-panel. -->
         <div class="viz-tabs" role="tablist" aria-label="Vistas de estad&iacute;sticas">
           <button type="button" class="viz-tab is-on" id="tab-map" role="tab" aria-selected="true" aria-controls="panel-map" data-panel="panel-map">Mapa</button>
           <span class="viz-tab ghost" aria-hidden="true">M&aacute;s an&aacute;lisis pronto</span>
