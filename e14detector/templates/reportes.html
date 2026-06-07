@@ -80,12 +80,16 @@
 
     /* Carousel: horizontal snap scroller with faded edges + a red scroll-progress bar. */
     .rail-wrap { position:relative; }
-    .hot-rail { display:flex; gap:14px; overflow-x:auto; scroll-snap-type:x proximity; padding:4px 2px 14px;
+    .hot-rail { display:flex; gap:12px; overflow-x:auto; scroll-snap-type:x proximity; padding:4px 2px 14px;
                 scrollbar-width:none; -webkit-overflow-scrolling:touch;
-                -webkit-mask-image:linear-gradient(90deg, transparent, #000 26px, #000 calc(100% - 26px), transparent);
-                        mask-image:linear-gradient(90deg, transparent, #000 26px, #000 calc(100% - 26px), transparent); }
+                /* fade only the right edge so cards #1–#3 stay crisp while hinting there's more */
+                -webkit-mask-image:linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+                        mask-image:linear-gradient(90deg, #000 calc(100% - 32px), transparent); }
     .hot-rail::-webkit-scrollbar { display:none; }
-    .hot-card { position:relative; flex:0 0 198px; scroll-snap-align:start; display:flex; flex-direction:column;
+    /* At least ~3 cards visible at once: a third of the rail on phones, capped on wide screens so
+       several show. */
+    .hot-card { position:relative; flex:0 0 calc((100% - 24px) / 3.15); max-width:186px;
+                scroll-snap-align:start; display:flex; flex-direction:column;
                 border:1px solid var(--line); border-radius:15px; background:var(--card); overflow:hidden;
                 text-decoration:none; color:inherit;
                 transition:transform .18s cubic-bezier(.2,.7,.2,1), box-shadow .18s, border-color .18s;
@@ -99,8 +103,8 @@
     .hot-card:hover .hot-crop img { transform:scale(1.07); }
     .hot-meta { display:flex; align-items:flex-start; gap:10px; padding:11px 12px 13px; }
     /* Oversized editorial rank numeral, red fading with the acta's "extraña" tone (--flag). */
-    .hot-num { font-family:"Fraunces", serif; font-weight:600; font-size:30px; line-height:.86; letter-spacing:-.02em;
-               color:rgba(217,58,40, calc(.45 + .55 * var(--flag, 0))); }
+    .hot-num { font-family:"Fraunces", serif; font-weight:600; font-size:clamp(22px, 7vw, 30px); line-height:.86;
+               letter-spacing:-.02em; color:rgba(217,58,40, calc(.45 + .55 * var(--flag, 0))); }
     .hot-info { min-width:0; }
     .hot-loc { font-size:12.5px; font-weight:700; line-height:1.2; display:-webkit-box; -webkit-line-clamp:2;
                -webkit-box-orient:vertical; overflow:hidden; }
