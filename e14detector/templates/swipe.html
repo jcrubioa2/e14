@@ -203,21 +203,22 @@
     .toast.win { background:var(--rank, var(--link)); font-weight:700; }
     .toast.win b { font-weight:800; }
 
-    /* Mobile voting: one screen, no scroll — grid stretches to fill the gap above the sticky bar and
-       crops scale up to use every pixel (fitGridLayout picks columns for max readable size). */
+    /* Mobile voting: fitGridLayout sizes the deck to fill one screen *as if the first-visit steps strip
+       weren't there*, so the tiles look identical whether it's open or closed. The page can scroll (it
+       only needs to while that strip is open); fitGridLayout reserves bottom room for the sticky bar. */
     @media (max-width:600px) {
-      body { height:100dvh; overflow:hidden; padding-bottom:0; display:flex; flex-direction:column; align-items:stretch; }
+      body { min-height:100dvh; box-sizing:border-box; overflow-x:hidden; padding-bottom:0; display:flex; flex-direction:column; align-items:stretch; }
       .appbar-wrap { flex:0 0 auto; width:100%; }
       header { flex:0 0 auto; width:100%; }
       .eyebrow { display:none; }
       .head-inner { padding:10px 16px 8px; }
       header h1 { font-size:22px; }
       main { width:100%; max-width:none; margin:0; padding:8px 12px 0; flex:1 1 auto; min-height:0; min-width:0;
-              display:flex; flex-direction:column; align-items:stretch; overflow:hidden; box-sizing:border-box; }
+              display:flex; flex-direction:column; align-items:stretch; box-sizing:border-box; }
       .meta { margin-bottom:8px; flex:0 0 auto; }
       .rank .next { display:none; }
       .note { display:none; }
-      #board { flex:1 1 auto; min-height:0; min-width:0; width:100%; overflow:hidden; }
+      #board { flex:1 1 auto; min-height:0; min-width:0; width:100%; }
       .grid {
         width:100%;
         max-width:none;
@@ -287,8 +288,8 @@
         document.getElementById('onboard-close').addEventListener('click', function () {
           ob.classList.add('is-dismissed');
           try { localStorage.setItem(KEY, '1'); } catch (e) {}
-          // The steps strip sat above the deck; removing it frees vertical space, so re-fit the
-          // grid to the now-taller viewport (otherwise the deck stays collapsed until a reload).
+          // The deck is already sized as if this strip weren't here, so closing it doesn't resize the
+          // tiles — just re-run the fit so the scroll reserve settles now that the page no longer scrolls.
           window.dispatchEvent(new Event('resize'));
         });
       })();
@@ -548,18 +549,32 @@
         grid.style.removeProperty('--tile-gap');
         grid.style.removeProperty('--tile-pad');
         document.body.style.overflow = '';
+        document.body.style.paddingBottom = '';
         return;
       }
-      document.body.style.overflow = 'hidden';
       const gap = 8;
       const tilePad = 5;
       const capH = 13;
       const overhead = tilePad * 2 + capH + 3;
       const footGap = 14;
       void board.offsetWidth;
-      const top = grid.getBoundingClientRect().top;
+      // Size the deck to fill the screen as if the first-visit steps strip weren't there, so the tiles
+      // are identical whether it's open or closed; when it IS open the page just scrolls past it. stripH
+      // is the strip's vertical footprint (box + margins) added back so `avail` is strip-independent, and
+      // window.scrollY keeps the measurement right if a resize fires while the page is scrolled.
+      const onboard = document.getElementById('onboard');
+      let stripH = 0;
+      if (onboard && onboard.offsetParent !== null) {
+        const cs = getComputedStyle(onboard);
+        stripH = onboard.offsetHeight + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+      }
+      const top = grid.getBoundingClientRect().top + window.scrollY - stripH;
       const barH = bar.hidden ? 0 : bar.offsetHeight;
       const avail = Math.max(140, window.innerHeight - top - barH - footGap);
+      // Reserve scroll room for the fixed bottom bar so the last row clears it at full scroll. On mobile
+      // body is border-box with min-height:100dvh, so this padding adds no scroll while the strip is
+      // closed (the deck already stops above the bar) — it only matters once the strip makes it scroll.
+      document.body.style.paddingBottom = (barH + footGap) + 'px';
       const width = board.getBoundingClientRect().width || board.clientWidth || window.innerWidth;
 
       let best = null;
@@ -598,6 +613,9 @@
     MOBILE_GRID_MQ.addEventListener('change', () => requestAnimationFrame(refitGrid));
     window.addEventListener('resize', () => requestAnimationFrame(refitGrid));
     window.addEventListener('orientationchange', () => setTimeout(refitGrid, 120));
+    // Re-fit once everything (fonts, the steps strip) has settled — its measured height can shift after
+    // first paint, and the deck is sized from it.
+    window.addEventListener('load', () => requestAnimationFrame(refitGrid));
 
     // Turn a tile element into a live casilla: load its crop, wire mark/undo. Used both for
     // reused placeholders (filled in place) and brand-new tiles (which also animate in).
@@ -702,6 +720,7 @@
       board.innerHTML = '<div class="empty"><span class="big">Gracias por participar</span>' + msg + '</div>';
       meta.hidden = true; noteEl.hidden = true; bar.hidden = true;
       document.body.style.overflow = '';
+      document.body.style.paddingBottom = '';
     }
 
     // One fetch of a fresh mesa, with a single retry so we don't serve the same mesa twice in a row.
