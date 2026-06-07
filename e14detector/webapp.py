@@ -41,8 +41,9 @@ from .vote_queue import make_publisher
 BROWSE_ACTAS_PER_PAGE = 12
 HOTLIST_SIZE = 8
 # /reportes shows a fixed top-N quick view of the most-reported actas; the full, searchable list
-# lives at /buscar?filter=reportadas. 12 tiles the 3-/4-column billboard grid cleanly.
-REPORTES_TOP_N = 12
+# lives at /buscar?filter=reportadas. 10 = a clean ranked leaderboard (the grid is 2-up on phones,
+# 5-up on desktop, so a full top-10 tiles into even rows).
+REPORTES_TOP_N = 10
 # The most-voted actas float silently to the top of /browse (crowd attention compounds).
 # Capped well under SQLite's bound-parameter limit so the "exclude these" clause is safe.
 VOTED_FLOAT_CAP = 300
