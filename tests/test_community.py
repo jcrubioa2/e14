@@ -343,7 +343,8 @@ def test_acta_page_is_readonly_with_public_counts(tmp_path: Path) -> None:
     assert "/votar" in page
 
 
-def test_browse_floats_most_voted_to_top_silently(tmp_path: Path) -> None:
+def test_buscar_floats_most_voted_to_top_silently(tmp_path: Path) -> None:
+    # The directory list lives at /buscar since the /browse split (bare /browse now 307s to /votar).
     output_dir, db = _make_db(tmp_path, {"doc-a": 1, "doc-b": 1, "doc-c": 1})
     community = CommunityStore(tmp_path / "community.sqlite")
     community.record_flag(field_key_of("doc-c", 1, 1, None), "v1")
@@ -351,7 +352,7 @@ def test_browse_floats_most_voted_to_top_silently(tmp_path: Path) -> None:
     community.record_flag(field_key_of("doc-b", 1, 1, None), "v1")
     community.close()
     app = create_app(results_db=db, output_dir=output_dir, community_db=tmp_path / "community.sqlite")
-    html = TestClient(app).get("/browse").text
+    html = TestClient(app).get("/buscar").text
     pos = {d: html.index(f"/acta/{d}") for d in ("doc-a", "doc-b", "doc-c")}
     assert pos["doc-c"] < pos["doc-b"] < pos["doc-a"]   # vote order beats id order
     assert "2 votos" not in html and "votantes" not in html  # counts stay silent here
@@ -385,7 +386,8 @@ def test_high_vote_label_shows_from_crowd_alone(tmp_path: Path, monkeypatch) -> 
                                    community_db=tmp_path / "community.sqlite"))
     acta = client.get("/acta/doc1").text
     assert "muy reportada por la comunidad" in acta
-    assert client.get("/browse").text.count("muy reportada por la comunidad") >= 1
+    # The directory chip lives at /buscar since the /browse split (bare /browse now 307s to /votar).
+    assert client.get("/buscar").text.count("muy reportada por la comunidad") >= 1
 
 
 # --- Operator admin path --------------------------------------------------
