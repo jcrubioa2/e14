@@ -1132,10 +1132,8 @@ def test_reportes_billboard_caps_at_top_n(tmp_path: Path) -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             html = (await client.get("/reportes")).text
-            # class="board-item (no closing quote) matches both plain and podium "board-item top"
-            # tiles, and avoids the CSS rules (which use .board-item).
-            assert html.count('class="board-item') == REPORTES_TOP_N    # capped, not all n_docs
-            assert html.count('class="board-rank"') == REPORTES_TOP_N   # one rank badge per tile
+            assert html.count('class="lead-row"') == REPORTES_TOP_N     # capped, not all n_docs
+            assert html.count('class="lead-rank"') == REPORTES_TOP_N    # one rank per row
             assert "/buscar?filter=reportadas" in html                  # "Ver todas" link to full list
             assert "?page=" not in html                                 # no pager anymore
 
