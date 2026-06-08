@@ -884,6 +884,11 @@
     showLoadingGrid();
     loadDeck();
     flushOutbox();                  // deliver any votes left queued from a previous visit / tab close
+    // Background retry: the outbox is otherwise only woken by a vote/load/tab-hide. If a flush bailed
+    // (e.g. a flaky bot-gate solve) it would sit until the next such event — minutes if the user idles.
+    // Poll gently while anything is queued; flushOutbox self-guards (single in-flight + bounded re-auth)
+    // and the server dedups, so this only shrinks worst-case delivery to ~20s without burning solves.
+    setInterval(() => { if (outbox.length) flushOutbox(); }, 20000);
   </script>
 </body>
 </html>
