@@ -14,7 +14,7 @@ from .classifier import classify_field, classify_slot
 from .cropper import crop_image, save_field_crops, save_page_debug_overlay
 from .cv_features import extract_slot_features
 from .digit_shape import digit_shape_score, extract_digit_shape_features
-from .layout import field_layouts_for_page
+from .layout import field_layouts_for_page, geometry_anchor
 from .pdf_render import PdfRenderError, render_pdf_pages
 from .preprocess import preprocess_for_features
 from .schemas import DocumentMetadata, FieldClassification, SlotClass, VoteField
@@ -118,7 +118,10 @@ def compute_pdf(
                     page.page_number,
                     Path(output_dir) / "debug" / f"{meta.document_id}_p{page.page_number}_layout.png",
                 )
-            for layout in field_layouts_for_page(page.page_number, page.width, page.height):
+            # Alternate clean scan geometries (wide/other) anchor the coords to the form's
+            # sub-rectangle; canonical/photo pages get None (unchanged full-page coords).
+            anchor = geometry_anchor(page.width, page.height)
+            for layout in field_layouts_for_page(page.page_number, page.width, page.height, anchor=anchor):
                 shape_slot = None
                 try:
                     # Threshold the whole field once only to locate ink valleys, then

@@ -30,7 +30,12 @@ CREATE TABLE IF NOT EXISTS documents (
     processing_timestamp TEXT,
     -- Count of candidate rows with a crop, maintained incrementally (see insert_vote_field /
     -- clear_document_results). Lets /browse list+filter actas without joining vote_fields.
-    n_candidates INTEGER NOT NULL DEFAULT 0
+    n_candidates INTEGER NOT NULL DEFAULT 0,
+    -- 1 == this acta's scan geometry is not the standard form layout, so its auto-extracted
+    -- crops are unreliable/unreadable (see scripts/acta_format_census.py). The acta stays
+    -- visible (crops shown as-is, transparently) but is pulled from the voting feed and
+    -- rejects votes. Set in bulk by scripts/quarantine_nonnormal.py.
+    quarantined INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS vote_fields (
@@ -175,6 +180,20 @@ class DetectorStore:
         self.conn.execute("DELETE FROM digit_comparisons WHERE document_id=?", (document_id,))
         self.conn.execute("DELETE FROM vlm_reviews WHERE document_id=?", (document_id,))
         self.conn.execute("DELETE FROM processing_errors WHERE document_id=?", (document_id,))
+
+    def set_quarantined(self, document_ids: list[str], value: int = 1) -> int:
+        """Flag/unflag actas whose scan geometry isn't the standard form (unreliable crops).
+
+        Idempotent; returns the number of ``documents`` rows updated. ``upsert_document`` never
+        writes this column, so a later detector re-run leaves the flag intact.
+        """
+        n = 0
+        for doc_id in document_ids:
+            cur = self.conn.execute(
+                "UPDATE documents SET quarantined=? WHERE document_id=?", (value, doc_id)
+            )
+            n += cur.rowcount
+        return n
 
     def upsert_document(self, meta: DocumentMetadata) -> None:
         data = asdict(meta)

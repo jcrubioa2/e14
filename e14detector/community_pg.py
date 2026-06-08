@@ -144,6 +144,25 @@ class PgCommunityStore:
     def distinct_appeals(self, field_key: str) -> int:
         return self._distinct_appeals(field_key)
 
+    def delete_document(self, document_id: str) -> dict[str, int]:
+        """Erase all community state for one acta (see ``CommunityStore.delete_document``).
+
+        Field keys are ``document_id:page:row:section``; the LIKE escapes ``_``/``%``
+        (document ids contain ``_``) so one acta never erases another. Returns per-table
+        delete counts.
+        """
+        pattern = document_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ":%"
+        out: dict[str, int] = {}
+        for tbl in ("flags", "appeals", "field_state"):
+            out[tbl] = self._exec(
+                f"DELETE FROM {tbl} WHERE field_key LIKE :pat ESCAPE '\\'",
+                _params({"pat": pattern}),
+            )
+        out["cid_index"] = self._exec(
+            "DELETE FROM cid_index WHERE document_id=:did", _params({"did": document_id})
+        )
+        return out
+
     # -- adjudication state --------------------------------------------------
     def _upsert_state(self, field_key: str, **fields) -> None:
         # Ensure the row exists, then apply any column updates (updated_at always).
