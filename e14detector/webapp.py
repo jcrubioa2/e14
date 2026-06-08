@@ -1648,6 +1648,96 @@ def create_app(
             {"active": "admin", "key": key, "requested_n": n, **result},
         )
 
+    def _gini(values: list[int]) -> float:
+        """Gini coefficient of review coverage across eligible actas: 0 = everyone reviewed
+        equally, →1 = a few actas hog all the reviews. Quantifies the *historical* serving
+        skew in one number, and should drift down as uniform serving accumulates."""
+        n = len(values)
+        if n == 0:
+            return 0.0
+        total = sum(values)
+        if total == 0:
+            return 0.0
+        s = sorted(values)
+        weighted = sum((i + 1) * x for i, x in enumerate(s))  # i: 0-based -> rank i+1
+        return (2.0 * weighted) / (n * total) - (n + 1.0) / n
+
+    def _coverage_stats(buckets: int = 20) -> dict:
+        """Historical review coverage — the 'before the fix' picture. Joins the vote backend
+        (reviews per acta, from Aurora/community) with the SQLite acta index (rowid +
+        n_candidates), bins by the SAME rowid bands as the fairness probe, and reports how
+        evenly the corpus has actually been reviewed so far. Under the old crop-weighted /
+        lowest-rowid selector, the early (low-rowid) bands are over-covered; uniform serving
+        flattens this over time but does not erase the accumulated head start. Read-only."""
+        counts = _agg_cached("review_counts", community.review_counts)  # doc_id -> reviewers
+        with conn() as db:
+            maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
+            elig = db.execute(
+                "SELECT rowid, document_id FROM documents WHERE n_candidates > 0"
+            ).fetchall()
+
+        bands = [{"eligible": 0, "reviewed": 0, "reviews": 0} for _ in range(buckets)]
+        hist = [0] * 6  # actas with 0,1,2,3,4,5+ reviews
+        per_acta: list[int] = []
+        total_reviewed = 0
+        total_reviews = 0
+        for r in elig:
+            b = min((int(r["rowid"]) - 1) * buckets // maxrow, buckets - 1) if maxrow else 0
+            c = int(counts.get(r["document_id"], 0))
+            bd = bands[b]
+            bd["eligible"] += 1
+            bd["reviews"] += c
+            per_acta.append(c)
+            hist[min(c, 5)] += 1
+            if c > 0:
+                bd["reviewed"] += 1
+                total_reviewed += 1
+                total_reviews += c
+
+        band_rows = []
+        for i, bd in enumerate(bands):
+            e = bd["eligible"]
+            band_rows.append({
+                "band": i + 1,
+                "lo": int(i * maxrow / buckets) + 1,
+                "hi": int((i + 1) * maxrow / buckets),
+                "eligible": e,
+                "reviewed": bd["reviewed"],
+                "coverage": (100.0 * bd["reviewed"] / e) if e else 0.0,
+                "avg_reviews": (bd["reviews"] / e) if e else 0.0,
+            })
+        total_elig = len(elig)
+        hist_rows = [{"label": (str(k) if k < 5 else "5+"), "actas": hist[k]} for k in range(6)]
+        return {
+            "buckets": buckets, "max_rowid": maxrow,
+            "total_eligible": total_elig,
+            "total_reviewed": total_reviewed,
+            "never_reviewed": total_elig - total_reviewed,
+            "overall_coverage": (100.0 * total_reviewed / total_elig) if total_elig else 0.0,
+            "total_reviews": total_reviews,
+            "avg_reviews_all": (total_reviews / total_elig) if total_elig else 0.0,
+            "avg_reviews_reviewed": (total_reviews / total_reviewed) if total_reviewed else 0.0,
+            "gini": _gini(per_acta),
+            "bands": band_rows,
+            "hist": hist_rows,
+            "max_band_cov": max((b["coverage"] for b in band_rows), default=0.0),
+            "max_band_avg": max((b["avg_reviews"] for b in band_rows), default=0.0),
+            "max_hist": max(hist, default=0),
+        }
+
+    @app.get("/admin/coverage")
+    async def admin_coverage(request: Request, key: str = ""):
+        """Historical-coverage viz: how evenly the corpus has ACTUALLY been reviewed so far,
+        binned by the same rowid bands as /admin/fairness. This is the 'before' picture —
+        the accumulated skew from the old selector — next to the fairness probe's 'after'.
+        Reads vote intensity from the community backend + rowids from the SQLite index;
+        operator-gated, read-only."""
+        _require_admin(request, key)
+        result = await asyncio.to_thread(_coverage_stats)
+        return templates.TemplateResponse(
+            request, "admin_coverage.html", {"key": key, **result},
+        )
+
     @app.get("/manifest.webmanifest")
     async def manifest():
         """Web app manifest — installability metadata. Served from a stable root path with the
