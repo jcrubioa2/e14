@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Cobertura histórica (operador)</title>
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ok:#1a7f37; --warn:#9a6c00; --ink:#202124; --accent:#0969da; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); }
+    header, main { max-width: 1040px; margin: 0 auto; padding: 16px 20px; }
+    header { background: var(--bg); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    h2 { font-size: 15px; margin: 22px 0 8px; }
+    p.lede { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 6px 0 0; max-width: 76ch; }
+    a { color: var(--accent); text-decoration: none; }
+    .adminnav { display:flex; flex-wrap:wrap; gap:6px; margin-top:14px; }
+    .adminnav a { padding:6px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; font-weight:600; color:var(--muted); background:#fff; }
+    .adminnav a:hover { border-color:var(--accent); color:var(--accent); }
+    .adminnav a.is-on { background:var(--accent); border-color:var(--accent); color:#fff; }
+    .note { margin:14px 0; padding:11px 15px; border-radius:10px; font-size:13px; line-height:1.55; border:1px solid #e6c34a; background:#fff8e6; color:#6b4e00; }
+    .note b { color:#5a4200; }
+    .stats { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+    .card { border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:12px; color:var(--muted); min-width:120px; }
+    .card b { display:block; font-size:19px; color:var(--ink); margin-top:2px; font-variant-numeric: tabular-nums; }
+    .card.accent { border-left:4px solid var(--accent); }
+    .card.warn { border-left:4px solid var(--warn); }
+    table { width:100%; border-collapse: collapse; font-size:12.5px; margin-top:6px; }
+    th, td { padding:4px 8px; text-align:right; vertical-align:middle; }
+    th { color:var(--muted); font-weight:600; border-bottom:1px solid var(--line); }
+    td.bar { width:30%; text-align:left; }
+    .track { position:relative; height:15px; background:var(--bg); border-radius:3px; overflow:hidden; }
+    .track .fill { position:absolute; left:0; top:0; height:15px; border-radius:3px; }
+    .track .fill.cov { background:var(--accent); opacity:.85; }
+    .track .fill.avg { background:#7a3fc4; opacity:.82; }
+    .val { font-variant-numeric: tabular-nums; }
+    .legend { font-size:12px; color:var(--muted); margin-top:8px; }
+    .legend .sw { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:middle; margin:0 3px 0 12px; }
+    .legend .sw.cov { background:var(--accent); opacity:.85; }
+    .legend .sw.avg { background:#7a3fc4; opacity:.82; }
+    .hist { display:flex; align-items:flex-end; gap:10px; height:150px; margin:14px 0 4px; padding-bottom:0; }
+    .hbar { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; }
+    .hbar .col { width:100%; max-width:70px; background:var(--accent); opacity:.85; border-radius:4px 4px 0 0; min-height:2px; }
+    .hbar .col.zero { background:var(--muted); opacity:.55; }
+    .hbar .n { font-size:12px; font-variant-numeric:tabular-nums; margin-bottom:4px; color:var(--ink); }
+    .hbar .lab { font-size:12px; color:var(--muted); margin-top:6px; }
+    .gini { display:inline-block; padding:2px 9px; border-radius:99px; font-weight:800; font-size:12.5px; }
+    .gini.lo { background:#eaf6ec; color:var(--ok); }
+    .gini.mid { background:#fff8e6; color:var(--warn); }
+    .gini.hi { background:#fdeceb; color:var(--bad); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Cobertura histórica de revisión</h1>
+    <p class="lede">
+      Cuánto se ha revisado <b>realmente</b> el corpus hasta ahora, agrupado por las
+      <b>mismas bandas de rowid</b> que la prueba de imparcialidad. Esta es la foto del
+      <b>“antes”</b>: el saldo acumulado por el selector viejo (que favorecía las actas
+      cargadas primero y las de más casillas). Cada acta cuenta cuántas personas distintas
+      la han revisado. Los datos de votos vienen del backend de votos; los rowid, del índice
+      de actas. Solo lectura.
+    </p>
+    <nav class="adminnav" aria-label="Secciones del panel">
+      <a href="/admin/poll?key={{ key }}">Estado &amp; publicaci&oacute;n</a>
+      <a href="/admin/fairness?key={{ key }}">Imparcialidad del selector</a>
+      <a href="/admin/coverage?key={{ key }}" class="is-on">Cobertura hist&oacute;rica</a>
+    </nav>
+  </header>
+  <main>
+    <div class="note">
+      <b>Cómo leerlo.</b> Si las primeras bandas (rowid bajo) están más cubiertas que las
+      últimas, eso es el sesgo histórico del selector viejo — esperado. La prueba de
+      <a href="/admin/fairness?key={{ key }}">imparcialidad</a> confirma que de aquí en
+      adelante el reparto ya es uniforme, así que esta desigualdad debería <b>aplanarse con
+      el tiempo</b> a medida que llegan revisiones nuevas (no se borra de golpe: las actas
+      ya sobre-revisadas conservan su ventaja).
+    </div>
+
+    <div class="stats">
+      <div class="card accent">Cobertura global<b class="val">{{ "%.1f"|format(overall_coverage) }}%</b></div>
+      <div class="card">Actas revisables<b class="val">{{ "{:,}".format(total_eligible) }}</b></div>
+      <div class="card">Revisadas (&ge;1)<b class="val">{{ "{:,}".format(total_reviewed) }}</b></div>
+      <div class="card warn">Sin revisar<b class="val">{{ "{:,}".format(never_reviewed) }}</b></div>
+      <div class="card">Revisiones totales<b class="val">{{ "{:,}".format(total_reviews) }}</b></div>
+      <div class="card">Prom. por acta (todas)<b class="val">{{ "%.2f"|format(avg_reviews_all) }}</b></div>
+      <div class="card">Prom. por acta revisada<b class="val">{{ "%.2f"|format(avg_reviews_reviewed) }}</b></div>
+      <div class="card">Desigualdad (Gini)
+        <b>{% set g = gini %}<span class="gini {{ 'lo' if g < 0.3 else ('mid' if g < 0.5 else 'hi') }}">{{ "%.3f"|format(g) }}</span></b>
+      </div>
+    </div>
+
+    <h2>Cobertura por banda de rowid <span style="font-weight:400;color:var(--muted)">(mismo eje que imparcialidad)</span></h2>
+    <table>
+      <thead>
+        <tr><th>Banda rowid</th><th>Actas</th><th>Revisadas</th><th>Cobertura</th><th class="bar">% cubierto</th><th>Prom./acta</th><th class="bar">Prom. revisiones</th></tr>
+      </thead>
+      <tbody>
+      {% for r in bands %}
+        <tr>
+          <td class="val">{{ "{:,}".format(r.lo) }}–{{ "{:,}".format(r.hi) }}</td>
+          <td class="val">{{ "{:,}".format(r.eligible) }}</td>
+          <td class="val">{{ "{:,}".format(r.reviewed) }}</td>
+          <td class="val">{{ "%.1f"|format(r.coverage) }}%</td>
+          <td class="bar"><div class="track"><div class="fill cov" style="width: {{ (100.0 * r.coverage / (max_band_cov or 1))|round(1) }}%"></div></div></td>
+          <td class="val">{{ "%.2f"|format(r.avg_reviews) }}</td>
+          <td class="bar"><div class="track"><div class="fill avg" style="width: {{ (100.0 * r.avg_reviews / (max_band_avg or 1))|round(1) }}%"></div></div></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="legend">
+      <span class="sw cov"></span> % de actas de la banda con al menos una revisión
+      <span class="sw avg"></span> promedio de revisiones por acta en la banda.
+      Barras decrecientes de arriba hacia abajo = el sesgo histórico hacia rowid bajo.
+    </p>
+
+    <h2>Distribución: ¿cuántas veces se ha revisado cada acta?</h2>
+    <div class="hist">
+      {% for h in hist %}
+      <div class="hbar">
+        <div class="n">{{ "{:,}".format(h.actas) }}</div>
+        <div class="col {{ 'zero' if h.label == '0' }}" style="height: {{ (100.0 * h.actas / (max_hist or 1))|round(1) }}%"></div>
+        <div class="lab">{{ h.label }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="legend" style="margin-left:0">Número de actas (eje vertical) por cantidad de revisiones recibidas (0, 1, 2, 3, 4, 5 o más). Una cola larga en “0” es trabajo pendiente; mucha masa en valores altos concentrados es sobre-revisión.</p>
+  </main>
+</body>
+</html>

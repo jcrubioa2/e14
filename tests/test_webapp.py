@@ -1718,3 +1718,62 @@ def test_reportes_renders_public_fixes_log(tmp_path: Path) -> None:
     assert TRANSPARENCY_LOG[0]["title"] in resp.text
     # The status (fixed/ongoing) is shown in plain language, not left ambiguous.
     assert "Corregido" in resp.text
+
+
+def test_admin_coverage_joins_votes_and_index(tmp_path: Path) -> None:
+    """/admin/coverage is operator-gated and reports historical review coverage, joining
+    per-acta review counts (community/vote backend) with the SQLite acta index (rowid +
+    n_candidates). See _coverage_stats / CommunityStore.review_counts."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    n_actas = 10
+    for d in range(n_actas):
+        doc_id = f"doc-{d:02d}"
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf"))
+        for i in range(5):
+            store.insert_vote_field(VoteField(
+                document_id=doc_id, page_number=1, row_type="candidate", row_number=i + 1,
+                candidate_name=f"C{i}", raw_crop_path=str(crop),
+            ))
+    store.commit()
+    store.close()
+
+    # Simulate the historical skew: only the low-rowid half got reviewed, some heavily.
+    cs = CommunityStore(community_db)
+    for d in range(5):                       # doc-00..doc-04 reviewed; doc-05..09 untouched
+        fk = field_key_of(f"doc-{d:02d}", 1, 1, "")
+        for v in range(5 - d):               # doc-00 by 5 voters ... doc-04 by 1
+            cs.record_flag(fk, f"voter-{d}-{v}")
+    counts = cs.review_counts()
+    cs.close()
+
+    # review_counts maps doc -> distinct reviewers; unreviewed actas are absent.
+    assert counts["doc-00"] == 5 and counts["doc-04"] == 1 and "doc-05" not in counts
+
+    orig_token = config.ADMIN_TOKEN
+
+    async def run():
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            config.ADMIN_TOKEN = ""                                # feature off
+            off = await client.get("/admin/coverage")
+            config.ADMIN_TOKEN = "s3cret"                          # feature on
+            bad = await client.get("/admin/coverage?key=nope")     # wrong key
+            ok = await client.get("/admin/coverage?key=s3cret")
+            return off.status_code, bad.status_code, ok.status_code, ok.text
+
+    try:
+        off, bad, ok, body = asyncio.run(run())
+    finally:
+        config.ADMIN_TOKEN = orig_token
+
+    assert off == 404, "no token configured -> route hidden"
+    assert bad == 403, "token configured, wrong key -> forbidden"
+    assert ok == 200
+    assert "Cobertura hist" in body
+    assert "50.0%" in body  # 5 of 10 reviewable actas have >= 1 review

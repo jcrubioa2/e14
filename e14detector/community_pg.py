@@ -316,6 +316,27 @@ class PgCommunityStore:
         )
         return {r["doc"] for r in rows}
 
+    def review_counts(self) -> dict[str, int]:
+        # Distinct reviewers per acta (coverage intensity for the admin board). Mirrors
+        # total_reviews but grouped by doc: COUNT(DISTINCT voter) per mesa across both vote
+        # directions. doc = field_key minus its last 3 ':'-parts, as in reviewed_actas.
+        rows = self._rows(
+            """
+            SELECT doc, COUNT(DISTINCT voter_token) AS n FROM (
+                SELECT voter_token,
+                       array_to_string(
+                           (string_to_array(field_key, ':'))
+                               [1 : array_length(string_to_array(field_key, ':'), 1) - 3],
+                           ':') AS doc
+                FROM (SELECT voter_token, field_key FROM flags
+                      UNION ALL
+                      SELECT voter_token, field_key FROM appeals) u
+            ) sub
+            GROUP BY doc
+            """
+        )
+        return {r["doc"]: int(r["n"]) for r in rows}
+
     def published_keys(self) -> list[str]:
         rows = self._rows("SELECT field_key FROM field_state WHERE published=1")
         return [r["field_key"] for r in rows]

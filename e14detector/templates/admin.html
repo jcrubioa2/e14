@@ -74,6 +74,7 @@
     <nav class="adminnav" aria-label="Secciones del panel">
       <a href="/admin/poll?key={{ key }}" class="is-on">Estado &amp; publicaci&oacute;n</a>
       <a href="/admin/fairness?key={{ key }}">Imparcialidad del selector</a>
+      <a href="/admin/coverage?key={{ key }}">Cobertura hist&oacute;rica</a>
     </nav>
     {% if pipeline %}
     <div class="pipeline {{ 'warn' if pipeline.pointer_stale and not pipeline.complete else 'ok' }}">

@@ -491,6 +491,19 @@ class CommunityStore:
                     docs.add(r["field_key"].rsplit(":", 3)[0])
         return docs
 
+    def review_counts(self) -> dict[str, int]:
+        """Distinct reviewers per acta — the coverage *intensity* for the admin board.
+        Mirrors ``total_reviews`` (distinct person-per-mesa across flags + appeals) but
+        grouped by mesa, so an acta reviewed by 5 different people scores 5. Doc id =
+        field key minus its last 3 page:row:section parts, matching ``reviewed_actas``."""
+        seen: dict[str, set[str]] = {}
+        with self._lock:
+            for tbl in ("flags", "appeals"):
+                for r in self.conn.execute(f"SELECT field_key, voter_token FROM {tbl}"):
+                    doc = r["field_key"].rsplit(":", 3)[0]
+                    seen.setdefault(doc, set()).add(r["voter_token"])
+        return {doc: len(v) for doc, v in seen.items()}
+
     def published_keys(self) -> list[str]:
         """All field keys currently published as strange (few — only confirmed ones)."""
         with self._lock:
