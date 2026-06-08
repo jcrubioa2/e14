@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import secrets
 
 # Pure helpers + config live in the SQLite module; reuse them verbatim so the two
 # backends share one source of truth for identity/anti-fraud.
@@ -27,6 +28,7 @@ from .community import (  # noqa: F401  (PollConfig re-exported for callers)
     DEVICE_LIMIT,
     PollConfig,
     clean_nickname,
+    gen_handle,
     gen_pin,
     normalize_nickname,
 )
@@ -479,103 +481,181 @@ class PgCommunityStore:
         return [{"field_key": r["field_key"], "good": int(r["good"] or 0),
                  "strange": int(r["strange"] or 0)} for r in rows]
 
-    # -- optional named contributor identity --------------------------------
-    def contributor_me(self, sid: str) -> dict | None:
+    # -- named contributor identity (pseudonymous-by-default leaderboard) -----
+    def _me_by_id(self, cid: str) -> dict | None:
         rows = self._rows(
-            "SELECT c.nickname, c.display_name, c.pin, c.reviews "
-            "FROM contributor_devices d JOIN contributors c ON c.nickname=d.nickname "
-            "WHERE d.sid=:sid",
-            _params({"sid": sid}),
+            "SELECT nickname, display_name, pin, name_locked, reviews FROM contributors WHERE id=:id",
+            _params({"id": cid}),
         )
         if not rows:
             return None
-        r = rows[0]
+        c = rows[0]
         devices = self._rows(
-            "SELECT COUNT(*) n FROM contributor_devices WHERE nickname=:k",
-            _params({"k": r["nickname"]}),
+            "SELECT COUNT(*) n FROM contributor_devices WHERE contributor_id=:id", _params({"id": cid})
         )
         rank = self._rows(
             "SELECT COUNT(*)+1 r FROM contributors WHERE reviews > :rv",
-            _params({"rv": int(r["reviews"])}),
+            _params({"rv": int(c["reviews"])}),
         )
-        return {"display_name": r["display_name"], "reviews": int(r["reviews"]),
-                "devices": int(devices[0]["n"]), "pin": r["pin"], "rank": int(rank[0]["r"])}
+        pin = str(c["pin"] or "")
+        return {"display_name": c["display_name"], "reviews": int(c["reviews"]),
+                "devices": int(devices[0]["n"]), "pin": pin, "rank": int(rank[0]["r"]),
+                "locked": bool(int(c["name_locked"])), "has_pin": bool(pin)}
 
-    def claim_contributor(self, display_name: str, sid: str) -> dict:
+    def _ensure_auto(self, sid: str) -> str:
+        """Return the contributor id for ``sid``, auto-creating a fun unsecured identity if none."""
+        rows = self._rows(
+            "SELECT contributor_id FROM contributor_devices WHERE sid=:sid", _params({"sid": sid})
+        )
+        if rows:
+            return rows[0]["contributor_id"]
+        cid = None
+        for _ in range(16):
+            tid, handle = secrets.token_hex(8), gen_handle()
+            r = self._rows(
+                "INSERT INTO contributors (id, nickname, display_name, pin) VALUES (:id,:h,:h,'') "
+                "ON CONFLICT (nickname) DO NOTHING RETURNING id",
+                _params({"id": tid, "h": handle}),
+            )
+            if r:
+                cid = tid
+                break
+        if cid is None:  # vanishingly unlikely; widen with a numeric suffix until free
+            base, n = gen_handle(), 2
+            while cid is None:
+                tid, handle = secrets.token_hex(8), f"{base}_{n}"
+                r = self._rows(
+                    "INSERT INTO contributors (id, nickname, display_name, pin) VALUES (:id,:h,:h,'') "
+                    "ON CONFLICT (nickname) DO NOTHING RETURNING id",
+                    _params({"id": tid, "h": handle}),
+                )
+                cid = tid if r else None
+                n += 1
+        self._exec(
+            "INSERT INTO contributor_devices (sid, contributor_id) VALUES (:sid,:cid) "
+            "ON CONFLICT (sid) DO UPDATE SET contributor_id=EXCLUDED.contributor_id, created_at=now()",
+            _params({"sid": sid, "cid": cid}),
+        )
+        return cid
+
+    def contributor_me(self, sid: str) -> dict | None:
+        rows = self._rows(
+            "SELECT contributor_id FROM contributor_devices WHERE sid=:sid", _params({"sid": sid})
+        )
+        return self._me_by_id(rows[0]["contributor_id"]) if rows else None
+
+    def ensure_auto_contributor(self, sid: str) -> dict:
+        return self._me_by_id(self._ensure_auto(sid))
+
+    def credit_review(self, sid: str, mesa_id: str) -> int:
+        cid = self._ensure_auto(sid)
+        new = self._rows(
+            "INSERT INTO contributor_reviews (contributor_id, mesa_id) VALUES (:c,:m) "
+            "ON CONFLICT (contributor_id, mesa_id) DO NOTHING RETURNING contributor_id",
+            _params({"c": cid, "m": mesa_id}),
+        )
+        if new:
+            self._exec(
+                "UPDATE contributors SET reviews=reviews+1, updated_at=now() WHERE id=:c",
+                _params({"c": cid}),
+            )
+        total = self._rows("SELECT reviews FROM contributors WHERE id=:c", _params({"c": cid}))
+        return int(total[0]["reviews"]) if total else 0
+
+    def rename_contributor(self, display_name: str, sid: str) -> dict:
+        rows = self._rows(
+            "SELECT contributor_id FROM contributor_devices WHERE sid=:sid", _params({"sid": sid})
+        )
+        if not rows:
+            return {"ok": False, "error": "no_identity"}
+        cid = rows[0]["contributor_id"]
+        cur = self._rows("SELECT name_locked FROM contributors WHERE id=:c", _params({"c": cid}))
+        if cur and int(cur[0]["name_locked"]):
+            return {"ok": False, "error": "locked"}
         disp, key, err = clean_nickname(display_name)
         if err:
             return {"ok": False, "error": err}
-        if self._rows("SELECT 1 a FROM contributor_devices WHERE sid=:sid", _params({"sid": sid})):
-            return {"ok": False, "error": "already_linked"}
-        pin = gen_pin()
-        rows = self._rows(
-            "INSERT INTO contributors (nickname, display_name, pin) VALUES (:k,:d,:p) "
-            "ON CONFLICT (nickname) DO NOTHING RETURNING nickname",
-            _params({"k": key, "d": disp, "p": pin}),
-        )
-        if not rows:
+        if self._rows(
+            "SELECT 1 a FROM contributors WHERE nickname=:k AND id<>:c", _params({"k": key, "c": cid})
+        ):
             return {"ok": False, "error": "taken"}
         self._exec(
-            "INSERT INTO contributor_devices (sid, nickname) VALUES (:sid,:k) "
-            "ON CONFLICT (sid) DO UPDATE SET nickname=EXCLUDED.nickname, created_at=now()",
-            _params({"sid": sid, "k": key}),
+            "UPDATE contributors SET nickname=:k, display_name=:d, name_locked=1, updated_at=now() WHERE id=:c",
+            _params({"k": key, "d": disp, "c": cid}),
         )
-        return {"ok": True, "display_name": disp, "pin": pin, "reviews": 0, "devices": 1}
+        return {"ok": True, **self._me_by_id(cid)}
+
+    def reroll_contributor(self, sid: str) -> dict:
+        rows = self._rows(
+            "SELECT contributor_id FROM contributor_devices WHERE sid=:sid", _params({"sid": sid})
+        )
+        if not rows:
+            return {"ok": False, "error": "no_identity"}
+        cid = rows[0]["contributor_id"]
+        cur = self._rows("SELECT name_locked FROM contributors WHERE id=:c", _params({"c": cid}))
+        if cur and int(cur[0]["name_locked"]):
+            return {"ok": False, "error": "locked"}
+        handle = None
+        for _ in range(16):
+            h = gen_handle()
+            if not self._rows("SELECT 1 a FROM contributors WHERE nickname=:k", _params({"k": h})):
+                handle = h
+                break
+        if handle is None:
+            base, n = gen_handle(), 2
+            while self._rows("SELECT 1 a FROM contributors WHERE nickname=:k", _params({"k": f"{base}_{n}"})):
+                n += 1
+            handle = f"{base}_{n}"
+        self._exec(
+            "UPDATE contributors SET nickname=:h, display_name=:h, updated_at=now() WHERE id=:c",
+            _params({"h": handle, "c": cid}),
+        )
+        return {"ok": True, **self._me_by_id(cid)}
+
+    def set_contributor_pin(self, sid: str) -> dict:
+        rows = self._rows(
+            "SELECT contributor_id FROM contributor_devices WHERE sid=:sid", _params({"sid": sid})
+        )
+        if not rows:
+            return {"ok": False, "error": "no_identity"}
+        cid = rows[0]["contributor_id"]
+        cur = self._rows("SELECT pin FROM contributors WHERE id=:c", _params({"c": cid}))
+        if cur and not str(cur[0]["pin"] or ""):
+            self._exec(
+                "UPDATE contributors SET pin=:p, name_locked=1, updated_at=now() WHERE id=:c",
+                _params({"p": gen_pin(), "c": cid}),
+            )
+        return {"ok": True, **self._me_by_id(cid)}
 
     def link_contributor(self, display_name: str, pin: str, sid: str) -> dict:
         key = normalize_nickname(display_name)
         rows = self._rows(
-            "SELECT display_name, pin, reviews FROM contributors WHERE nickname=:k",
-            _params({"k": key}),
+            "SELECT id, pin FROM contributors WHERE nickname=:k", _params({"k": key})
         )
         if not rows:
             return {"ok": False, "error": "not_found"}
         c = rows[0]
-        if not hmac.compare_digest(str(pin or ""), str(c["pin"])):
+        cpin = str(c["pin"] or "")
+        if not cpin or not hmac.compare_digest(str(pin or ""), cpin):
             return {"ok": False, "error": "bad_pin"}
+        cid = c["id"]
         already = self._rows(
-            "SELECT 1 a FROM contributor_devices WHERE sid=:sid AND nickname=:k",
-            _params({"sid": sid, "k": key}),
+            "SELECT 1 a FROM contributor_devices WHERE sid=:sid AND contributor_id=:c",
+            _params({"sid": sid, "c": cid}),
         )
         if not already:
             others = self._rows(
-                "SELECT COUNT(*) n FROM contributor_devices WHERE nickname=:k AND sid<>:sid",
-                _params({"k": key, "sid": sid}),
+                "SELECT COUNT(*) n FROM contributor_devices WHERE contributor_id=:c AND sid<>:sid",
+                _params({"c": cid, "sid": sid}),
             )
             if int(others[0]["n"]) >= DEVICE_LIMIT:
                 return {"ok": False, "error": "device_limit"}
         self._exec(
-            "INSERT INTO contributor_devices (sid, nickname) VALUES (:sid,:k) "
-            "ON CONFLICT (sid) DO UPDATE SET nickname=EXCLUDED.nickname, created_at=now()",
-            _params({"sid": sid, "k": key}),
+            "INSERT INTO contributor_devices (sid, contributor_id) VALUES (:sid,:c) "
+            "ON CONFLICT (sid) DO UPDATE SET contributor_id=EXCLUDED.contributor_id, created_at=now()",
+            _params({"sid": sid, "c": cid}),
         )
-        devices = self._rows(
-            "SELECT COUNT(*) n FROM contributor_devices WHERE nickname=:k", _params({"k": key})
-        )
-        return {"ok": True, "display_name": c["display_name"], "reviews": int(c["reviews"]),
-                "devices": int(devices[0]["n"]), "pin": c["pin"]}
-
-    def credit_review(self, sid: str, mesa_id: str) -> int | None:
-        rows = self._rows(
-            "SELECT nickname FROM contributor_devices WHERE sid=:sid", _params({"sid": sid})
-        )
-        if not rows:
-            return None
-        nick = rows[0]["nickname"]
-        new = self._rows(
-            "INSERT INTO contributor_reviews (nickname, mesa_id) VALUES (:n,:m) "
-            "ON CONFLICT (nickname, mesa_id) DO NOTHING RETURNING nickname",
-            _params({"n": nick, "m": mesa_id}),
-        )
-        if new:
-            self._exec(
-                "UPDATE contributors SET reviews=reviews+1, updated_at=now() WHERE nickname=:n",
-                _params({"n": nick}),
-            )
-        total = self._rows(
-            "SELECT reviews FROM contributors WHERE nickname=:n", _params({"n": nick})
-        )
-        return int(total[0]["reviews"]) if total else None
+        return {"ok": True, **self._me_by_id(cid)}
 
     def leaderboard(self, limit: int) -> list[dict]:
         rows = self._rows(

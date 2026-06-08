@@ -65,29 +65,32 @@ CREATE TABLE IF NOT EXISTS cid_index (
     document_id text NOT NULL
 );
 
--- Optional named contributor identity (port of the contributors/* DDL in
--- e14detector/community.py). The swipe feed is anonymous by default; a contributor
--- may CHOOSE to claim a unique public nickname so their reviewed-mesa count ranks on
--- the leaderboard. Account-lite: nickname is the durable identity, the sid cookie is
--- a per-device pointer (contributor_devices, capped at DEVICE_LIMIT=3), and pin is a
--- server-assigned 4-digit recovery code stored readable (revealable to a linked
--- device; the link path is hard rate-limited so it can't be brute-forced online).
+-- Named contributor identity (port of the contributors/* DDL in
+-- e14detector/community.py). Pseudonymous-by-default: every device that submits a
+-- mesa is auto-given a fun Spanish handle (delfin_audaz) and ranks on the public
+-- board from mesa #1. ``id`` is the durable surrogate identity so a rename is one
+-- column update; ``nickname`` is a unique, changeable handle until ``name_locked``.
+-- ``pin`` is '' for an auto identity (losable, sid-only); the user may set a 4-digit
+-- recovery code to secure it + use it on up to DEVICE_LIMIT=3 devices (the link path
+-- is hard rate-limited so the 4-digit half can't be brute-forced online).
 CREATE TABLE IF NOT EXISTS contributors (
-    nickname     text        PRIMARY KEY,            -- normalized (trim/collapse/lower) key
-    display_name text        NOT NULL,               -- as-entered casing, shown on the board
-    pin          text        NOT NULL,               -- 4-digit, revealable to a linked device
+    id           text        PRIMARY KEY,            -- stable surrogate id (handle may change)
+    nickname     text        NOT NULL UNIQUE,        -- normalized (trim/collapse/lower) unique handle
+    display_name text        NOT NULL,               -- as-shown casing
+    pin          text        NOT NULL DEFAULT '',    -- 4-digit recovery code; '' = unsecured
+    name_locked  integer     NOT NULL DEFAULT 0,     -- 1 once a name is picked or a pin is set
     reviews      integer     NOT NULL DEFAULT 0,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS contributor_devices (
-    sid        text        PRIMARY KEY,              -- one device -> at most one nickname
-    nickname   text        NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now()
+    sid            text        PRIMARY KEY,          -- one device -> at most one contributor
+    contributor_id text        NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_contrib_dev_nick ON contributor_devices (nickname);
+CREATE INDEX IF NOT EXISTS idx_contrib_dev_cid ON contributor_devices (contributor_id);
 CREATE TABLE IF NOT EXISTS contributor_reviews (
-    nickname text NOT NULL,
-    mesa_id  text NOT NULL,
-    PRIMARY KEY (nickname, mesa_id)                  -- one credit per (contributor, mesa)
+    contributor_id text NOT NULL,
+    mesa_id        text NOT NULL,
+    PRIMARY KEY (contributor_id, mesa_id)            -- one credit per (contributor, mesa)
 );

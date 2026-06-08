@@ -2609,12 +2609,12 @@ def create_app(
             {"ok": True, "strange": n_strange, "good": n_good}, 200, sid, new_sid
         )
 
-    # -- optional named contributor identity (opt-in leaderboard) ------------
+    # -- named contributor identity (pseudonymous-by-default leaderboard) -----
     @app.get("/api/contributor/me")
     async def api_contributor_me(request: Request):
-        """Identity (if any) this device's sid is linked to: name, reviews, rank, devices, pin.
-        Anonymous devices get ``{ok:True, contributor:null}``. The PIN is included only because
-        holding the sid cookie already proves this device is one of the nickname's linked ones."""
+        """This device's identity: handle, reviews, rank, devices, pin, locked, has_pin — or
+        ``contributor:null`` if it has reviewed nothing yet. Read-only (never creates a row).
+        The PIN is included because holding the sid cookie already proves this device owns it."""
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         new_sid = "sid" not in request.cookies
         if not _feed_allow(_voter_ip(request)):
@@ -2625,7 +2625,7 @@ def create_app(
     @app.get("/api/contributor/leaderboard")
     async def api_contributor_leaderboard(request: Request, n: int = Query(10, ge=1, le=50)):
         """Public board: top-N contributors by reviewed mesas, plus this device's own rank/count
-        when it has an identity (so a mid-table contributor still sees 'vos: #142')."""
+        when it has an identity (so a mid-table contributor still sees 'tú: #142')."""
         if not _feed_allow(_voter_ip(request)):
             raise HTTPException(status_code=429, detail="rate_limited")
         top = await asyncio.to_thread(
@@ -2637,33 +2637,62 @@ def create_app(
                 if me else None)
         return {"items": top, "me": mine}
 
-    @app.post("/api/contributor/claim")
-    async def api_contributor_claim(request: Request, payload: dict = Body(...)):
-        """Claim a unique public nickname for this device; the server assigns a 4-digit PIN and
-        returns it ONCE. Anti-bot gated exactly like a vote (origin + honeypot/form-token)."""
+    def _contrib_gate(request: Request, payload: dict):
+        """Shared guard for the contributor write endpoints: returns (sid, new_sid, error_response
+        or None). Same anti-bot posture as a vote (origin + honeypot/form-token)."""
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         new_sid = "sid" not in request.cookies
-        if not _origin_allowed(request):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        if bot_check(payload, sid, _voter_ip(request), poll_cfg):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        res = await asyncio.to_thread(
-            community.claim_contributor, str(payload.get("nickname", "")), sid
-        )
+        if not _origin_allowed(request) or bot_check(payload, sid, _voter_ip(request), poll_cfg):
+            return sid, new_sid, _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        return sid, new_sid, None
+
+    @app.post("/api/contributor/ensure")
+    async def api_contributor_ensure(request: Request, payload: dict = Body(...)):
+        """Get-or-create this device's auto identity (a fun Spanish handle), used when the portal
+        opens before the first mesa has been credited. Anti-bot gated so it can't be row-spammed."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        me = await asyncio.to_thread(community.ensure_auto_contributor, sid)
+        return _flag_response({"ok": True, "contributor": me}, 200, sid, new_sid)
+
+    @app.post("/api/contributor/rename")
+    async def api_contributor_rename(request: Request, payload: dict = Body(...)):
+        """Rename this device's identity to a custom handle and lock it (one-time choice)."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        res = await asyncio.to_thread(community.rename_contributor, str(payload.get("nickname", "")), sid)
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
+
+    @app.post("/api/contributor/reroll")
+    async def api_contributor_reroll(request: Request, payload: dict = Body(...)):
+        """Swap the still-unlocked auto handle for a different random one."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        res = await asyncio.to_thread(community.reroll_contributor, sid)
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
+
+    @app.post("/api/contributor/setpin")
+    async def api_contributor_setpin(request: Request, payload: dict = Body(...)):
+        """Secure this device's identity with a server-assigned 4-digit code (enables recovery +
+        up to 3 devices) and lock the name. Returns the code (in ``contributor.pin``)."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        res = await asyncio.to_thread(community.set_contributor_pin, sid)
         return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
 
     @app.post("/api/contributor/link")
     async def api_contributor_link(request: Request, payload: dict = Body(...)):
-        """Link THIS device to an existing nickname via its PIN (recovery / extra device, capped
-        at 3 — it adds a device, never moves the name off the others). Hard rate-limited per-IP
-        AND per-nickname: the public nickname is half a credential, so the 4-digit half must not
-        be brute-forceable online."""
-        sid = request.cookies.get("sid") or uuid.uuid4().hex
-        new_sid = "sid" not in request.cookies
-        if not _origin_allowed(request):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
-        if bot_check(payload, sid, _voter_ip(request), poll_cfg):
-            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        """Link THIS device to an existing SECURED nickname via its PIN (recovery / extra device,
+        capped at 3 — adds a device, never moves the name off the others). Hard rate-limited per-IP
+        AND per-nickname: a secured nickname is half a credential, so the 4-digit half must not be
+        brute-forceable online."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
         # Brute-force throttle: ~5 tries then a slow drip, on BOTH the IP and the nickname, so
         # neither one attacker nor a botnet can sweep the 10k PIN space for a given name.
         ip = _voter_ip(request)

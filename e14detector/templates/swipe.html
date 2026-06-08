@@ -399,7 +399,7 @@
     <p id="idbanner-txt"></p>
     <div class="row">
       <button type="button" class="no" data-act="id-dismiss">No, gracias</button>
-      <button type="button" class="yes" data-act="id-accept">Crear nickname</button>
+      <button type="button" class="yes" data-act="id-accept">Asegurar mi nombre</button>
     </div>
   </div>
 
@@ -505,7 +505,7 @@
       reviewedEl.style.setProperty('--rank', r.color);
       const named = contributor && contributor.display_name;
       reviewedEl.title = named
-        ? (contributor.display_name + ' · ' + r.name + ' · toca para ver tu código y tu puesto')
+        ? (contributor.display_name + ' · ' + r.name + ' · toca para ver tu perfil y la tabla')
         : (nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas)') : '¡Nivel máximo alcanzado!');
       reviewedEl.innerHTML =
         '<span class="badge">★</span>' +
@@ -527,15 +527,15 @@
       toastTimer = setTimeout(() => { t.classList.remove('show', 'win'); }, 2300);
     }
 
-    // --- Optional named contributor identity -------------------------------------------
-    // Anonymous by default. A contributor MAY claim a unique public nickname so their
-    // reviewed-mesa count accumulates and ranks on the leaderboard. The nickname is the
-    // durable identity; this device is linked to it server-side (by the sid cookie). A
-    // server-assigned 4-digit PIN re-links up to 3 devices — it is NOT a password, just a
-    // low-stakes recovery code (the link endpoint is hard rate-limited on the server).
-    let contributor = null;                 // {display_name, reviews, devices, pin, rank} | null
-    let idView = 'auto';                    // 'auto' | 'claim' | 'link' | 'pin'
-    let idBusy = false, lastClaimPin = '', lastBoard = null;
+    // --- Named contributor identity (pseudonymous-by-default leaderboard) ----------------
+    // Every device that submits a mesa is auto-given a fun Spanish handle (delfin_audaz) and
+    // ranks on the public board from mesa #1 — no opt-in step. The portal lets the reviewer keep
+    // that handle, rename it once, reroll it, or SECURE it with a server-assigned 4-digit code
+    // (which enables recovery + up to 3 devices and locks the name). Without a code the handle
+    // lives only in the sid cookie, so it can be lost — the one-time banner nudges securing it.
+    let contributor = null;                 // {display_name, reviews, devices, pin, rank, locked, has_pin} | null
+    let idView = 'auto';                    // 'auto' | 'link' | 'pin'
+    let idBusy = false, lastPin = '', lastBoard = null;
     const idov = document.getElementById('idov');
     const idsheet = document.getElementById('idsheet');
 
@@ -560,22 +560,24 @@
         const data = await res.json().catch(() => ({}));
         if (data && data.ok) setContributor(data.contributor || null);
       } catch (e) {}
-      idMaybePrompt();   // a returning anonymous reviewer past the threshold gets the one-time offer
+      idMaybePrompt();
     }
 
-    // The single proactive ask. Shown at most ONCE per page, only to an anonymous reviewer who has
-    // crossed ID_PROMPT_AT mesas and never said "No, gracias". Declining persists e14_id_dismissed
-    // so the question never returns; opting in (or already having a nickname) means it never shows.
+    // One proactive ask, at most ONCE per page: nudge a reviewer past ID_PROMPT_AT mesas whose
+    // handle is still UNSECURED to add a recovery code (so they don't lose their name/rank).
+    // "No, gracias" persists e14_id_dismissed so it never returns; a secured handle never asks.
     const ID_PROMPT_AT = 15;
     const idbanner = document.getElementById('idbanner');
     let idBannerShown = false;
     function idMaybePrompt() {
-      if (contributor || idBannerShown || lsGet('e14_id_dismissed') === '1') return;
-      if (reviewed < ID_PROMPT_AT) return;
+      if (idBannerShown || lsGet('e14_id_dismissed') === '1') return;
+      if (!contributor || contributor.has_pin) return;       // nothing to secure / already secured
+      if ((contributor.reviews || reviewed) < ID_PROMPT_AT) return;
       idBannerShown = true;
       document.getElementById('idbanner-txt').innerHTML =
-        'Llevas <b>' + reviewed + ' mesas</b> revisadas. ¿Quieres guardar tu progreso con un nickname y ' +
-        'aparecer en la tabla de veeduría? Es opcional y anónimo.';
+        'Eres <b>' + esc(contributor.display_name) + '</b> (#' + (contributor.rank || '—') + ') con ' +
+        (contributor.reviews || reviewed) + ' mesas. Asegura tu nombre con un código para no perderlo ' +
+        'si cambias de dispositivo.';
       idbanner.hidden = false;
       requestAnimationFrame(function () { idbanner.classList.add('show'); });
     }
@@ -586,68 +588,95 @@
     idbanner.addEventListener('click', function (e) {
       const btn = e.target.closest('[data-act]'); if (!btn) return;
       if (btn.getAttribute('data-act') === 'id-dismiss') { lsSet('e14_id_dismissed', '1'); idHideBanner(); }
-      else { idHideBanner(); idOpen('claim'); }   // never marks dismissed: they chose to engage
+      else { idHideBanner(); idOpen('auto'); }   // never marks dismissed: they chose to engage
     });
 
-    function idOpen(view) {
+    async function idEnsure() {
+      try {
+        await ensureSession();
+        const hp = document.getElementById('hp-website');
+        const res = await fetch('/api/contributor/ensure', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ form_token: window.__formToken, website: hp ? hp.value : '' }) });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok && data.contributor) setContributor(data.contributor);
+      } catch (e) {}
+    }
+
+    async function idOpen(view) {
       idView = view || 'auto';
       idov.classList.add('show'); idov.setAttribute('aria-hidden', 'false');
+      if (idView === 'auto' && !contributor) { idRender(); await idEnsure(); }
       idRender();
-      if (idView === 'auto') { if (contributor) idLoadBoard(); else idFetchMe(); }
+      if (idView === 'auto' && contributor) idLoadBoard();
     }
-    function idClose() { idov.classList.remove('show'); idov.setAttribute('aria-hidden', 'true'); lastClaimPin = ''; }
+    function idClose() { idov.classList.remove('show'); idov.setAttribute('aria-hidden', 'true'); lastPin = ''; }
     idov.addEventListener('click', function (e) { if (e.target === idov) idClose(); });
 
     function idRender() {
       const close = '<button class="id-x" type="button" data-act="close" aria-label="Cerrar">×</button>';
       let html;
-      if (idView === 'pin' && lastClaimPin) {
+      if (idView === 'pin' && lastPin) {
         html =
-          '<div class="id-head"><h2>¡Nickname creado!</h2>' + close + '</div>' +
-          '<p class="id-sub">Guarda este código. Lo necesitas para sumar este nickname en <b>otro dispositivo</b> (hasta 3). No lo compartas: es lo único que protege tu nickname.</p>' +
+          '<div class="id-head"><h2>Nombre asegurado</h2>' + close + '</div>' +
+          '<p class="id-sub">Guarda este código. Lo necesitas para usar tu nombre en <b>otro dispositivo</b> (hasta 3) o si borras los datos del navegador. No lo compartas.</p>' +
           '<div class="id-pinbox"><div class="lab">Tu código de recuperación</div>' +
-          '<div class="pin">' + esc(lastClaimPin) + '</div>' +
-          '<div class="warn">No te lo volveremos a mostrar en un dispositivo nuevo.</div></div>' +
+          '<div class="pin">' + esc(lastPin) + '</div>' +
+          '<div class="warn">Anótalo: no se vuelve a mostrar en un dispositivo nuevo.</div></div>' +
           '<button class="id-btn" type="button" data-act="done">Entendido, guardé mi código</button>';
       } else if (idView === 'link') {
         html =
-          '<div class="id-head"><h2>Vincular este dispositivo</h2>' + close + '</div>' +
-          '<p class="id-sub">Escribe tu nickname y tu código de 4 dígitos para sumar este dispositivo a tu nickname (hasta 3 dispositivos).</p>' +
-          '<div class="id-field"><label for="id-lnick">Nickname</label>' +
-          '<input id="id-lnick" type="text" maxlength="20" autocomplete="off" value="' + esc(lsGet('e14_nick')) + '"></div>' +
+          '<div class="id-head"><h2>Usar mi nombre aquí</h2>' + close + '</div>' +
+          '<p class="id-sub">¿Ya tienes un nombre con código en otro dispositivo? Escríbelo con su código de 4 dígitos para usarlo también en este (hasta 3 dispositivos).</p>' +
+          '<div class="id-field"><label for="id-lnick">Tu nombre</label>' +
+          '<input id="id-lnick" type="text" maxlength="20" autocomplete="off" placeholder="delfin_audaz"></div>' +
           '<div class="id-field"><label for="id-lpin">Código (4 dígitos)</label>' +
           '<input id="id-lpin" class="pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••"></div>' +
           '<div class="id-err" id="id-err"></div>' +
-          '<button class="id-btn" type="button" data-act="link">Vincular</button>' +
-          '<button class="id-btn ghost" type="button" data-act="claim-view">Crear un nickname nuevo</button>';
-      } else if (idView === 'claim' || !contributor) {
+          '<button class="id-btn" type="button" data-act="link">Usar este nombre</button>' +
+          '<button class="id-btn ghost" type="button" data-act="back-auto">Volver</button>';
+      } else if (!contributor) {
         html =
-          '<div class="id-head"><h2>Crear un nickname</h2>' + close + '</div>' +
-          '<p class="id-sub">Opcional. Elige un nickname público para que tus revisiones se sumen y aparezcas en la tabla de veeduría. No uses tu nombre real ni datos personales.</p>' +
-          '<div class="id-field"><label for="id-nick">Nickname (público)</label>' +
-          '<input id="id-nick" type="text" maxlength="20" autocomplete="off" placeholder="Ej. AguilaDelValle"></div>' +
-          '<div class="id-err" id="id-err"></div>' +
-          '<button class="id-btn" type="button" data-act="claim">Crear mi nickname</button>' +
-          '<button class="id-btn ghost" type="button" data-act="link-view">Ya tengo un nickname — vincular este dispositivo</button>';
+          '<div class="id-head"><h2>Tu nombre</h2>' + close + '</div>' +
+          '<p class="id-sub">Revisa una mesa y tendrás un nombre en la tabla de veeduría.</p>' +
+          '<button class="id-btn" type="button" data-act="close">Entendido</button>';
       } else {
-        const c = contributor, pin = lsGet('e14_pin');
-        html =
-          '<div class="id-head"><h2>' + esc(c.display_name) + '</h2>' + close + '</div>' +
+        const c = contributor, pin = (c.pin || lsGet('e14_pin'));
+        let body =
+          '<div class="id-head"><h2>' + esc(c.display_name) + (c.locked ? '' : ' <span class="id-tag">provisional</span>') + '</h2>' + close + '</div>' +
           '<div class="id-stat">' +
             '<div class="box"><div class="v">' + (c.reviews || 0) + '</div><div class="k">mesas</div></div>' +
             '<div class="box"><div class="v">#' + (c.rank || '—') + '</div><div class="k">puesto</div></div>' +
             '<div class="box"><div class="v">' + (c.devices || 1) + '/3</div><div class="k">dispositivos</div></div>' +
-          '</div>' +
-          (pin
-            ? '<div class="id-pinbox" id="id-pinwrap" hidden><div class="lab">Tu código</div><div class="pin">' + esc(pin) + '</div>' +
-              '<div class="warn">Para vincular otro dispositivo: abre esta página allí → “Ya tengo un nickname” → escribe tu nickname y este código.</div></div>' +
-              '<button class="id-btn ghost" type="button" data-act="showpin">Ver mi código de recuperación</button>'
-            : '<p class="id-sub">Para vincular otro dispositivo necesitas tu código de 4 dígitos (se mostró al crear el nickname).</p>') +
+          '</div>';
+        if (!c.locked) {
+          body +=
+            '<p class="id-sub">Este es tu nombre público. Puedes dejarlo, cambiarlo o pedir otro al azar. Cuando lo guardes o lo asegures con un código, queda fijo.</p>' +
+            '<div class="id-field"><label for="id-rename">Tu nombre</label>' +
+            '<div style="display:flex; gap:8px; align-items:stretch">' +
+              '<input id="id-rename" type="text" maxlength="20" autocomplete="off" value="' + esc(c.display_name) + '" style="flex:1">' +
+              '<button class="id-btn" type="button" data-act="reroll" title="Otro nombre al azar" style="width:auto; flex:0 0 auto; padding:0 14px; font-size:18px">🎲</button>' +
+            '</div></div>' +
+            '<div class="id-err" id="id-err"></div>' +
+            '<button class="id-btn" type="button" data-act="rename">Guardar nombre</button>' +
+            '<button class="id-btn ghost" type="button" data-act="setpin">Asegurar con un código (para no perderlo)</button>' +
+            '<p class="id-sub" style="margin-top:8px">Sin código, tu nombre se pierde si cambias de dispositivo o borras los datos del navegador.</p>';
+        } else if (pin) {
+          body +=
+            '<div class="id-pinbox" id="id-pinwrap" hidden><div class="lab">Tu código</div><div class="pin">' + esc(pin) + '</div>' +
+              '<div class="warn">Para usarlo en otro dispositivo: abre esta página allí → “Usar mi nombre aquí” → escribe tu nombre y este código.</div></div>' +
+            '<button class="id-btn ghost" type="button" data-act="showpin">Ver mi código de recuperación</button>';
+        } else {
+          body +=
+            '<div class="id-err" id="id-err"></div>' +
+            '<button class="id-btn ghost" type="button" data-act="setpin">Asegurar con un código (recuperación + otros dispositivos)</button>';
+        }
+        body +=
+          '<button class="id-btn ghost" type="button" data-act="link-view">Usar mi nombre de otro dispositivo</button>' +
           '<hr class="id-divider"><div class="id-head" style="margin-bottom:8px"><h2 style="font-size:14px">Tabla de veeduría</h2></div>' +
           '<ul class="id-lb" id="id-lb"><li><span class="pos"></span><span class="who" style="color:var(--ink-faint)">Cargando…</span></li></ul>';
+        html = body;
       }
       idsheet.innerHTML = html;
-      const nick = idsheet.querySelector('#id-nick'); if (nick) setTimeout(function () { nick.focus(); }, 60);
       if (idView === 'auto' && contributor) idRenderBoard();
     }
 
@@ -660,7 +689,7 @@
           contributor.reviews = data.me.reviews; contributor.rank = data.me.rank;
           if (data.me.reviews > reviewed) { reviewed = data.me.reviews; persistReviewed(); }
           renderReviewed();
-          // Patch the stats row in place (don't rebuild the sheet — that would reset a revealed PIN).
+          // Patch the stats row in place (don't rebuild — that would reset a revealed code / edit).
           const boxes = idsheet.querySelectorAll('.id-stat .box .v');
           if (boxes.length === 3) { boxes[0].textContent = contributor.reviews || 0; boxes[1].textContent = '#' + (contributor.rank || '—'); }
         }
@@ -688,66 +717,89 @@
       const act = btn.getAttribute('data-act');
       if (act === 'close' || act === 'done') return idClose();
       if (act === 'link-view') { idView = 'link'; return idRender(); }
-      if (act === 'claim-view') { idView = 'claim'; return idRender(); }
+      if (act === 'back-auto') { idView = 'auto'; idRender(); return idLoadBoard(); }
       if (act === 'showpin') { const w = idsheet.querySelector('#id-pinwrap'); if (w) w.hidden = false; btn.hidden = true; return; }
-      if (act === 'claim') return idDoClaim();
+      if (act === 'rename') return idDoRename();
+      if (act === 'reroll') return idDoReroll();
+      if (act === 'setpin') return idDoSetpin();
       if (act === 'link') return idDoLink();
     });
 
-    const CLAIM_ERR = { taken: 'Ese nickname ya está tomado. Prueba otro.',
-      invalid: 'Nickname inválido: usa letras, números y espacios.', too_short: 'Muy corto (mínimo 2).',
-      too_long: 'Muy largo (máximo 20).', blocked: 'Ese nickname no está permitido.',
-      already_linked: 'Este dispositivo ya tiene un nickname.', invalid_request: 'No se pudo verificar. Recarga la página.' };
-    const LINK_ERR = { not_found: 'No encontramos ese nickname.', bad_pin: 'Código incorrecto.',
-      device_limit: 'Ese nickname ya tiene 3 dispositivos.', rate_limited: 'Demasiados intentos. Espera un momento.',
+    const RENAME_ERR = { taken: 'Ese nombre ya está tomado. Prueba otro.',
+      invalid: 'Usa solo letras, números y espacios.', too_short: 'Muy corto (mínimo 2).',
+      too_long: 'Muy largo (máximo 20).', blocked: 'Ese nombre no está permitido.',
+      locked: 'Tu nombre ya quedó fijo.', no_identity: 'Primero revisa una mesa.',
+      invalid_request: 'No se pudo verificar. Recarga la página.' };
+    const LINK_ERR = { not_found: 'No encontramos ese nombre.', bad_pin: 'Nombre o código incorrecto.',
+      device_limit: 'Ese nombre ya tiene 3 dispositivos.', rate_limited: 'Demasiados intentos. Espera un momento.',
       invalid_request: 'No se pudo verificar. Recarga la página.' };
 
-    async function idDoClaim() {
+    // POST a contributor action that returns a flat ``me`` payload; adopt it on success.
+    async function idPost(path, payload, errMap) {
+      await ensureSession();
+      const hp = document.getElementById('hp-website');
+      const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ form_token: window.__formToken, website: hp ? hp.value : '' }, payload || {})) });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.ok) { setContributor(data); return { ok: true, data: data }; }
+      return { ok: false, msg: (errMap && errMap[data && data.error]) || '' };
+    }
+
+    async function idDoRename() {
       if (idBusy) return;
-      const inp = idsheet.querySelector('#id-nick'), errEl = idsheet.querySelector('#id-err');
+      const inp = idsheet.querySelector('#id-rename'), errEl = idsheet.querySelector('#id-err');
       const name = ((inp && inp.value) || '').trim();
-      if (name.length < 2) { if (errEl) errEl.textContent = 'Elige un nickname de al menos 2 caracteres.'; return; }
-      idBusy = true; const btn = idsheet.querySelector('[data-act="claim"]');
-      if (btn) { btn.disabled = true; btn.textContent = 'Creando…'; }
+      if (name.length < 2) { if (errEl) errEl.textContent = 'Elige un nombre de al menos 2 caracteres.'; return; }
+      idBusy = true; const btn = idsheet.querySelector('[data-act="rename"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
       try {
-        await ensureSession();
-        const hp = document.getElementById('hp-website');
-        const res = await fetch('/api/contributor/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nickname: name, form_token: window.__formToken, website: hp ? hp.value : '' }) });
-        const data = await res.json().catch(() => ({}));
-        if (data && data.ok) {
-          lastClaimPin = data.pin || '';
-          setContributor({ display_name: data.display_name, reviews: data.reviews || 0, devices: data.devices || 1, pin: data.pin, rank: null });
-          idView = 'pin'; idRender();
-        } else if (errEl) { errEl.textContent = CLAIM_ERR[data && data.error] || 'No se pudo crear. Prueba de nuevo.'; }
-      } catch (e) { if (errEl) errEl.textContent = 'No se pudo crear. Prueba de nuevo.'; }
-      finally { idBusy = false; const b = idsheet.querySelector('[data-act="claim"]'); if (b) { b.disabled = false; b.textContent = 'Crear mi nickname'; } }
+        const r = await idPost('/api/contributor/rename', { nickname: name }, RENAME_ERR);
+        if (r.ok) { idView = 'auto'; idRender(); idLoadBoard(); showToast('¡Nombre guardado!'); }
+        else if (errEl) { errEl.textContent = r.msg || 'No se pudo guardar. Prueba de nuevo.'; }
+      } catch (e) { if (errEl) errEl.textContent = 'No se pudo guardar. Prueba de nuevo.'; }
+      finally { idBusy = false; const b = idsheet.querySelector('[data-act="rename"]'); if (b) { b.disabled = false; b.textContent = 'Guardar nombre'; } }
+    }
+
+    async function idDoReroll() {
+      if (idBusy) return;
+      idBusy = true;
+      try {
+        const r = await idPost('/api/contributor/reroll', {}, null);
+        if (r.ok) idRender();
+      } catch (e) {}
+      finally { idBusy = false; }
+    }
+
+    async function idDoSetpin() {
+      if (idBusy) return;
+      idBusy = true; const btn = idsheet.querySelector('[data-act="setpin"]'), errEl = idsheet.querySelector('#id-err');
+      if (btn) { btn.disabled = true; btn.textContent = 'Asegurando…'; }
+      try {
+        const r = await idPost('/api/contributor/setpin', {}, null);
+        if (r.ok) { lastPin = r.data.pin || ''; idView = 'pin'; idRender(); }
+        else if (errEl) { errEl.textContent = 'No se pudo asegurar. Prueba de nuevo.'; }
+      } catch (e) { if (errEl) errEl.textContent = 'No se pudo asegurar. Prueba de nuevo.'; }
+      finally { idBusy = false; }
     }
 
     async function idDoLink() {
       if (idBusy) return;
       const n = idsheet.querySelector('#id-lnick'), p = idsheet.querySelector('#id-lpin'), errEl = idsheet.querySelector('#id-err');
       const name = ((n && n.value) || '').trim(), pin = ((p && p.value) || '').trim();
-      if (name.length < 2 || !/^\d{4}$/.test(pin)) { if (errEl) errEl.textContent = 'Escribe tu nickname y un código de 4 dígitos.'; return; }
+      if (name.length < 2 || !/^\d{4}$/.test(pin)) { if (errEl) errEl.textContent = 'Escribe tu nombre y un código de 4 dígitos.'; return; }
       idBusy = true; const btn = idsheet.querySelector('[data-act="link"]');
       if (btn) { btn.disabled = true; btn.textContent = 'Vinculando…'; }
       try {
-        await ensureSession();
-        const hp = document.getElementById('hp-website');
-        const res = await fetch('/api/contributor/link', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nickname: name, pin: pin, form_token: window.__formToken, website: hp ? hp.value : '' }) });
-        const data = await res.json().catch(() => ({}));
-        if (data && data.ok) {
-          setContributor({ display_name: data.display_name, reviews: data.reviews || 0, devices: data.devices || 1, pin: data.pin, rank: null });
-          idView = 'auto'; idRender(); idLoadBoard(); showToast('¡Dispositivo vinculado!');
-        } else if (errEl) { errEl.textContent = LINK_ERR[data && data.error] || 'No se pudo vincular.'; }
+        const r = await idPost('/api/contributor/link', { nickname: name, pin: pin }, LINK_ERR);
+        if (r.ok) { idView = 'auto'; idRender(); idLoadBoard(); showToast('¡Dispositivo vinculado!'); }
+        else if (errEl) { errEl.textContent = r.msg || 'No se pudo vincular.'; }
       } catch (e) { if (errEl) errEl.textContent = 'No se pudo vincular. Prueba de nuevo.'; }
-      finally { idBusy = false; const b = idsheet.querySelector('[data-act="link"]'); if (b) { b.disabled = false; b.textContent = 'Vincular'; } }
+      finally { idBusy = false; const b = idsheet.querySelector('[data-act="link"]'); if (b) { b.disabled = false; b.textContent = 'Usar este nombre'; } }
     }
 
     reviewedEl.addEventListener('click', function () { idOpen('auto'); });
-    renderReviewed();   // render the chip now (hidden until there's progress; never an up-front ask)
-    idFetchMe();        // then reconcile with any server identity already linked to this device
+    renderReviewed();   // render the chip now (hidden until there's progress)
+    idFetchMe();        // reconcile with this device's server identity (the auto handle, once it exists)
 
     // --- Turnstile session gate ---------------------------------------------------------
     const turnstileOn = !!window.__turnstileSitekey;
@@ -1126,7 +1178,11 @@
           } catch (e) { return; }               // offline: transient, leave queued, retry later
           if (res.status === 429) { await sleep(1500); continue; }   // backoff, keep the item
           const data = await res.json().catch(() => ({}));
-          if (data && data.ok) { outbox.shift(); saveOutbox(); reauths = 0; continue; }  // delivered
+          if (data && data.ok) {
+            outbox.shift(); saveOutbox(); reauths = 0;
+            if (!contributor) idFetchMe();   // first delivered mesa auto-created our handle — adopt it
+            continue;                        // delivered
+          }
           // Rejected (token expired/invalid/wrong-IP): re-establish and retry the SAME item, bounded.
           if (turnstileOn && reauths++ <= 3) {
             window.__formToken = '';
