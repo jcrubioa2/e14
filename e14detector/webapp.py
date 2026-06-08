@@ -1560,11 +1560,22 @@ def create_app(
         return resp
 
     @app.get("/admin/login")
-    async def admin_login_page(request: Request):
-        """Operator sign-in form: a token field instead of a ?key= URL, so it works inside the
-        installed PWA (standalone, no address bar). 404 when the admin feature is off."""
+    async def admin_login_page(request: Request, key: str = ""):
+        """Operator sign-in — two ways in, both ending with the token in a cookie, not the URL:
+
+        - A bookmarkable **magic link** ``/admin/login?key=TOKEN``: validated, the cookie is set,
+          then we 303 to the panel so the token is immediately stripped from the address bar and
+          history (it only ever appears in that one saved link + the initial request log). One tap,
+          works to bootstrap the installed PWA.
+        - The **token form** (shown when there's no/invalid key), which posts the token in a header.
+
+        404 when the admin feature is off."""
         if not config.ADMIN_TOKEN:
             raise HTTPException(status_code=404, detail="not found")
+        if key and hmac.compare_digest(key, config.ADMIN_TOKEN):
+            resp = RedirectResponse("/admin/poll", status_code=303)
+            _set_admin_cookies(resp, key)
+            return resp
         return templates.TemplateResponse(request, "admin_login.html", {})
 
     @app.post("/admin/login")
