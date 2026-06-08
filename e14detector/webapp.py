@@ -1571,78 +1571,115 @@ def create_app(
             set_db_lock, want, reason="admin console toggle", n_docs=n_docs, by="admin")
         return JSONResponse({"ok": True, "lock": lock})
 
-    def _chi2_critical_001(df: int) -> float:
-        """Upper-tail chi-square critical value at alpha=0.001 via Wilson-Hilferty (no scipy
-        dependency). Accurate to ~1% — plenty for a PASS/FAIL with margin (df=19 -> ~43.96 vs
-        the exact 43.82). 3.0902 is the upper-tail z for alpha=0.001."""
-        if df <= 0:
-            return 0.0
-        t = 1.0 - 2.0 / (9.0 * df) + 3.0902323 * math.sqrt(2.0 / (9.0 * df))
-        return df * t * t * t
+    def _pearson(xs: list[float], ys: list[float]) -> float | None:
+        """Pearson correlation, or None when undefined (n<2 or a flat series)."""
+        n = len(xs)
+        if n < 2:
+            return None
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        sxx = sum((x - mx) ** 2 for x in xs)
+        syy = sum((y - my) ** 2 for y in ys)
+        if sxx <= 0 or syy <= 0:
+            return None
+        sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        return sxy / math.sqrt(sxx * syy)
 
-    def _fairness_probe(n: int, buckets: int = 20) -> dict:
-        """Draw ``n`` picks from the LIVE acta-deck selector (``_pick_review_doc``) and
-        chi-square them, binned by document ``rowid``, against the uniform expectation — each
-        band's expected mass is proportional to how many reviewable actas (``n_candidates>0``)
-        fall in that rowid range. The pre-fix selector (crop-weighted / lowest-rowid) piles
-        into the low bands and blows past the critical value; the uniform pick sits near df.
-        Read-only."""
+    def _selector_probe(n: int, buckets: int = 20) -> dict:
+        """Draw ``n`` picks from the LIVE acta-deck selector and show WHERE review effort is
+        being steered, by document ``rowid`` band. For each band we report current coverage
+        (reviewed/eligible) and the selector's serving share. Under coverage weighting the
+        serving share should run INVERSELY to coverage — the least-covered bands get the most
+        new serves — so the historical skew flattens instead of persisting. The coverage column
+        always reflects real review history; the serving reflects the active mode (weighted by
+        default, uniform if disabled). Read-only."""
+        disp_counts = _agg_cached("review_counts", community.review_counts, ttl=120.0)
+        sel_counts = disp_counts if config.ACTA_DECK_COVERAGE_WEIGHTED else None
         with conn() as db:
             maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
             eligible = [0] * buckets
+            reviewed = [0] * buckets
             if maxrow:
                 for r in db.execute(
-                    f"SELECT (rowid - 1) * {buckets} / {maxrow} AS b, COUNT(*) AS c "
-                    f"FROM documents WHERE n_candidates > 0 GROUP BY b"
+                    "SELECT rowid, document_id FROM documents WHERE n_candidates > 0"
                 ):
-                    eligible[min(int(r["b"]), buckets - 1)] += r["c"]
-            observed = [0] * buckets
+                    b = min((int(r["rowid"]) - 1) * buckets // maxrow, buckets - 1)
+                    eligible[b] += 1
+                    if disp_counts.get(r["document_id"], 0) > 0:
+                        reviewed[b] += 1
+            served = [0] * buckets
             misses = 0
             for _ in range(n):
-                row = _pick_review_doc(db, set(), maxrow)
+                row = _pick_review_doc(db, set(), maxrow, sel_counts)
                 if row is None:
                     misses += 1
                     continue
-                observed[min((int(row["rowid"]) - 1) * buckets // maxrow, buckets - 1)] += 1
-        total_obs = sum(observed)
+                served[min((int(row["rowid"]) - 1) * buckets // maxrow, buckets - 1)] += 1
+
+        total_served = sum(served)
         total_elig = sum(eligible)
-        bars: list[dict] = []
-        chi2 = 0.0
-        nonempty = 0
+        total_reviewed = sum(reviewed)
+        bands: list[dict] = []
+        cov_xs: list[float] = []
+        serve_ys: list[float] = []
         for b in range(buckets):
-            exp = total_obs * eligible[b] / total_elig if total_elig else 0.0
-            if exp > 0:
-                chi2 += (observed[b] - exp) ** 2 / exp
-                nonempty += 1
-            bars.append({
+            e = eligible[b]
+            cov = (100.0 * reviewed[b] / e) if e else 0.0
+            sp = (100.0 * served[b] / total_served) if total_served else 0.0
+            bands.append({
                 "band": b + 1,
                 "lo": int(b * maxrow / buckets) + 1,
                 "hi": int((b + 1) * maxrow / buckets),
-                "eligible": eligible[b],
-                "observed": observed[b],
-                "expected": round(exp, 1),
-                "obs_pct": (100.0 * observed[b] / total_obs) if total_obs else 0.0,
-                "exp_pct": (100.0 * eligible[b] / total_elig) if total_elig else 0.0,
+                "eligible": e, "reviewed": reviewed[b],
+                "coverage": cov, "served": served[b], "serve_pct": sp,
             })
-        df = max(nonempty - 1, 1)
-        crit = _chi2_critical_001(df)
+            if e:
+                cov_xs.append(cov)
+                serve_ys.append(sp)
+
+        steer_r = _pearson(cov_xs, serve_ys)
+        # Share of serves landing in the least-covered half of the corpus (by eligible mass).
+        order = sorted(range(buckets), key=lambda i: bands[i]["coverage"])
+        half = total_elig / 2 if total_elig else 0
+        acc_elig = 0.0
+        least_half_capture = 0.0
+        for i in order:
+            if acc_elig >= half:
+                break
+            least_half_capture += bands[i]["serve_pct"]
+            acc_elig += bands[i]["eligible"]
+        cov_spread = (max(cov_xs) - min(cov_xs)) if cov_xs else 0.0
+
+        mode = "weighted" if config.ACTA_DECK_COVERAGE_WEIGHTED else "uniform"
+        if cov_spread < 1.0:
+            verdict = "baseline"   # no coverage skew to steer against yet -> effectively uniform
+        elif mode == "weighted" and steer_r is not None and steer_r < -0.2:
+            verdict = "steering"
+        elif mode == "uniform":
+            verdict = "uniform"
+        else:
+            verdict = "weak"
         return {
-            "bars": bars, "buckets": buckets, "samples": total_obs, "misses": misses,
-            "total_eligible": total_elig, "max_rowid": maxrow,
-            "chi2": round(chi2, 2), "df": df, "critical": round(crit, 2),
-            "reduced_chi2": round(chi2 / df, 3) if df else 0.0,
-            "uniform": chi2 < crit,
+            "mode": mode, "verdict": verdict, "buckets": buckets,
+            "samples": total_served, "misses": misses,
+            "total_eligible": total_elig, "total_reviewed": total_reviewed,
+            "overall_coverage": (100.0 * total_reviewed / total_elig) if total_elig else 0.0,
+            "max_rowid": maxrow, "bands": bands,
+            "steer_r": (round(steer_r, 3) if steer_r is not None else None),
+            "least_half_capture": round(least_half_capture, 1),
+            "cov_spread": round(cov_spread, 1),
+            "max_serve_pct": max((b["serve_pct"] for b in bands), default=0.0),
+            "max_coverage": max((b["coverage"] for b in bands), default=0.0),
         }
 
     @app.get("/admin/fairness")
     async def admin_fairness(request: Request, key: str = "", n: int = 2000):
-        """Forward-fairness viz for the acta-deck selector: a LIVE chi-square showing the
-        contributor-facing pick is uniform across actas (no low-rowid / crop-count skew).
-        Flat bars + a sub-critical chi-square is the production proof the fix holds — not a
-        synthetic test fixture but the real served ``documents`` table. Read-only; refreshable."""
+        """Selector-steering viz: sample the LIVE acta-deck pick and show it is steering review
+        effort toward the least-covered actas (coverage weighting), driven only by review count
+        and never by acta content. The 'after' to the coverage board's 'before'. Read-only."""
         _require_admin(request, key)
         n = max(200, min(int(n or 2000), 20000))
-        result = await asyncio.to_thread(_fairness_probe, n)
+        result = await asyncio.to_thread(_selector_probe, n)
         return templates.TemplateResponse(
             request, "admin_fairness.html",
             {"active": "admin", "key": key, "requested_n": n, **result},
@@ -2338,33 +2375,52 @@ def create_app(
         skip = {c for c in exclude.split(",") if c}
         return {"items": _feed_payload(n, skip)}
 
-    def _pick_review_doc(db: sqlite3.Connection, exclude_docs: set[str], maxrow: int):
-        """Uniformly pick ONE reviewable acta's row (``rowid`` + ``document_id``) from
-        ``documents``. Shared by the public acta-deck and the admin fairness probe so both
-        exercise the exact same selection. Random-rowid sampling over the dense ``documents``
-        rowid (a handful of index seeks, not a full ``ORDER BY RANDOM()`` scan); ``n_candidates
-        > 0`` keeps to actas that have crops to review. We ``shuffle`` each batch because SQLite
-        returns ``IN`` results in rowid order — without it, "take the first hit" would always
-        favour the lowest rowid (the earliest-inserted actas). Returns ``None`` if nothing
-        eligible turns up within the attempt budget."""
+    def _pick_review_doc(db: sqlite3.Connection, exclude_docs: set[str], maxrow: int,
+                         counts: dict[str, int] | None = None):
+        """Pick ONE reviewable acta's row (``rowid`` + ``document_id``) from ``documents``.
+        Shared by the public acta-deck and the admin probe so both exercise the same selection.
+
+        Random-rowid sampling over the dense ``documents`` rowid (a handful of index seeks, not
+        a full ``ORDER BY RANDOM()`` scan); ``n_candidates > 0`` keeps to actas that have crops
+        to review. We ``shuffle`` each batch because SQLite returns ``IN`` results in rowid order.
+
+        Coverage weighting: when ``counts`` (doc_id -> reviewers so far) is given, the winner
+        inside each random batch is drawn with weight ``1/(reviews+1)`` — so the LEAST-reviewed
+        actas are favoured and the historical backlog drains, while every acta keeps a non-zero
+        chance (non-starving) and selection stays driven only by review count, never by content
+        (un-gameable toward less scrutiny). With ``counts=None`` (or all-zero history) it reduces
+        to a uniform shuffle pick. Returns ``None`` if nothing eligible turns up."""
+        batch = 16 if counts else 8  # a wider batch gives the coverage weighting more to choose from
         attempts = 0
         while maxrow and attempts < 12:
             attempts += 1
-            rowids = [random.randint(1, maxrow) for _ in range(8)]
+            rowids = [random.randint(1, maxrow) for _ in range(batch)]
             placeholders = ",".join("?" * len(rowids))
             rows = db.execute(
                 f"SELECT rowid, document_id FROM documents WHERE rowid IN ({placeholders}) "
                 f"AND n_candidates > 0",
                 rowids,
             ).fetchall()
-            random.shuffle(rows)  # IN returns rowid order; don't favour the lowest rowid
-            for r in rows:
-                if r["document_id"] not in exclude_docs:
-                    return r
+            cands = [r for r in rows if r["document_id"] not in exclude_docs]
+            if not cands:
+                continue
+            if counts:
+                weights = [1.0 / (counts.get(r["document_id"], 0) + 1) for r in cands]
+                return random.choices(cands, weights=weights, k=1)[0]
+            random.shuffle(cands)  # IN returns rowid order; don't favour the lowest rowid
+            return cands[0]
         return None
 
+    def _review_counts_cached() -> dict[str, int] | None:
+        """Cached per-acta reviewer counts for coverage weighting, or ``None`` when weighting is
+        off (revert to uniform). Shared with the coverage board via the same agg-cache key, so
+        the hot serving path adds only a dict lookup, not an extra backend scan."""
+        if not config.ACTA_DECK_COVERAGE_WEIGHTED:
+            return None
+        return _agg_cached("review_counts", community.review_counts, ttl=120.0)
+
     def _acta_deck_payload(exclude_docs: set[str] | None = None) -> list[dict]:
-        """All candidate crops of ONE uniformly-picked acta, shuffled and anonymized.
+        """All candidate crops of ONE selected acta, shuffled and anonymized.
 
         Powers the grid-voting page: the contributor sees every casilla of a single mesa
         at once (so the whole acta gets reviewed in one pass) WITHOUT learning which mesa
@@ -2372,16 +2428,17 @@ def create_app(
         location or candidate names. Registers every cid so /c/{cid} and /api/vote-batch
         can resolve them. ``exclude_docs`` lets a caller steer away from a just-served acta.
 
-        Fairness: every reviewable acta is equally likely. We pick the ``document_id``
-        DIRECTLY from ``documents`` (one acta = one row, via ``_pick_review_doc``), so
-        selection does NOT depend on how many crops an acta has — sampling a crop instead
-        would weight actas by their candidate count. The admin ``/admin/fairness`` probe
-        chi-squares this same pick so the uniformity is observable, not just asserted.
+        Fairness: selection is per-acta (one acta = one ``documents`` row, via ``_pick_review_doc``),
+        so it does NOT depend on how many crops an acta has. By default it is coverage-weighted —
+        biased toward the least-reviewed actas so scrutiny reaches the whole corpus — which the
+        admin ``/admin/fairness`` board verifies by sampling this same pick. Driven only by review
+        count, never by acta content.
         """
         exclude_docs = exclude_docs or set()
+        counts = _review_counts_cached()
         with conn() as db:
             maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
-            row = _pick_review_doc(db, exclude_docs, maxrow)
+            row = _pick_review_doc(db, exclude_docs, maxrow, counts)
             if row is None:
                 return []
             document_id = row["document_id"]

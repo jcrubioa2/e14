@@ -24,6 +24,22 @@ TRANSPARENCY_LOG: list[dict] = [
     {
         "date": "2026-06-08",
         "status": "fixed",
+        "tag": "Cobertura",
+        "title": "Priorizamos las actas que menos se han revisado",
+        "body": (
+            "Repartir cada acta por igual era justo, pero dejaba a la gran mayoría sin revisar "
+            "y tardaría muchísimo en emparejarse. Ahora la baraja muestra más seguido las actas "
+            "que han recibido menos revisiones, para que la veeduría alcance a la mayor cantidad "
+            "posible de mesas. Sigue siendo al azar y ninguna acta queda excluida; la prioridad "
+            "depende solo de cuántas veces se ha revisado cada una, nunca de su contenido — así "
+            "que no se puede manipular para esconder una mesa."
+        ),
+        "link": "https://github.com/jcrubioa2/e14/pull/40",
+        "link_label": "Ver el cambio",
+    },
+    {
+        "date": "2026-06-08",
+        "status": "fixed",
         "tag": "Imparcialidad",
         "title": "Ahora todas las actas tienen la misma posibilidad de salir a revisión",
         "body": (
