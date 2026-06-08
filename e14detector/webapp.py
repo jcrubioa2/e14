@@ -2171,31 +2171,40 @@ def create_app(
         return {"items": _feed_payload(n, skip)}
 
     def _acta_deck_payload(exclude_docs: set[str] | None = None) -> list[dict]:
-        """All candidate crops of ONE randomly-picked acta, shuffled and anonymized.
+        """All candidate crops of ONE uniformly-picked acta, shuffled and anonymized.
 
         Powers the grid-voting page: the contributor sees every casilla of a single mesa
         at once (so the whole acta gets reviewed in one pass) WITHOUT learning which mesa
         it is — the response carries only opaque cids + image urls, never the document id,
-        location or candidate names. Picks the acta the same cheap random-PK way the feed
-        samples crops (a few index seeks, snappy even on a cold page cache); see
-        [[_feed_payload]]. ``exclude_docs`` is unused server-side today but lets a caller
-        steer away from a just-served acta. Registers every cid so /c/{cid} and
-        /api/vote-batch can resolve them.
+        location or candidate names. Registers every cid so /c/{cid} and /api/vote-batch
+        can resolve them. ``exclude_docs`` lets a caller steer away from a just-served acta.
+
+        Fairness: every reviewable acta is equally likely. We pick the ``document_id``
+        DIRECTLY from ``documents`` (one acta = one row), so selection does NOT depend on
+        how many crops an acta has — sampling a crop instead would weight actas by their
+        candidate count. Efficiency: random-rowid sampling (a handful of index seeks on the
+        small, dense ``documents`` rowid), not ``ORDER BY RANDOM()`` (a full scan). We
+        ``shuffle`` each rowid batch before taking a match because SQLite returns ``IN``
+        results in rowid order — without the shuffle "take the first hit" would always
+        favour the lowest rowid, i.e. the earliest-inserted actas. ``n_candidates > 0``
+        keeps to actas that actually have crops to review (it is the count of candidate
+        rows with a crop, maintained alongside the rows).
         """
         exclude_docs = exclude_docs or set()
         with conn() as db:
-            maxid = db.execute("SELECT max(id) AS m FROM vote_fields").fetchone()["m"] or 0
+            maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
             document_id = None
             attempts = 0
-            while document_id is None and maxid and attempts < 12:
+            while document_id is None and maxrow and attempts < 12:
                 attempts += 1
-                ids = [random.randint(1, maxid) for _ in range(8)]
-                placeholders = ",".join("?" * len(ids))
+                rowids = [random.randint(1, maxrow) for _ in range(8)]
+                placeholders = ",".join("?" * len(rowids))
                 rows = db.execute(
-                    f"SELECT document_id FROM vote_fields WHERE id IN ({placeholders}) "
-                    f"AND row_type='candidate' AND raw_crop_path IS NOT NULL",
-                    ids,
+                    f"SELECT document_id FROM documents WHERE rowid IN ({placeholders}) "
+                    f"AND n_candidates > 0",
+                    rowids,
                 ).fetchall()
+                random.shuffle(rows)  # IN returns rowid order; don't favour the lowest rowid
                 for r in rows:
                     if r["document_id"] not in exclude_docs:
                         document_id = r["document_id"]
