@@ -1571,6 +1571,14 @@ def create_app(
             set_db_lock, want, reason="admin console toggle", n_docs=n_docs, by="admin")
         return JSONResponse({"ok": True, "lock": lock})
 
+    def _chi2_critical_001(df: int) -> float:
+        """Upper-tail chi-square critical value at alpha=0.001 via Wilson-Hilferty (no scipy).
+        Accurate to ~1% (df=19 -> ~43.96 vs the exact 43.82). 3.0902 is the z for alpha=0.001."""
+        if df <= 0:
+            return 0.0
+        t = 1.0 - 2.0 / (9.0 * df) + 3.0902323 * math.sqrt(2.0 / (9.0 * df))
+        return df * t * t * t
+
     def _pearson(xs: list[float], ys: list[float]) -> float | None:
         """Pearson correlation, or None when undefined (n<2 or a flat series)."""
         n = len(xs)
@@ -1650,9 +1658,33 @@ def create_app(
             acc_elig += bands[i]["eligible"]
         cov_spread = (max(cov_xs) - min(cov_xs)) if cov_xs else 0.0
 
+        # Flatness / sanity: chi-square of the SERVING distribution vs uniform-over-eligible.
+        # While overall coverage is low almost every acta has weight 1, so serving should stay
+        # roughly flat (reduced chi-square near 1) — only gently tilted toward the gaps. A huge
+        # reduced chi-square means serving has piled into a few bands: the old-bug failure class.
+        chi2 = 0.0
+        nonempty = 0
+        for b in range(buckets):
+            exp = total_served * eligible[b] / total_elig if total_elig else 0.0
+            if exp > 0:
+                chi2 += (served[b] - exp) ** 2 / exp
+                nonempty += 1
+        df = max(nonempty - 1, 1)
+        crit = _chi2_critical_001(df)
+        reduced_chi2 = chi2 / df if df else 0.0
+        flat = chi2 < crit                 # indistinguishable from uniform (gentle steering passes)
+        concentrated = reduced_chi2 > 100  # serving piled into a few bands
+        # A pile-up is only a FAILURE if it isn't explained by steering toward the gaps. Strong but
+        # legitimate steering also concentrates serving — but in the LEAST-covered bands (steer_r
+        # very negative, most serves to the under-covered half). Misdirection = lumpy AND not that.
+        steering_shaped = (steer_r is not None and steer_r < -0.5 and least_half_capture >= 60)
+        misdirected = concentrated and not steering_shaped
+
         mode = "weighted" if config.ACTA_DECK_COVERAGE_WEIGHTED else "uniform"
-        if cov_spread < 1.0:
-            verdict = "baseline"   # no coverage skew to steer against yet -> effectively uniform
+        if misdirected:
+            verdict = "malfunction"        # pathological pile-up not aimed at the backlog — broken
+        elif cov_spread < 1.0:
+            verdict = "baseline"           # no coverage skew to steer against yet -> ~uniform
         elif mode == "weighted" and steer_r is not None and steer_r < -0.2:
             verdict = "steering"
         elif mode == "uniform":
@@ -1668,6 +1700,8 @@ def create_app(
             "steer_r": (round(steer_r, 3) if steer_r is not None else None),
             "least_half_capture": round(least_half_capture, 1),
             "cov_spread": round(cov_spread, 1),
+            "chi2": round(chi2, 2), "df": df, "critical": round(crit, 2),
+            "reduced_chi2": round(reduced_chi2, 2), "flat": flat, "concentrated": concentrated,
             "max_serve_pct": max((b["serve_pct"] for b in bands), default=0.0),
             "max_coverage": max((b["coverage"] for b in bands), default=0.0),
         }

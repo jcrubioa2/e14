@@ -1686,8 +1686,8 @@ def test_admin_fairness_probe_is_gated_and_uniform(tmp_path: Path) -> None:
     assert off == 404, "no token configured -> route hidden"
     assert bad == 403, "token configured, wrong key -> forbidden"
     assert ok == 200
-    # Seeded uniform draw passes the chi-square verdict the page renders.
-    assert "UNIFORME" in body and "SESGO DETECTADO" not in body
+    # No review history -> nothing to steer -> healthy/uniform baseline (flat serving).
+    assert "SANO" in body and "FALLA" not in body
 
 
 def test_reportes_renders_public_fixes_log(tmp_path: Path) -> None:
@@ -1826,8 +1826,10 @@ def test_acta_deck_steers_to_least_reviewed(tmp_path: Path) -> None:
         config.ADMIN_TOKEN = orig_token
 
     assert ok == 200
-    # The selector concentrates new serves on the under-covered (high-rowid) bands.
-    assert "DIRIGIENDO A LAS MENOS REVISADAS" in body
+    # The selector concentrates new serves on the under-covered (high-rowid) bands — and the
+    # board reads this as healthy steering, NOT a malfunction pile-up.
+    assert "dirigiendo a las menos revisadas" in body
+    assert "FALLA" not in body
 
 
 def test_acta_deck_weighting_off_is_uniform(tmp_path: Path) -> None:
