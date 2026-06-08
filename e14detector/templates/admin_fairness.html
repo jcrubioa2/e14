@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Imparcialidad del selector (operador)</title>
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ok:#1a7f37; --ink:#202124; --accent:#0969da; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); }
+    header, main { max-width: 1000px; margin: 0 auto; padding: 16px 20px; }
+    header { background: var(--bg); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    p.lede { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 6px 0 0; max-width: 70ch; }
+    a { color: var(--accent); text-decoration: none; }
+    .verdict { margin: 14px 0; padding: 12px 16px; border-radius: 10px; font-size: 15px; border: 1px solid var(--line); }
+    .verdict.pass { background:#eaf6ec; border-color:#aedcb8; color:var(--ok); }
+    .verdict.fail { background:#fdeceb; border-color:var(--bad); color:var(--bad); }
+    .verdict b { font-size: 17px; }
+    .stats { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+    .card { border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:12px; color:var(--muted); }
+    .card b { display:block; font-size:18px; color:var(--ink); margin-top:2px; font-variant-numeric: tabular-nums; }
+    table.bars { width:100%; border-collapse: collapse; font-size:12.5px; margin-top:8px; }
+    table.bars th, table.bars td { padding:4px 8px; text-align:right; vertical-align:middle; }
+    table.bars th { color:var(--muted); font-weight:600; border-bottom:1px solid var(--line); }
+    table.bars td.bar { width:55%; text-align:left; }
+    .track { position:relative; height:16px; }
+    .track .obs { position:absolute; left:0; top:0; height:16px; border-radius:3px; background:var(--accent); opacity:.82; }
+    .track .exp { position:absolute; top:-2px; height:20px; width:2px; background:var(--ink); }
+    .legend { font-size:12px; color:var(--muted); margin-top:10px; }
+    .legend .sw { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:middle; margin:0 3px 0 10px; }
+    .legend .sw.obs { background:var(--accent); opacity:.82; }
+    .legend .sw.exp { width:2px; height:13px; border-radius:0; background:var(--ink); }
+    .controls { margin: 10px 0; font-size: 13px; }
+    .controls a { display:inline-block; padding:5px 10px; border:1px solid var(--line); border-radius:7px; margin-right:6px; }
+    .num { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Imparcialidad del selector de actas</h1>
+    <p class="lede">
+      Prueba en vivo de que la baraja de revisión (<code>/api/acta-deck</code>) elige cada acta
+      con <b>igual probabilidad</b>: ni sesgada hacia las primeras insertadas (rowid bajo) ni
+      ponderada por cuántas casillas tiene. Se toman {{ "{:,}".format(samples) }} muestras del
+      mismo selector que ve el público, se agrupan por banda de rowid y se contrasta con la
+      expectativa uniforme (cada banda pesa según cuántas actas revisables contiene). Solo lectura.
+    </p>
+  </header>
+  <main>
+    {% if uniform %}
+    <div class="verdict pass">
+      <b>UNIFORME ✓</b> — &chi;&sup2; = {{ chi2 }} &lt; {{ critical }} (valor crítico, &alpha;=0.001, df={{ df }}).
+      La distribución observada es indistinguible de la uniforme: el sesgo de selección está corregido.
+    </div>
+    {% else %}
+    <div class="verdict fail">
+      <b>SESGO DETECTADO ✗</b> — &chi;&sup2; = {{ chi2 }} &ge; {{ critical }} (valor crítico, &alpha;=0.001, df={{ df }}).
+      La selección NO es uniforme; revisa el selector.
+    </div>
+    {% endif %}
+
+    <div class="stats">
+      <div class="card">Muestras<b class="num">{{ "{:,}".format(samples) }}</b></div>
+      <div class="card">Actas revisables<b class="num">{{ "{:,}".format(total_eligible) }}</b></div>
+      <div class="card">&chi;&sup2;<b class="num">{{ chi2 }}</b></div>
+      <div class="card">&chi;&sup2; reducido (≈1 si uniforme)<b class="num">{{ reduced_chi2 }}</b></div>
+      <div class="card">Crítico (&alpha;=0.001)<b class="num">{{ critical }}</b></div>
+      {% if misses %}<div class="card">Muestras sin acta<b class="num">{{ misses }}</b></div>{% endif %}
+    </div>
+
+    <table class="bars">
+      <thead>
+        <tr><th>Banda rowid</th><th>Actas</th><th>Obs.</th><th>Esp.</th><th class="bar">Observado vs. esperado (%)</th></tr>
+      </thead>
+      <tbody>
+      {% set maxpct = (bars|map(attribute='obs_pct')|max, bars|map(attribute='exp_pct')|max)|max or 1 %}
+      {% for r in bars %}
+        <tr>
+          <td class="num">{{ "{:,}".format(r.lo) }}–{{ "{:,}".format(r.hi) }}</td>
+          <td class="num">{{ "{:,}".format(r.eligible) }}</td>
+          <td class="num">{{ r.observed }}</td>
+          <td class="num">{{ r.expected }}</td>
+          <td class="bar">
+            <div class="track">
+              <div class="obs" style="width: {{ (100.0 * r.obs_pct / maxpct)|round(1) }}%"></div>
+              <div class="exp" style="left: {{ (100.0 * r.exp_pct / maxpct)|round(1) }}%"></div>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="legend">
+      <span class="sw obs"></span> barra = % observado de las muestras
+      <span class="sw exp"></span> marca = % esperado (proporción de actas revisables en esa banda).
+      Si el selector es justo, cada barra alcanza su marca.
+    </p>
+
+    <div class="controls">
+      <a href="/admin/fairness?key={{ key }}&amp;n=2000">2&nbsp;000 muestras</a>
+      <a href="/admin/fairness?key={{ key }}&amp;n=8000">8&nbsp;000 muestras</a>
+      <a href="/admin/fairness?key={{ key }}&amp;n=20000">20&nbsp;000 muestras</a>
+      <a href="/admin/poll?key={{ key }}">← Panel</a>
+    </div>
+  </main>
+</body>
+</html>
