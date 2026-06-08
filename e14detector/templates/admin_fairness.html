@@ -31,8 +31,13 @@
     .legend .sw { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:middle; margin:0 3px 0 10px; }
     .legend .sw.obs { background:var(--accent); opacity:.82; }
     .legend .sw.exp { width:2px; height:13px; border-radius:0; background:var(--ink); }
+    .adminnav { display:flex; flex-wrap:wrap; gap:6px; margin-top:14px; }
+    .adminnav a { padding:6px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; font-weight:600; color:var(--muted); background:#fff; text-decoration:none; }
+    .adminnav a:hover { border-color:var(--accent); color:var(--accent); }
+    .adminnav a.is-on { background:var(--accent); border-color:var(--accent); color:#fff; }
     .controls { margin: 10px 0; font-size: 13px; }
-    .controls a { display:inline-block; padding:5px 10px; border:1px solid var(--line); border-radius:7px; margin-right:6px; }
+    .controls span.lbl { color:var(--muted); margin-right:4px; }
+    .controls a { display:inline-block; padding:5px 10px; border:1px solid var(--line); border-radius:7px; margin-right:6px; text-decoration:none; }
     .num { font-variant-numeric: tabular-nums; }
   </style>
 </head>
@@ -46,6 +51,10 @@
       mismo selector que ve el público, se agrupan por banda de rowid y se contrasta con la
       expectativa uniforme (cada banda pesa según cuántas actas revisables contiene). Solo lectura.
     </p>
+    <nav class="adminnav" aria-label="Secciones del panel">
+      <a href="/admin/poll?key={{ key }}">Estado &amp; publicaci&oacute;n</a>
+      <a href="/admin/fairness?key={{ key }}" class="is-on">Imparcialidad del selector</a>
+    </nav>
   </header>
   <main>
     {% if uniform %}
@@ -98,10 +107,10 @@
     </p>
 
     <div class="controls">
-      <a href="/admin/fairness?key={{ key }}&amp;n=2000">2&nbsp;000 muestras</a>
-      <a href="/admin/fairness?key={{ key }}&amp;n=8000">8&nbsp;000 muestras</a>
-      <a href="/admin/fairness?key={{ key }}&amp;n=20000">20&nbsp;000 muestras</a>
-      <a href="/admin/poll?key={{ key }}">← Panel</a>
+      <span class="lbl">Volver a muestrear:</span>
+      <a href="/admin/fairness?key={{ key }}&amp;n=2000">2&nbsp;000</a>
+      <a href="/admin/fairness?key={{ key }}&amp;n=8000">8&nbsp;000</a>
+      <a href="/admin/fairness?key={{ key }}&amp;n=20000">20&nbsp;000</a>
     </div>
   </main>
 </body>
