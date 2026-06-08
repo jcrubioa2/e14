@@ -111,9 +111,22 @@
     @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
     .rank.tap { cursor:pointer; -webkit-tap-highlight-color:transparent; }
     .rank.tap:hover { border-color:var(--line-strong); }
-    /* The "create a nickname" entry pill shown before a contributor opts in (anonymous). */
-    .rank.cta { background:var(--card); }
-    .rank.cta .name { color:var(--link); }
+
+    /* One-time, dismissible banner: shown ONCE after the Nth review to offer saving progress
+       with a nickname. "No, gracias" silences it forever — we never ask again. */
+    .id-banner { position:fixed; left:12px; right:12px; top:calc(env(safe-area-inset-top) + 10px); z-index:55;
+                 max-width:440px; margin:0 auto; background:var(--card); border:1.5px solid var(--line);
+                 border-radius:14px; box-shadow:0 14px 36px -14px rgba(28,26,21,.42); padding:13px 14px;
+                 transform:translateY(-135%); opacity:0;
+                 transition:transform .32s cubic-bezier(.2,.7,.3,1), opacity .32s; }
+    .id-banner.show { transform:none; opacity:1; }
+    .id-banner p { margin:0 0 10px; font-size:13px; line-height:1.45; color:var(--ink); }
+    .id-banner p b { font-weight:800; }
+    .id-banner .row { display:flex; gap:8px; }
+    .id-banner .row button { flex:1; border-radius:10px; padding:9px; font:inherit; font-weight:800;
+                             font-size:13px; cursor:pointer; border:none; transition:filter .14s; }
+    .id-banner .row .yes { background:var(--link); color:#fff; } .id-banner .row .yes:hover { filter:brightness(1.06); }
+    .id-banner .row .no { background:transparent; color:var(--ink-faint); font-weight:700; flex:0 0 auto; padding:9px 12px; }
 
     /* --- Identity sheet (opt-in named contributor) ----------------------------------- */
     .id-ov { position:fixed; inset:0; z-index:60; background:rgba(28,26,21,.46); backdrop-filter:blur(2px);
@@ -380,6 +393,16 @@
     </div>
   </div>
 
+  <!-- One-time opt-in banner: shown ONCE after the Nth review (idMaybePrompt); "No, gracias"
+       silences it permanently. Hidden by default; JS reveals it only when earned. -->
+  <div class="id-banner" id="idbanner" role="status" hidden>
+    <p id="idbanner-txt"></p>
+    <div class="row">
+      <button type="button" class="no" data-act="id-dismiss">No, gracias</button>
+      <button type="button" class="yes" data-act="id-accept">Crear apodo</button>
+    </div>
+  </div>
+
   <!-- Identity sheet: opt-in named contributor (claim a nickname / link a device / leaderboard).
        Its inner HTML is rendered by JS (idRender) from the current identity state. -->
   <div class="id-ov" id="idov" aria-hidden="true">
@@ -468,20 +491,13 @@
     let lastRankAt = (rankFor(reviewed) || { at: 0 }).at;   // prime silently so a returning user isn't re-congratulated
 
     function renderReviewed() {
-      // The chip is always a tap target into the identity sheet (see idOpen). Three states:
-      //  · named contributor  -> show the public nickname + count + rank colour
-      //  · anonymous, >0 mesas -> show the rank as before, tapping offers to claim a name
-      //  · anonymous, 0 mesas  -> a subtle "Crear apodo" call so opt-in is discoverable
+      // Stay invisible until there's progress to show — no account nag up front. Once the chip
+      // appears it is a SILENT tap target into the identity sheet (see idOpen); the only proactive
+      // ask is the one-time banner (idMaybePrompt). Two visible states:
+      //  · named contributor  -> the public nickname + count + rank colour (the "see my PIN" entry)
+      //  · anonymous, >0 mesas -> the local rank/progress, exactly as before
+      if (!contributor && reviewed <= 0) { reviewedEl.hidden = true; reviewedEl.innerHTML = ''; return; }
       reviewedEl.classList.add('tap');
-      if (!contributor && reviewed <= 0) {
-        reviewedEl.classList.add('cta');
-        reviewedEl.style.removeProperty('--rank');
-        reviewedEl.title = 'Crear un apodo para sumar tus revisiones';
-        reviewedEl.innerHTML = '<span class="badge" style="background:var(--link)">✦</span><span class="name">Crear apodo</span>';
-        reviewedEl.hidden = false;
-        return;
-      }
-      reviewedEl.classList.remove('cta');
       const r = rankFor(reviewed) || RANKS[0];
       const nx = nextRank(reviewed);
       let pct = 100;
@@ -489,8 +505,8 @@
       reviewedEl.style.setProperty('--rank', r.color);
       const named = contributor && contributor.display_name;
       reviewedEl.title = named
-        ? (contributor.display_name + ' · ' + r.name + (nx ? ' (próximo: ' + nx.name + ' a las ' + nx.at + ')' : ''))
-        : (nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas) · tocá para crear tu apodo') : '¡Nivel máximo alcanzado!');
+        ? (contributor.display_name + ' · ' + r.name + ' · tocá para ver tu código y tu puesto')
+        : (nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas)') : '¡Nivel máximo alcanzado!');
       reviewedEl.innerHTML =
         '<span class="badge">★</span>' +
         '<span class="name">' + (named ? esc(contributor.display_name) : r.name) + '</span>' +
@@ -544,7 +560,34 @@
         const data = await res.json().catch(() => ({}));
         if (data && data.ok) setContributor(data.contributor || null);
       } catch (e) {}
+      idMaybePrompt();   // a returning anonymous reviewer past the threshold gets the one-time offer
     }
+
+    // The single proactive ask. Shown at most ONCE per page, only to an anonymous reviewer who has
+    // crossed ID_PROMPT_AT mesas and never said "No, gracias". Declining persists e14_id_dismissed
+    // so the question never returns; opting in (or already having a nickname) means it never shows.
+    const ID_PROMPT_AT = 10;
+    const idbanner = document.getElementById('idbanner');
+    let idBannerShown = false;
+    function idMaybePrompt() {
+      if (contributor || idBannerShown || lsGet('e14_id_dismissed') === '1') return;
+      if (reviewed < ID_PROMPT_AT) return;
+      idBannerShown = true;
+      document.getElementById('idbanner-txt').innerHTML =
+        'Llevás <b>' + reviewed + ' mesas</b> revisadas. ¿Querés guardar tu progreso con un apodo y ' +
+        'aparecer en la tabla de veeduría? Es opcional y anónimo.';
+      idbanner.hidden = false;
+      requestAnimationFrame(function () { idbanner.classList.add('show'); });
+    }
+    function idHideBanner() {
+      idbanner.classList.remove('show');
+      setTimeout(function () { idbanner.hidden = true; }, 320);
+    }
+    idbanner.addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-act]'); if (!btn) return;
+      if (btn.getAttribute('data-act') === 'id-dismiss') { lsSet('e14_id_dismissed', '1'); idHideBanner(); }
+      else { idHideBanner(); idOpen('claim'); }   // never marks dismissed: they chose to engage
+    });
 
     function idOpen(view) {
       idView = view || 'auto';
@@ -1135,6 +1178,7 @@
         reviewed++;
         persistReviewed();
         renderReviewed();                  // tick the personal chip up immediately (count + rank + progress)
+        idMaybePrompt();                   // once past the threshold, offer (once) to save progress
         if (window.e14BumpReviews) window.e14BumpReviews(1);  // and the community total in the app bar
         // On a milestone, let the rank chip's unlock toast carry the moment; otherwise a plain thanks.
         const r = rankFor(reviewed);
