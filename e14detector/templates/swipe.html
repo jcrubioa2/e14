@@ -109,6 +109,120 @@
                     transition:width .55s cubic-bezier(.2,.7,.3,1), background .35s; }
     .rank.bump { animation:rankPulse .7s cubic-bezier(.2,.7,.3,1); }
     @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
+    .rank.tap { cursor:pointer; }
+    .rank.tap:hover { border-color:var(--line-strong); transform:translateY(-1px); }
+
+    /* One-time, dismissible banner — an official margin notice pinned to the ballot: a red seal
+       rule down the left edge, the name set in the display serif, calm actions. "No" silences
+       it forever. */
+    .id-banner { position:fixed; left:12px; right:12px; top:calc(env(safe-area-inset-top) + 10px); z-index:55;
+                 max-width:452px; margin:0 auto; background:var(--card); border:1px solid var(--line);
+                 border-left:3px solid var(--red); border-radius:4px 13px 13px 4px;
+                 box-shadow:0 16px 40px -16px rgba(28,26,21,.45); padding:13px 15px;
+                 transform:translateY(-140%); opacity:0;
+                 transition:transform .34s cubic-bezier(.2,.7,.3,1), opacity .34s; }
+    .id-banner.show { transform:none; opacity:1; }
+    .id-banner .eyebrow-sm { font-size:10px; font-weight:800; letter-spacing:.16em; text-transform:uppercase;
+                             color:var(--red-deep); margin:0 0 5px; }
+    .id-banner p { margin:0 0 11px; font-size:13px; line-height:1.5; color:var(--ink); }
+    .id-banner p b { font-family:"Fraunces", Georgia, serif; font-weight:600; font-style:italic; letter-spacing:0; }
+    .id-banner .row { display:flex; gap:8px; }
+    .id-banner .row button { border-radius:9px; padding:9px 12px; font:inherit; font-weight:800;
+                             font-size:13px; cursor:pointer; border:none; transition:filter .14s, background .14s, color .14s; }
+    .id-banner .row .yes { flex:1; background:var(--accent); color:#fff; }
+    .id-banner .row .yes:hover { filter:brightness(1.18); }
+    .id-banner .row .no { background:transparent; color:var(--ink-faint); }
+    .id-banner .row .no:hover { color:var(--ink); }
+
+    /* --- Identity sheet — a ballot-paper drawer: dot-grid texture, serif headers, tally cells --- */
+    .id-ov { position:fixed; inset:0; z-index:60; background:rgba(28,26,21,.5); backdrop-filter:blur(3px);
+             display:flex; align-items:flex-end; justify-content:center; opacity:0; pointer-events:none;
+             transition:opacity .22s; }
+    .id-ov.show { opacity:1; pointer-events:auto; }
+    .id-sheet { position:relative; width:100%; max-width:464px; background:var(--card); border:1px solid var(--line);
+                border-bottom:none; border-radius:20px 20px 0 0; box-shadow:0 -20px 60px -22px rgba(28,26,21,.45);
+                padding:22px 18px calc(20px + env(safe-area-inset-bottom)); transform:translateY(16px);
+                transition:transform .26s cubic-bezier(.2,.7,.3,1); max-height:90vh; overflow:auto;
+                background-image:radial-gradient(circle at 1px 1px, rgba(28,26,21,.04) 1px, transparent 0);
+                background-size:20px 20px; }
+    .id-ov.show .id-sheet { transform:none; }
+    .id-sheet::before { content:""; position:absolute; top:9px; left:50%; transform:translateX(-50%);
+                        width:38px; height:4px; border-radius:99px; background:var(--line-strong); }
+    @media (min-width:560px){ .id-ov{ align-items:center; } .id-sheet{ border:1px solid var(--line); border-radius:18px; }
+                .id-sheet::before{ display:none; } }
+    .id-eyebrow { font-size:10.5px; font-weight:800; letter-spacing:.16em; text-transform:uppercase;
+                  color:var(--red-deep); display:flex; align-items:center; gap:7px; margin:2px 0 7px; }
+    .id-eyebrow .tick { width:6px; height:6px; border-radius:2px; background:var(--red); transform:rotate(45deg); flex:0 0 auto; }
+    .id-head { display:flex; align-items:flex-start; gap:10px; margin:0 0 15px; }
+    .id-head h2 { font-family:"Fraunces", Georgia, serif; font-size:25px; font-weight:600; margin:0;
+                  letter-spacing:-.015em; line-height:1.06; flex:1; word-break:break-word; }
+    .id-x { border:none; background:var(--paper-2); width:32px; height:32px; border-radius:9px; margin-top:-2px;
+            font-size:18px; line-height:1; cursor:pointer; color:var(--ink-soft); flex:0 0 auto;
+            transition:background .12s, color .12s; }
+    .id-x:hover { background:var(--line); color:var(--ink); }
+    .id-sub { font-size:12.5px; color:var(--ink-soft); line-height:1.55; margin:0 0 14px; }
+    .id-field { display:flex; flex-direction:column; gap:6px; margin:0 0 12px; }
+    .id-field label { font-size:11px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-faint); }
+    .id-field .row2 { display:flex; gap:8px; align-items:stretch; }
+    .id-field input { font:inherit; font-size:15px; padding:12px 13px; border:1.5px solid var(--line);
+                      border-radius:11px; background:var(--paper); color:var(--ink); width:100%;
+                      transition:border-color .14s, box-shadow .14s, background .14s; }
+    .id-field input:focus { outline:none; border-color:var(--link); background:var(--card); box-shadow:0 0 0 3px rgba(14,110,100,.13); }
+    .id-field input.pin { letter-spacing:.42em; text-align:center; font-weight:600; font-size:20px;
+                          font-family:"Fraunces", Georgia, serif; font-variant-numeric:tabular-nums; }
+    .id-btn { width:100%; border:none; border-radius:12px; padding:13px; font:inherit; font-weight:800;
+              font-size:14.5px; cursor:pointer; background:var(--accent); color:#fff; margin-bottom:9px;
+              transition:filter .14s, opacity .14s, transform .1s; }
+    .id-btn:hover { filter:brightness(1.16); } .id-btn:active { transform:translateY(1px); }
+    .id-btn:disabled { opacity:.5; cursor:default; }
+    .id-btn.secure { background:var(--link); }            /* the positive "asegurar" action — brand teal */
+    .id-btn.ghost { background:transparent; color:var(--ink-soft); font-weight:700; font-size:13px; padding:10px; }
+    .id-btn.ghost:hover { filter:none; color:var(--ink); background:var(--paper-2); }
+    .id-btn.dice { width:auto; flex:0 0 auto; padding:0 15px; font-size:19px; margin-bottom:0;
+                   background:var(--paper-2); color:var(--ink); }
+    .id-btn.dice:hover { filter:none; background:var(--line); }
+    .id-err { font-size:12.5px; color:var(--red-deep); font-weight:700; min-height:1.1em; margin:-2px 0 10px; }
+
+    /* The PIN is presented like an OFFICIAL SEAL stamped on the acta: red ink on a tinted card with a
+       notched "sello" corner, the code itself set in the display serif. The one ceremonial moment. */
+    .id-pinbox { position:relative; text-align:center; padding:21px 16px 17px; border:1.5px solid var(--red-line);
+                 border-radius:14px; background:var(--red-tint); margin:6px 0 14px; overflow:hidden; }
+    .id-pinbox::before { content:"SELLO"; position:absolute; top:10px; right:-27px; transform:rotate(45deg);
+                         background:var(--red-deep); color:#fff; font-size:9px; font-weight:800; letter-spacing:.14em;
+                         padding:3px 30px; opacity:.92; }
+    .id-pinbox .lab { font-size:10.5px; font-weight:800; color:var(--red-deep); text-transform:uppercase; letter-spacing:.14em; }
+    .id-pinbox .pin { font-family:"Fraunces", Georgia, serif; font-size:46px; font-weight:600; letter-spacing:.16em;
+                      font-variant-numeric:tabular-nums; color:var(--ink); margin:7px 0 5px; line-height:1; }
+    .id-pinbox .warn { font-size:11.5px; color:var(--ink-soft); line-height:1.5; max-width:36ch; margin:0 auto; }
+
+    /* Stats as an acta tally: three counted cells, serif figures, the rank cell stamped red. */
+    .id-stat { display:flex; gap:9px; margin:2px 0 16px; }
+    .id-stat .box { flex:1; text-align:center; border:1px solid var(--line); border-radius:12px;
+                    padding:11px 6px 9px; background:var(--paper); }
+    .id-stat .box.rank { background:var(--red-tint); border-color:var(--red-line); }
+    .id-stat .box .v { font-family:"Fraunces", Georgia, serif; font-size:27px; font-weight:600; line-height:1;
+                       font-variant-numeric:tabular-nums; letter-spacing:-.01em; }
+    .id-stat .box.rank .v { color:var(--red-deep); }
+    .id-stat .box .k { font-size:10px; font-weight:800; color:var(--ink-faint); text-transform:uppercase;
+                       letter-spacing:.07em; margin-top:5px; }
+
+    /* Leaderboard — an editorial ranking. Serif positions, metallic podium, a tinted "tú" band. */
+    .id-lb { list-style:none; margin:8px -6px 0; padding:0; }
+    .id-lb li { display:flex; align-items:center; gap:11px; padding:9px 8px; border-radius:8px;
+                border-bottom:1px solid var(--line); font-size:14px; }
+    .id-lb li:last-child { border-bottom:none; }
+    .id-lb li.me { background:var(--red-tint); border-bottom-color:transparent; box-shadow:inset 2px 0 0 var(--red); }
+    .id-lb .pos { width:26px; text-align:center; font-family:"Fraunces", Georgia, serif; font-size:17px;
+                  font-weight:600; color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+    .id-lb li.p1 .pos { color:var(--gold); } .id-lb li.p2 .pos { color:#8A8F98; } .id-lb li.p3 .pos { color:#9C6B3F; }
+    .id-lb .who { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+    .id-lb li.me .who { font-weight:800; }
+    .id-lb .cnt { font-family:"Fraunces", Georgia, serif; font-weight:600; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+    .id-tag { display:inline-block; font-size:10px; font-weight:800; letter-spacing:.06em; text-transform:uppercase;
+              color:var(--ink-faint); margin-left:7px; vertical-align:middle; }
+    .id-lb .id-tag { background:var(--red); color:#fff; border-radius:5px; padding:1px 6px; }
+    .id-tag.prov { color:var(--gold); border:1px solid var(--gold); border-radius:5px; padding:1px 6px; }
+    .id-divider { border:none; border-top:1px solid var(--line); margin:18px -2px 14px; }
 
     .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
 
@@ -327,6 +441,23 @@
     </div>
   </div>
 
+  <!-- One-time opt-in banner: shown ONCE after the Nth review (idMaybePrompt); "No, gracias"
+       silences it permanently. Hidden by default; JS reveals it only when earned. -->
+  <div class="id-banner" id="idbanner" role="status" hidden>
+    <div class="eyebrow-sm">Veeduría · tu nombre</div>
+    <p id="idbanner-txt"></p>
+    <div class="row">
+      <button type="button" class="no" data-act="id-dismiss">No, gracias</button>
+      <button type="button" class="yes" data-act="id-accept">Asegurar mi nombre</button>
+    </div>
+  </div>
+
+  <!-- Identity sheet: opt-in named contributor (claim a nickname / link a device / leaderboard).
+       Its inner HTML is rendered by JS (idRender) from the current identity state. -->
+  <div class="id-ov" id="idov" aria-hidden="true">
+    <div class="id-sheet" id="idsheet" role="dialog" aria-modal="true" aria-label="Tu identidad de veeduría"></div>
+  </div>
+
   <script>
     // Grid voting: GET /api/acta-deck returns every casilla of ONE anonymized mesa as
     // { cid, img_url } (shuffled, no acta id leaks). The contributor marks the strange ones;
@@ -409,18 +540,28 @@
     let lastRankAt = (rankFor(reviewed) || { at: 0 }).at;   // prime silently so a returning user isn't re-congratulated
 
     function renderReviewed() {
-      if (reviewed <= 0) { reviewedEl.hidden = true; reviewedEl.innerHTML = ''; return; }
+      // Stay invisible until there's progress to show — no account nag up front. Once the chip
+      // appears it is a SILENT tap target into the identity sheet (see idOpen); the only proactive
+      // ask is the one-time banner (idMaybePrompt). Two visible states:
+      //  · named contributor  -> the public nickname + count + rank colour (the "see my PIN" entry)
+      //  · anonymous, >0 mesas -> the local rank/progress, exactly as before
+      if (!contributor && reviewed <= 0) { reviewedEl.hidden = true; reviewedEl.innerHTML = ''; return; }
+      reviewedEl.classList.add('tap');
       const r = rankFor(reviewed) || RANKS[0];
       const nx = nextRank(reviewed);
       let pct = 100;
       if (nx) { const base = r.at; pct = Math.round(((reviewed - base) / (nx.at - base)) * 100); pct = Math.max(7, Math.min(100, pct)); }
       reviewedEl.style.setProperty('--rank', r.color);
-      reviewedEl.title = nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas)') : '¡Nivel máximo alcanzado!';
+      const named = contributor && contributor.display_name;
+      reviewedEl.title = named
+        ? (contributor.display_name + ' · ' + r.name + ' · toca para ver tu perfil y la tabla')
+        : (nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas)') : '¡Nivel máximo alcanzado!');
       reviewedEl.innerHTML =
         '<span class="badge">★</span>' +
-        '<span class="name">' + r.name + '</span>' +
+        '<span class="name">' + (named ? esc(contributor.display_name) : r.name) + '</span>' +
         '<span class="n">' + reviewed + (reviewed === 1 ? ' mesa' : ' mesas') + '</span>' +
-        (nx ? '<span class="next">faltan ' + (nx.at - reviewed) + '</span>' : '') +
+        (named ? '<span class="next">' + r.name + '</span>'
+               : (nx ? '<span class="next">faltan ' + (nx.at - reviewed) + '</span>' : '')) +
         '<span class="prog"><i style="width:' + pct + '%"></i></span>';
       reviewedEl.hidden = false;
     }
@@ -434,6 +575,291 @@
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => { t.classList.remove('show', 'win'); }, 2300);
     }
+
+    // --- Named contributor identity (pseudonymous-by-default leaderboard) ----------------
+    // Every device that submits a mesa is auto-given a fun Spanish handle (delfin_audaz) and
+    // ranks on the public board from mesa #1 — no opt-in step. The portal lets the reviewer keep
+    // that handle, rename it once, reroll it, or SECURE it with a server-assigned 4-digit code
+    // (which enables recovery + up to 3 devices and locks the name). Without a code the handle
+    // lives only in the sid cookie, so it can be lost — the one-time banner nudges securing it.
+    let contributor = null;                 // {display_name, reviews, devices, pin, rank, locked, has_pin} | null
+    let idView = 'auto';                    // 'auto' | 'link' | 'pin'
+    let idBusy = false, lastPin = '', lastBoard = null;
+    const idov = document.getElementById('idov');
+    const idsheet = document.getElementById('idsheet');
+
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+    function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+    function setContributor(c) {
+      contributor = c;
+      if (c) {
+        lsSet('e14_nick', c.display_name || '');
+        if (c.pin) lsSet('e14_pin', c.pin);
+        if (typeof c.reviews === 'number' && c.reviews > reviewed) { reviewed = c.reviews; persistReviewed(); }
+      }
+      renderReviewed();
+    }
+
+    async function idFetchMe() {
+      try {
+        const res = await fetch('/api/contributor/me', { headers: { 'Accept': 'application/json' } });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok) setContributor(data.contributor || null);
+      } catch (e) {}
+      idMaybePrompt();
+    }
+
+    // One proactive ask, at most ONCE per page: nudge a reviewer past ID_PROMPT_AT mesas whose
+    // handle is still UNSECURED to add a recovery code (so they don't lose their name/rank).
+    // "No, gracias" persists e14_id_dismissed so it never returns; a secured handle never asks.
+    const ID_PROMPT_AT = 15;
+    const idbanner = document.getElementById('idbanner');
+    let idBannerShown = false;
+    function idMaybePrompt() {
+      if (idBannerShown || lsGet('e14_id_dismissed') === '1') return;
+      if (!contributor || contributor.has_pin) return;       // nothing to secure / already secured
+      // Gate on the HIGHER of the server count and the locally-stored lifetime count, so a reviewer
+      // who already had >15 mesas before this feature shipped is offered on their very next mesa —
+      // not made to earn a fresh 15. The local count only TIMES the nudge, never the leaderboard
+      // (the public count stays server-authoritative; legacy anonymous mesas can't be back-filled).
+      const n = Math.max(contributor.reviews || 0, reviewed);
+      if (n < ID_PROMPT_AT) return;
+      idBannerShown = true;
+      const rankTxt = contributor.reviews > 0 ? ' (#' + (contributor.rank || '—') + ')' : '';
+      document.getElementById('idbanner-txt').innerHTML =
+        'Eres <b>' + esc(contributor.display_name) + '</b>' + rankTxt + ' con ' + n + ' mesas. ' +
+        'Asegura tu nombre con un código para no perderlo si cambias de dispositivo.';
+      idbanner.hidden = false;
+      requestAnimationFrame(function () { idbanner.classList.add('show'); });
+    }
+    function idHideBanner() {
+      idbanner.classList.remove('show');
+      setTimeout(function () { idbanner.hidden = true; }, 320);
+    }
+    idbanner.addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-act]'); if (!btn) return;
+      if (btn.getAttribute('data-act') === 'id-dismiss') { lsSet('e14_id_dismissed', '1'); idHideBanner(); }
+      else { idHideBanner(); idOpen('auto'); }   // never marks dismissed: they chose to engage
+    });
+
+    async function idEnsure() {
+      try {
+        await ensureSession();
+        const hp = document.getElementById('hp-website');
+        const res = await fetch('/api/contributor/ensure', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ form_token: window.__formToken, website: hp ? hp.value : '' }) });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok && data.contributor) setContributor(data.contributor);
+      } catch (e) {}
+    }
+
+    async function idOpen(view) {
+      idView = view || 'auto';
+      idov.classList.add('show'); idov.setAttribute('aria-hidden', 'false');
+      if (idView === 'auto' && !contributor) { idRender(); await idEnsure(); }
+      idRender();
+      if (idView === 'auto' && contributor) idLoadBoard();
+    }
+    function idClose() { idov.classList.remove('show'); idov.setAttribute('aria-hidden', 'true'); lastPin = ''; }
+    idov.addEventListener('click', function (e) { if (e.target === idov) idClose(); });
+
+    function idRender() {
+      const close = '<button class="id-x" type="button" data-act="close" aria-label="Cerrar">×</button>';
+      let html;
+      const eb = function (label) { return '<div class="id-eyebrow"><span class="tick"></span>' + label + '</div>'; };
+      if (idView === 'pin' && lastPin) {
+        html =
+          eb('Veeduría · sello') +
+          '<div class="id-head"><h2>Nombre asegurado</h2>' + close + '</div>' +
+          '<p class="id-sub">Guarda este código. Lo necesitas para usar tu nombre en <b>otro dispositivo</b> (hasta 3) o si borras los datos del navegador. No lo compartas.</p>' +
+          '<div class="id-pinbox"><div class="lab">Código de recuperación</div>' +
+          '<div class="pin">' + esc(lastPin) + '</div>' +
+          '<div class="warn">Anótalo: no se vuelve a mostrar en un dispositivo nuevo.</div></div>' +
+          '<button class="id-btn" type="button" data-act="done">Entendido, guardé mi código</button>';
+      } else if (idView === 'link') {
+        html =
+          eb('Veeduría · otro dispositivo') +
+          '<div class="id-head"><h2>Usar mi nombre aquí</h2>' + close + '</div>' +
+          '<p class="id-sub">¿Ya tienes un nombre con código en otro dispositivo? Escríbelo con su código de 4 dígitos para usarlo también en este (hasta 3 dispositivos).</p>' +
+          '<div class="id-field"><label for="id-lnick">Tu nombre</label>' +
+          '<input id="id-lnick" type="text" maxlength="20" autocomplete="off" placeholder="delfin_audaz"></div>' +
+          '<div class="id-field"><label for="id-lpin">Código (4 dígitos)</label>' +
+          '<input id="id-lpin" class="pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••"></div>' +
+          '<div class="id-err" id="id-err"></div>' +
+          '<button class="id-btn secure" type="button" data-act="link">Usar este nombre</button>' +
+          '<button class="id-btn ghost" type="button" data-act="back-auto">Volver</button>';
+      } else if (!contributor) {
+        html =
+          eb('Veeduría') +
+          '<div class="id-head"><h2>Tu nombre</h2>' + close + '</div>' +
+          '<p class="id-sub">Revisa una mesa y tendrás un nombre en la tabla de veeduría.</p>' +
+          '<button class="id-btn" type="button" data-act="close">Entendido</button>';
+      } else {
+        const c = contributor, pin = (c.pin || lsGet('e14_pin'));
+        let body =
+          eb(c.locked ? 'Tu veeduría' : 'Tu veeduría · nombre provisional') +
+          '<div class="id-head"><h2>' + esc(c.display_name) + (c.locked ? '' : ' <span class="id-tag prov">provisional</span>') + '</h2>' + close + '</div>' +
+          '<div class="id-stat">' +
+            '<div class="box"><div class="v">' + (c.reviews || 0) + '</div><div class="k">mesas</div></div>' +
+            '<div class="box rank"><div class="v">#' + (c.rank || '—') + '</div><div class="k">puesto</div></div>' +
+            '<div class="box"><div class="v">' + (c.devices || 1) + '/3</div><div class="k">dispositivos</div></div>' +
+          '</div>';
+        if (!c.locked) {
+          body +=
+            '<p class="id-sub">Este es tu nombre público. Puedes dejarlo, cambiarlo o pedir otro al azar. Cuando lo guardes o lo asegures con un código, queda fijo.</p>' +
+            '<div class="id-field"><label for="id-rename">Tu nombre</label>' +
+            '<div class="row2">' +
+              '<input id="id-rename" type="text" maxlength="20" autocomplete="off" value="' + esc(c.display_name) + '">' +
+              '<button class="id-btn dice" type="button" data-act="reroll" title="Otro nombre al azar" aria-label="Otro nombre al azar">🎲</button>' +
+            '</div></div>' +
+            '<div class="id-err" id="id-err"></div>' +
+            '<button class="id-btn" type="button" data-act="rename">Guardar nombre</button>' +
+            '<button class="id-btn secure" type="button" data-act="setpin">Asegurar con un código (para no perderlo)</button>' +
+            '<p class="id-sub" style="margin-top:8px">Sin código, tu nombre se pierde si cambias de dispositivo o borras los datos del navegador.</p>';
+        } else if (pin) {
+          body +=
+            '<div class="id-pinbox" id="id-pinwrap" hidden><div class="lab">Código de recuperación</div><div class="pin">' + esc(pin) + '</div>' +
+              '<div class="warn">Para usarlo en otro dispositivo: abre esta página allí → “Usar mi nombre aquí” → escribe tu nombre y este código.</div></div>' +
+            '<button class="id-btn ghost" type="button" data-act="showpin">Ver mi código de recuperación</button>';
+        } else {
+          body +=
+            '<div class="id-err" id="id-err"></div>' +
+            '<button class="id-btn secure" type="button" data-act="setpin">Asegurar con un código (recuperación + otros dispositivos)</button>';
+        }
+        body +=
+          '<button class="id-btn ghost" type="button" data-act="link-view">Usar mi nombre de otro dispositivo</button>' +
+          '<hr class="id-divider">' + eb('Tabla de veeduría') +
+          '<ul class="id-lb" id="id-lb"><li><span class="pos"></span><span class="who" style="color:var(--ink-faint)">Cargando…</span></li></ul>';
+        html = body;
+      }
+      idsheet.innerHTML = html;
+      if (idView === 'auto' && contributor) idRenderBoard();
+    }
+
+    async function idLoadBoard() {
+      try {
+        const res = await fetch('/api/contributor/leaderboard?n=10');
+        const data = await res.json().catch(() => ({}));
+        lastBoard = data;
+        if (data && data.me && contributor) {
+          contributor.reviews = data.me.reviews; contributor.rank = data.me.rank;
+          if (data.me.reviews > reviewed) { reviewed = data.me.reviews; persistReviewed(); }
+          renderReviewed();
+          // Patch the stats row in place (don't rebuild — that would reset a revealed code / edit).
+          const boxes = idsheet.querySelectorAll('.id-stat .box .v');
+          if (boxes.length === 3) { boxes[0].textContent = contributor.reviews || 0; boxes[1].textContent = '#' + (contributor.rank || '—'); }
+        }
+        idRenderBoard();
+      } catch (e) {}
+    }
+    function idRenderBoard() {
+      const ul = idsheet.querySelector('#id-lb'); if (!ul || !lastBoard) return;
+      const items = lastBoard.items || [], me = lastBoard.me;
+      let rows = items.map(function (it, i) {
+        const mine = me && me.rank === i + 1 && me.display_name === it.display_name;
+        const cls = [i < 3 ? 'p' + (i + 1) : '', mine ? 'me' : ''].filter(Boolean).join(' ');
+        return '<li' + (cls ? ' class="' + cls + '"' : '') + '><span class="pos">' + (i + 1) + '</span>' +
+          '<span class="who">' + esc(it.display_name) + (mine ? ' <span class="id-tag">tú</span>' : '') +
+          '</span><span class="cnt">' + it.reviews + '</span></li>';
+      }).join('');
+      if (me && me.rank > items.length) {
+        rows += '<li class="me"><span class="pos">' + me.rank + '</span><span class="who">' +
+          esc(me.display_name) + ' <span class="id-tag">tú</span></span><span class="cnt">' + me.reviews + '</span></li>';
+      }
+      ul.innerHTML = rows || '<li><span class="pos"></span><span class="who" style="color:var(--ink-faint)">Sé el primero en la tabla.</span></li>';
+    }
+
+    idsheet.addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-act]'); if (!btn) return;
+      const act = btn.getAttribute('data-act');
+      if (act === 'close' || act === 'done') return idClose();
+      if (act === 'link-view') { idView = 'link'; return idRender(); }
+      if (act === 'back-auto') { idView = 'auto'; idRender(); return idLoadBoard(); }
+      if (act === 'showpin') { const w = idsheet.querySelector('#id-pinwrap'); if (w) w.hidden = false; btn.hidden = true; return; }
+      if (act === 'rename') return idDoRename();
+      if (act === 'reroll') return idDoReroll();
+      if (act === 'setpin') return idDoSetpin();
+      if (act === 'link') return idDoLink();
+    });
+
+    const RENAME_ERR = { taken: 'Ese nombre ya está tomado. Prueba otro.',
+      invalid: 'Usa solo letras, números y espacios.', too_short: 'Muy corto (mínimo 2).',
+      too_long: 'Muy largo (máximo 20).', blocked: 'Ese nombre no está permitido.',
+      locked: 'Tu nombre ya quedó fijo.', no_identity: 'Primero revisa una mesa.',
+      invalid_request: 'No se pudo verificar. Recarga la página.' };
+    const LINK_ERR = { not_found: 'No encontramos ese nombre.', bad_pin: 'Nombre o código incorrecto.',
+      device_limit: 'Ese nombre ya tiene 3 dispositivos.', rate_limited: 'Demasiados intentos. Espera un momento.',
+      invalid_request: 'No se pudo verificar. Recarga la página.' };
+
+    // POST a contributor action that returns a flat ``me`` payload; adopt it on success.
+    async function idPost(path, payload, errMap) {
+      await ensureSession();
+      const hp = document.getElementById('hp-website');
+      const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ form_token: window.__formToken, website: hp ? hp.value : '' }, payload || {})) });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.ok) { setContributor(data); return { ok: true, data: data }; }
+      return { ok: false, msg: (errMap && errMap[data && data.error]) || '' };
+    }
+
+    async function idDoRename() {
+      if (idBusy) return;
+      const inp = idsheet.querySelector('#id-rename'), errEl = idsheet.querySelector('#id-err');
+      const name = ((inp && inp.value) || '').trim();
+      if (name.length < 2) { if (errEl) errEl.textContent = 'Elige un nombre de al menos 2 caracteres.'; return; }
+      idBusy = true; const btn = idsheet.querySelector('[data-act="rename"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Guardando…'; }
+      try {
+        const r = await idPost('/api/contributor/rename', { nickname: name }, RENAME_ERR);
+        if (r.ok) { idView = 'auto'; idRender(); idLoadBoard(); showToast('¡Nombre guardado!'); }
+        else if (errEl) { errEl.textContent = r.msg || 'No se pudo guardar. Prueba de nuevo.'; }
+      } catch (e) { if (errEl) errEl.textContent = 'No se pudo guardar. Prueba de nuevo.'; }
+      finally { idBusy = false; const b = idsheet.querySelector('[data-act="rename"]'); if (b) { b.disabled = false; b.textContent = 'Guardar nombre'; } }
+    }
+
+    async function idDoReroll() {
+      if (idBusy) return;
+      idBusy = true;
+      try {
+        const r = await idPost('/api/contributor/reroll', {}, null);
+        if (r.ok) idRender();
+      } catch (e) {}
+      finally { idBusy = false; }
+    }
+
+    async function idDoSetpin() {
+      if (idBusy) return;
+      idBusy = true; const btn = idsheet.querySelector('[data-act="setpin"]'), errEl = idsheet.querySelector('#id-err');
+      if (btn) { btn.disabled = true; btn.textContent = 'Asegurando…'; }
+      try {
+        const r = await idPost('/api/contributor/setpin', {}, null);
+        if (r.ok) { lastPin = r.data.pin || ''; idView = 'pin'; idRender(); }
+        else if (errEl) { errEl.textContent = 'No se pudo asegurar. Prueba de nuevo.'; }
+      } catch (e) { if (errEl) errEl.textContent = 'No se pudo asegurar. Prueba de nuevo.'; }
+      finally { idBusy = false; }
+    }
+
+    async function idDoLink() {
+      if (idBusy) return;
+      const n = idsheet.querySelector('#id-lnick'), p = idsheet.querySelector('#id-lpin'), errEl = idsheet.querySelector('#id-err');
+      const name = ((n && n.value) || '').trim(), pin = ((p && p.value) || '').trim();
+      if (name.length < 2 || !/^\d{4}$/.test(pin)) { if (errEl) errEl.textContent = 'Escribe tu nombre y un código de 4 dígitos.'; return; }
+      idBusy = true; const btn = idsheet.querySelector('[data-act="link"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Vinculando…'; }
+      try {
+        const r = await idPost('/api/contributor/link', { nickname: name, pin: pin }, LINK_ERR);
+        if (r.ok) { idView = 'auto'; idRender(); idLoadBoard(); showToast('¡Dispositivo vinculado!'); }
+        else if (errEl) { errEl.textContent = r.msg || 'No se pudo vincular.'; }
+      } catch (e) { if (errEl) errEl.textContent = 'No se pudo vincular. Prueba de nuevo.'; }
+      finally { idBusy = false; const b = idsheet.querySelector('[data-act="link"]'); if (b) { b.disabled = false; b.textContent = 'Usar este nombre'; } }
+    }
+
+    reviewedEl.addEventListener('click', function () { idOpen('auto'); });
+    renderReviewed();   // render the chip now (hidden until there's progress)
+    idFetchMe();        // reconcile with this device's server identity (the auto handle, once it exists)
 
     // --- Turnstile session gate ---------------------------------------------------------
     const turnstileOn = !!window.__turnstileSitekey;
@@ -812,7 +1238,11 @@
           } catch (e) { return; }               // offline: transient, leave queued, retry later
           if (res.status === 429) { await sleep(1500); continue; }   // backoff, keep the item
           const data = await res.json().catch(() => ({}));
-          if (data && data.ok) { outbox.shift(); saveOutbox(); reauths = 0; continue; }  // delivered
+          if (data && data.ok) {
+            outbox.shift(); saveOutbox(); reauths = 0;
+            if (!contributor) idFetchMe();   // first delivered mesa auto-created our handle — adopt it
+            continue;                        // delivered
+          }
           // Rejected (token expired/invalid/wrong-IP): re-establish and retry the SAME item, bounded.
           if (turnstileOn && reauths++ <= 3) {
             window.__formToken = '';
@@ -864,6 +1294,7 @@
         reviewed++;
         persistReviewed();
         renderReviewed();                  // tick the personal chip up immediately (count + rank + progress)
+        idMaybePrompt();                   // once past the threshold, offer (once) to save progress
         if (window.e14BumpReviews) window.e14BumpReviews(1);  // and the community total in the app bar
         // On a milestone, let the rank chip's unlock toast carry the moment; otherwise a plain thanks.
         const r = rankFor(reviewed);

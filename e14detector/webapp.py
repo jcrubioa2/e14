@@ -32,6 +32,7 @@ from .community import (
     crop_id,
     field_key_of,
     issue_form_token,
+    normalize_nickname,
     verify_form_token,
     verify_turnstile,
     voter_token,
@@ -2059,9 +2060,9 @@ def create_app(
 
     @app.get("/votar")
     async def votar(request: Request):
-        # The headline product: an anonymized, mobile-first swipe feed. The page ships a
-        # signed form token (in-app bot check); the deck itself is loaded from /api/feed
-        # and votes go to /api/vote.
+        # The headline product: an anonymized, mobile-first grid reviewer. The page ships a
+        # signed form token (in-app bot check); the deck (one whole acta) is loaded from
+        # /api/acta-deck and votes go to /api/vote-batch.
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         # When Turnstile is on, withhold the form token from the raw page load: the client must
         # solve the challenge and exchange it at /api/session for a token. That gates *starting*
@@ -2170,31 +2171,40 @@ def create_app(
         return {"items": _feed_payload(n, skip)}
 
     def _acta_deck_payload(exclude_docs: set[str] | None = None) -> list[dict]:
-        """All candidate crops of ONE randomly-picked acta, shuffled and anonymized.
+        """All candidate crops of ONE uniformly-picked acta, shuffled and anonymized.
 
         Powers the grid-voting page: the contributor sees every casilla of a single mesa
         at once (so the whole acta gets reviewed in one pass) WITHOUT learning which mesa
         it is — the response carries only opaque cids + image urls, never the document id,
-        location or candidate names. Picks the acta the same cheap random-PK way the feed
-        samples crops (a few index seeks, snappy even on a cold page cache); see
-        [[_feed_payload]]. ``exclude_docs`` is unused server-side today but lets a caller
-        steer away from a just-served acta. Registers every cid so /c/{cid} and
-        /api/vote-batch can resolve them.
+        location or candidate names. Registers every cid so /c/{cid} and /api/vote-batch
+        can resolve them. ``exclude_docs`` lets a caller steer away from a just-served acta.
+
+        Fairness: every reviewable acta is equally likely. We pick the ``document_id``
+        DIRECTLY from ``documents`` (one acta = one row), so selection does NOT depend on
+        how many crops an acta has — sampling a crop instead would weight actas by their
+        candidate count. Efficiency: random-rowid sampling (a handful of index seeks on the
+        small, dense ``documents`` rowid), not ``ORDER BY RANDOM()`` (a full scan). We
+        ``shuffle`` each rowid batch before taking a match because SQLite returns ``IN``
+        results in rowid order — without the shuffle "take the first hit" would always
+        favour the lowest rowid, i.e. the earliest-inserted actas. ``n_candidates > 0``
+        keeps to actas that actually have crops to review (it is the count of candidate
+        rows with a crop, maintained alongside the rows).
         """
         exclude_docs = exclude_docs or set()
         with conn() as db:
-            maxid = db.execute("SELECT max(id) AS m FROM vote_fields").fetchone()["m"] or 0
+            maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
             document_id = None
             attempts = 0
-            while document_id is None and maxid and attempts < 12:
+            while document_id is None and maxrow and attempts < 12:
                 attempts += 1
-                ids = [random.randint(1, maxid) for _ in range(8)]
-                placeholders = ",".join("?" * len(ids))
+                rowids = [random.randint(1, maxrow) for _ in range(8)]
+                placeholders = ",".join("?" * len(rowids))
                 rows = db.execute(
-                    f"SELECT document_id FROM vote_fields WHERE id IN ({placeholders}) "
-                    f"AND row_type='candidate' AND raw_crop_path IS NOT NULL",
-                    ids,
+                    f"SELECT document_id FROM documents WHERE rowid IN ({placeholders}) "
+                    f"AND n_candidates > 0",
+                    rowids,
                 ).fetchall()
+                random.shuffle(rows)  # IN returns rowid order; don't favour the lowest rowid
                 for r in rows:
                     if r["document_id"] not in exclude_docs:
                         document_id = r["document_id"]
@@ -2589,9 +2599,121 @@ def create_app(
 
         n_strange = sum([await record(c, "strange") for c in strange])
         n_good = sum([await record(c, "good") for c in good])
+        # Credit a named contributor (if this device claimed a nickname) for reviewing this
+        # mesa. Every cid in a batch belongs to ONE anonymized mesa, so the mesa id is any
+        # resolved cid's document_id. Best-effort + idempotent per (contributor, mesa): never
+        # let a vanity-count write break the actual vote.
+        try:
+            mesa_doc = None
+            for c in (strange + good):
+                r = await asyncio.to_thread(resolve_cid_cached, c)
+                if r:
+                    mesa_doc = r["document_id"]
+                    break
+            if mesa_doc:
+                await asyncio.to_thread(community.credit_review, sid, mesa_doc)
+        except Exception:  # noqa: BLE001 — contributor credit is non-essential
+            pass
         return _flag_response(
             {"ok": True, "strange": n_strange, "good": n_good}, 200, sid, new_sid
         )
+
+    # -- named contributor identity (pseudonymous-by-default leaderboard) -----
+    @app.get("/api/contributor/me")
+    async def api_contributor_me(request: Request):
+        """This device's identity: handle, reviews, rank, devices, pin, locked, has_pin — or
+        ``contributor:null`` if it has reviewed nothing yet. Read-only (never creates a row).
+        The PIN is included because holding the sid cookie already proves this device owns it."""
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        if not _feed_allow(_voter_ip(request)):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        me = await asyncio.to_thread(community.contributor_me, sid)
+        return _flag_response({"ok": True, "contributor": me}, 200, sid, new_sid)
+
+    @app.get("/api/contributor/leaderboard")
+    async def api_contributor_leaderboard(request: Request, n: int = Query(10, ge=1, le=50)):
+        """Public board: top-N contributors by reviewed mesas, plus this device's own rank/count
+        when it has an identity (so a mid-table contributor still sees 'tú: #142')."""
+        if not _feed_allow(_voter_ip(request)):
+            raise HTTPException(status_code=429, detail="rate_limited")
+        top = await asyncio.to_thread(
+            _agg_cached, f"leaderboard:{n}", lambda: community.leaderboard(n), 30.0
+        )
+        sid = request.cookies.get("sid")
+        me = await asyncio.to_thread(community.contributor_me, sid) if sid else None
+        mine = ({"display_name": me["display_name"], "reviews": me["reviews"], "rank": me["rank"]}
+                if me else None)
+        return {"items": top, "me": mine}
+
+    def _contrib_gate(request: Request, payload: dict):
+        """Shared guard for the contributor write endpoints: returns (sid, new_sid, error_response
+        or None). Same anti-bot posture as a vote (origin + honeypot/form-token)."""
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        if not _origin_allowed(request) or bot_check(payload, sid, _voter_ip(request), poll_cfg):
+            return sid, new_sid, _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        return sid, new_sid, None
+
+    @app.post("/api/contributor/ensure")
+    async def api_contributor_ensure(request: Request, payload: dict = Body(...)):
+        """Get-or-create this device's auto identity (a fun Spanish handle), used when the portal
+        opens before the first mesa has been credited. Anti-bot gated so it can't be row-spammed."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        me = await asyncio.to_thread(community.ensure_auto_contributor, sid)
+        return _flag_response({"ok": True, "contributor": me}, 200, sid, new_sid)
+
+    @app.post("/api/contributor/rename")
+    async def api_contributor_rename(request: Request, payload: dict = Body(...)):
+        """Rename this device's identity to a custom handle and lock it (one-time choice)."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        res = await asyncio.to_thread(community.rename_contributor, str(payload.get("nickname", "")), sid)
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
+
+    @app.post("/api/contributor/reroll")
+    async def api_contributor_reroll(request: Request, payload: dict = Body(...)):
+        """Swap the still-unlocked auto handle for a different random one."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        res = await asyncio.to_thread(community.reroll_contributor, sid)
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
+
+    @app.post("/api/contributor/setpin")
+    async def api_contributor_setpin(request: Request, payload: dict = Body(...)):
+        """Secure this device's identity with a server-assigned 4-digit code (enables recovery +
+        up to 3 devices) and lock the name. Returns the code (in ``contributor.pin``)."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        res = await asyncio.to_thread(community.set_contributor_pin, sid)
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
+
+    @app.post("/api/contributor/link")
+    async def api_contributor_link(request: Request, payload: dict = Body(...)):
+        """Link THIS device to an existing SECURED nickname via its PIN (recovery / extra device,
+        capped at 3 — adds a device, never moves the name off the others). Hard rate-limited per-IP
+        AND per-nickname: a secured nickname is half a credential, so the 4-digit half must not be
+        brute-forceable online."""
+        sid, new_sid, err = _contrib_gate(request, payload)
+        if err:
+            return err
+        # Brute-force throttle: ~5 tries then a slow drip, on BOTH the IP and the nickname, so
+        # neither one attacker nor a botnet can sweep the 10k PIN space for a given name.
+        ip = _voter_ip(request)
+        nick_key = normalize_nickname(str(payload.get("nickname", "")))
+        if not await asyncio.to_thread(community.allow, f"clink-ip:{ip}", 1.0, 5.0) or \
+           not await asyncio.to_thread(community.allow, f"clink-nk:{nick_key}", 0.5, 5.0):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        res = await asyncio.to_thread(
+            community.link_contributor,
+            str(payload.get("nickname", "")), str(payload.get("pin", "")), sid,
+        )
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
 
     return app
 

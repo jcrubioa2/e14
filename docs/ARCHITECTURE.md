@@ -26,7 +26,7 @@ on a CDN, and a durable vote pipeline on AWS. The design splits **static read da
         +-------------------------------------------------+      |
 visitors| Fly app  e14-poll  (web only, 1 machine)        |------+
    ---->| - serves slim results.sqlite from page cache    |
-        | - /votar swipe feed; /api/vote -> SQS           |
+        | - /votar acta grid; /api/vote-batch -> SQS      |
         | - polls db/latest.json, atomic-swaps the corpus |
         +-------------------------------------------------+
 ```
@@ -90,7 +90,8 @@ Every vote is irreplaceable, so the write path is built so **nothing is lost if 
 compute is momentarily down**. Provisioned entirely via **AWS CDK** in [`infra/`](../infra)
 (`E14VoteStack`).
 
-1. **Enqueue.** `/api/vote` validates, then `vote_queue.VotePublisher` **enqueues to SQS** and
+1. **Enqueue.** `/api/vote-batch` (and the single-crop `/api/vote`) validates, then
+   `vote_queue.VotePublisher` **enqueues to SQS** and
    returns an *optimistic* tally. SQS absorbs the spike; the vote survives even if Aurora is down.
 2. **Drain.** An SQS event-source mapping invokes the **`e14-vote-drain` Lambda**
    (`infra/lambda/handler.py`), which bulk-inserts into Aurora over the **RDS Data API**
@@ -117,12 +118,12 @@ Lambda (≈\$0) + the Aurora warm floor (~\$44/mo, the main line).
 ## The vote request path (and its defenses)
 
 ```
-/votar  ──▶  swipe.html  ──▶  /api/feed (anonymized cards)  ──▶  /api/vote  ──▶ SQS ──▶ Lambda ──▶ Aurora
-                │                                                   ▲
-                └─ Turnstile solve ─▶ /api/session ─▶ form_token ───┘
+/votar  ──▶  swipe.html  ──▶  /api/acta-deck (one anonymized acta)  ──▶  /api/vote-batch  ──▶ SQS ──▶ Lambda ──▶ Aurora
+                │                                                          ▲
+                └─ Turnstile solve ─▶ /api/session ─▶ form_token ──────────┘
 ```
 
-Defenses on `/api/vote`, strongest first:
+Defenses on the vote write path (`/api/vote-batch`, and the single-crop `/api/vote`), strongest first:
 
 | Layer | Stops | Notes |
 |---|---|---|
@@ -137,9 +138,9 @@ security headers on every response (`X-Content-Type-Options`, `X-Frame-Options` 
 `frame-ancestors 'none'`, `Referrer-Policy`, HSTS). API responses are already anonymized (no
 `document_id` / location / candidate names — only `cid` + counts).
 
-**Snappy voting:** `/api/vote` is fired optimistically — the UI shows a thank-you toast and
-advances to the next card instantly (next image preloaded), the request flying in the background.
-Durability + idempotency make not-waiting safe (a vote is never lost or double-counted). The
+**Snappy voting:** `/api/vote-batch` is fired optimistically — on "Enviar" the UI shows a
+thank-you toast and loads the next acta instantly (next deck preloaded), the request flying in
+the background. Durability + idempotency make not-waiting safe (a vote is never lost or double-counted). The
 blocking boto3 calls are offloaded to threads and the static `cid→field_key` map is cached, so
 one web worker carries ~40 concurrent votes instead of ~1.
 

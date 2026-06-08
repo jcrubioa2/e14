@@ -411,3 +411,133 @@ def test_admin_poll_is_token_gated(tmp_path: Path, monkeypatch) -> None:
     # The admin board now renders the count-model reconciliation + DB-management panel (the old
     # per-candidate votes table was retired); the token gate is what this test guards.
     assert ok.status_code == 200 and "Reconciliación de conteos" in ok.text
+
+
+
+# --- Named contributor identity (pseudonymous-by-default) ------------------
+
+_HANDLE_RE = r"[a-z]+_[a-z]+(_\d+)?"
+
+
+def test_auto_identity_created_on_first_credit(tmp_path: Path) -> None:
+    store = CommunityStore(tmp_path / "c.sqlite")
+    assert store.contributor_me("sid-1") is None            # nothing until a mesa is credited
+    assert store.credit_review("sid-1", "mesaA") == 1       # auto-creates a fun handle + credits
+    me = store.contributor_me("sid-1")
+    assert me["reviews"] == 1 and me["devices"] == 1
+    assert me["has_pin"] is False and me["locked"] is False
+    assert re.fullmatch(_HANDLE_RE, me["display_name"])      # delfin_audaz style
+    assert store.credit_review("sid-1", "mesaB") == 2
+    assert store.credit_review("sid-1", "mesaA") == 2        # dedup: same mesa never double-counts
+    store.close()
+
+
+def test_rename_locks_and_enforces_unique(tmp_path: Path) -> None:
+    store = CommunityStore(tmp_path / "c.sqlite")
+    store.credit_review("sid-1", "m1")
+    r = store.rename_contributor("Lider Valle", "sid-1")
+    assert r["ok"] and r["display_name"] == "Lider Valle" and r["locked"] is True
+    assert store.rename_contributor("Otro", "sid-1") == {"ok": False, "error": "locked"}  # one-time
+    store.credit_review("sid-2", "m2")
+    assert store.rename_contributor("lider valle", "sid-2")["error"] == "taken"           # case-insensitive
+    assert store.rename_contributor("X", "ghost")["error"] == "no_identity"
+    store.credit_review("sid-3", "m3")
+    assert store.rename_contributor("<x>", "sid-3")["error"] == "invalid"
+    store.close()
+
+
+def test_reroll_changes_handle_until_locked(tmp_path: Path) -> None:
+    store = CommunityStore(tmp_path / "c.sqlite")
+    store.credit_review("sid-1", "m1")
+    r = store.reroll_contributor("sid-1")
+    assert r["ok"] and r["locked"] is False and re.fullmatch(_HANDLE_RE, r["display_name"])
+    store.set_contributor_pin("sid-1")                       # securing locks the name
+    assert store.reroll_contributor("sid-1") == {"ok": False, "error": "locked"}
+    store.close()
+
+
+def test_setpin_secures_and_locks(tmp_path: Path) -> None:
+    store = CommunityStore(tmp_path / "c.sqlite")
+    store.credit_review("sid-1", "m1")
+    r = store.set_contributor_pin("sid-1")
+    assert r["ok"] and r["has_pin"] and r["locked"] and re.fullmatch(r"\d{4}", r["pin"])
+    assert store.set_contributor_pin("sid-1")["pin"] == r["pin"]   # idempotent, not regenerated
+    assert store.rename_contributor("X", "sid-1")["error"] == "locked"
+    store.close()
+
+
+def test_link_requires_secured_target_and_caps_devices(tmp_path: Path) -> None:
+    store = CommunityStore(tmp_path / "c.sqlite")
+    store.credit_review("sid-1", "m1")
+    name = store.contributor_me("sid-1")["display_name"]
+    assert store.link_contributor(name, "0000", "sid-2")["error"] == "bad_pin"   # unsecured: no link
+    pin = store.set_contributor_pin("sid-1")["pin"]
+    assert store.link_contributor(name, "9999" if pin != "9999" else "1111", "sid-2")["error"] == "bad_pin"
+    assert store.link_contributor("nadie_x", pin, "sid-2")["error"] == "not_found"
+    linked = store.link_contributor(name, pin, "sid-2")
+    assert linked["ok"] and linked["devices"] == 2
+    assert store.contributor_me("sid-2")["display_name"] == name
+    assert store.link_contributor(name, pin, "sid-3")["ok"]
+    assert store.link_contributor(name, pin, "sid-2")["ok"]                       # idempotent
+    assert store.link_contributor(name, pin, "sid-4")["error"] == "device_limit"  # cap 3
+    store.close()
+
+
+def test_leaderboard_ranks_auto_handles(tmp_path: Path) -> None:
+    store = CommunityStore(tmp_path / "c.sqlite")
+    for m in ("m1", "m2", "m3"):
+        store.credit_review("b", m)
+    store.credit_review("a", "m1")
+    board = store.leaderboard(10)
+    assert len(board) == 2 and board[0]["reviews"] == 3
+    assert store.contributor_me("b")["rank"] == 1 and store.contributor_me("a")["rank"] == 2
+    store.close()
+
+
+# --- Contributor endpoints (sid cookie carries the identity) --------------
+
+def test_me_null_then_auto_after_vote_batch(tmp_path: Path) -> None:
+    app = _build_app(tmp_path, n_rows=3)
+    client = TestClient(app)
+    assert client.get("/api/contributor/me").json() == {"ok": True, "contributor": None}
+    cids = [it["cid"] for it in client.get("/api/feed?n=3").json()["items"]]
+    client.post("/api/vote-batch", json={"strange": cids[:1], "good": cids[1:]})
+    me = client.get("/api/contributor/me").json()["contributor"]
+    assert me["reviews"] == 1 and me["has_pin"] is False and me["locked"] is False
+    assert re.fullmatch(_HANDLE_RE, me["display_name"])
+
+
+def test_contributor_ensure_is_idempotent(tmp_path: Path) -> None:
+    client = TestClient(_build_app(tmp_path))
+    c = client.post("/api/contributor/ensure", json={}).json()["contributor"]
+    assert c["reviews"] == 0 and re.fullmatch(_HANDLE_RE, c["display_name"])
+    again = client.post("/api/contributor/ensure", json={}).json()["contributor"]
+    assert again["display_name"] == c["display_name"]
+
+
+def test_rename_setpin_link_endpoints(tmp_path: Path) -> None:
+    app = _build_app(tmp_path, n_rows=3)
+    client = TestClient(app)
+    cids = [it["cid"] for it in client.get("/api/feed?n=3").json()["items"]]
+    client.post("/api/vote-batch", json={"strange": [], "good": cids})
+    r = client.post("/api/contributor/rename", json={"nickname": "Halcon CO"}).json()
+    assert r["ok"] and r["display_name"] == "Halcon CO" and r["locked"] is True
+    assert client.post("/api/contributor/reroll", json={}).json()["error"] == "locked"
+    sp = client.post("/api/contributor/setpin", json={}).json()
+    assert sp["ok"] and sp["has_pin"] and re.fullmatch(r"\d{4}", sp["pin"])
+    pin = sp["pin"]
+    other = TestClient(app)
+    bad = other.post("/api/contributor/link", json={"nickname": "Halcon CO", "pin": "9999" if pin != "9999" else "1111"})
+    assert bad.json()["error"] == "bad_pin"
+    ok = other.post("/api/contributor/link", json={"nickname": "Halcon CO", "pin": pin})
+    assert ok.json()["ok"] and ok.json()["devices"] == 2
+
+
+def test_leaderboard_endpoint_includes_self(tmp_path: Path) -> None:
+    app = _build_app(tmp_path, n_rows=3)
+    client = TestClient(app)
+    cids = [it["cid"] for it in client.get("/api/feed?n=3").json()["items"]]
+    client.post("/api/vote-batch", json={"strange": [], "good": cids})
+    board = client.get("/api/contributor/leaderboard").json()
+    assert board["items"] and board["items"][0]["reviews"] == 1
+    assert board["me"]["rank"] == 1 and board["me"]["reviews"] == 1

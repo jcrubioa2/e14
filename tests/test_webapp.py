@@ -424,6 +424,127 @@ def test_acta_deck_returns_one_actas_crops_anonymized(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def _chi_square(counts: dict[str, int], expected: dict[str, float]) -> float:
+    """Pearson goodness-of-fit statistic ``Σ (O-E)²/E`` of the observed acta-draw
+    counts against the expected (uniform) counts. Near ``df`` for a uniform sampler;
+    blows far past the critical value under any real skew."""
+    return sum((counts.get(k, 0) - e) ** 2 / e for k, e in expected.items())
+
+
+def _acta_deck_doc_counts(db: Path, output_dir: Path, runs: int, seed: int) -> dict[str, int]:
+    """Hit /api/acta-deck ``runs`` times and tally which acta each draw came from.
+
+    Maps the returned (anonymized) cids back to their document via crop_id/field_key_of,
+    the same way the anonymization test does, since the payload never names the acta.
+    ``random`` is seeded so the whole run is DETERMINISTIC: the uniformity assertions are
+    reproducible and never flake, yet still measure the real selection distribution.
+    """
+    import random
+    from collections import Counter
+    from e14detector.community import crop_id, field_key_of
+
+    cid_to_doc: dict[str, str] = {}
+    counts: Counter[str] = Counter()
+
+    async def run() -> None:
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            random.seed(seed)  # fix the draw sequence after app construction
+            for _ in range(runs):
+                items = (await client.get("/api/acta-deck")).json()["items"]
+                # Every crop in one response is from a single acta; identify it via any cid.
+                doc = cid_to_doc[items[0]["cid"]]
+                counts[doc] += 1
+
+    # The deck endpoint is per-IP rate limited; lift the bucket so the sampling loop runs.
+    orig_bucket, orig_refill = config.FEED_RATE_BUCKET, config.FEED_RATE_REFILL_PER_MIN
+    config.FEED_RATE_BUCKET = float(runs + 100)
+    config.FEED_RATE_REFILL_PER_MIN = 1.0e6
+
+    # Pre-build the cid -> document map from the seeded DB so we can deanonymize the draws.
+    store = DetectorStore(db)
+    for row in store.conn.execute(
+        "SELECT document_id, page_number, row_number, section FROM vote_fields "
+        "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL"
+    ):
+        fkey = field_key_of(row["document_id"], row["page_number"], row["row_number"],
+                            row["section"])
+        cid_to_doc[crop_id(config.FORM_TOKEN_SECRET, fkey)] = row["document_id"]
+    store.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        config.FEED_RATE_BUCKET, config.FEED_RATE_REFILL_PER_MIN = orig_bucket, orig_refill
+    return dict(counts)
+
+
+def test_acta_deck_uniform_over_actas(tmp_path: Path) -> None:
+    """The acta the grid serves is uniform over actas — not skewed toward the
+    earliest-inserted (lowest-rowid) ones. See _acta_deck_payload."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    n_actas = 20
+    # Insert in order so doc 0 gets the lowest rowids and doc 19 the highest; the old
+    # "take the first IN-match" pick would over-serve the low-rowid actas.
+    for d in range(n_actas):
+        doc_id = f"doc-{d:02d}"
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf"))
+        for i in range(13):  # every acta has 13 casillas
+            store.insert_vote_field(VoteField(
+                document_id=doc_id, page_number=1, row_type="candidate", row_number=i + 1,
+                candidate_name=f"C{i}", raw_crop_path=str(crop),
+            ))
+    store.commit()
+    store.close()
+
+    runs = 1200
+    counts = _acta_deck_doc_counts(db, output_dir, runs, seed=20250608)
+
+    # Deterministic (seeded) chi-square goodness-of-fit against a uniform draw over the
+    # 20 actas. A uniform sampler sits near df=19; the old low-rowid pick is wildly skewed.
+    # 43.82 is the upper-tail critical value at alpha=0.001 (df=19): the seeded uniform
+    # sampler passes, any real bias fails. Every acta must also appear at least once.
+    assert len(counts) == n_actas, f"only {len(counts)}/{n_actas} actas ever served"
+    expected = {f"doc-{d:02d}": runs / n_actas for d in range(n_actas)}
+    chi2 = _chi_square(counts, expected)
+    assert chi2 < 43.82, f"acta selection not uniform: chi2={chi2:.1f} over df=19 (counts={counts})"
+
+
+def test_acta_deck_uniform_with_uneven_crop_counts(tmp_path: Path) -> None:
+    """Selection is per-acta, not per-crop: an acta with many casillas is no likelier
+    to be served than one with few. See _acta_deck_payload."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    specs = {"doc-big": 13, "doc-small": 3}  # ~4.3x more crops in doc-big
+    for doc_id, n in specs.items():
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf"))
+        for i in range(n):
+            store.insert_vote_field(VoteField(
+                document_id=doc_id, page_number=1, row_type="candidate", row_number=i + 1,
+                candidate_name=f"C{i}", raw_crop_path=str(crop),
+            ))
+    store.commit()
+    store.close()
+
+    runs = 800
+    counts = _acta_deck_doc_counts(db, output_dir, runs, seed=20250608)
+
+    # Deterministic (seeded) chi-square against a uniform 50/50 split — NOT the ~13:3 a
+    # crop-weighted sampler would give. 10.83 is the upper-tail critical value at
+    # alpha=0.001 (df=1); a uniform sampler sits near 1, the crop-weighted one near 800.
+    assert set(counts) == set(specs)
+    expected = {k: runs / 2 for k in specs}
+    chi2 = _chi_square(counts, expected)
+    assert chi2 < 10.83, f"selection weighted by crop count: chi2={chi2:.1f} (counts={counts})"
+
+
 def test_vote_batch_records_strange_and_good(tmp_path: Path) -> None:
     """A batch submit flags the marked cids ('strange') and appeals the rest ('good')."""
     import dataclasses

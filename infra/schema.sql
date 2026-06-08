@@ -64,3 +64,33 @@ CREATE TABLE IF NOT EXISTS cid_index (
     crop_rel    text NOT NULL,
     document_id text NOT NULL
 );
+
+-- Named contributor identity (port of the contributors/* DDL in
+-- e14detector/community.py). Pseudonymous-by-default: every device that submits a
+-- mesa is auto-given a fun Spanish handle (delfin_audaz) and ranks on the public
+-- board from mesa #1. ``id`` is the durable surrogate identity so a rename is one
+-- column update; ``nickname`` is a unique, changeable handle until ``name_locked``.
+-- ``pin`` is '' for an auto identity (losable, sid-only); the user may set a 4-digit
+-- recovery code to secure it + use it on up to DEVICE_LIMIT=3 devices (the link path
+-- is hard rate-limited so the 4-digit half can't be brute-forced online).
+CREATE TABLE IF NOT EXISTS contributors (
+    id           text        PRIMARY KEY,            -- stable surrogate id (handle may change)
+    nickname     text        NOT NULL UNIQUE,        -- normalized (trim/collapse/lower) unique handle
+    display_name text        NOT NULL,               -- as-shown casing
+    pin          text        NOT NULL DEFAULT '',    -- 4-digit recovery code; '' = unsecured
+    name_locked  integer     NOT NULL DEFAULT 0,     -- 1 once a name is picked or a pin is set
+    reviews      integer     NOT NULL DEFAULT 0,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS contributor_devices (
+    sid            text        PRIMARY KEY,          -- one device -> at most one contributor
+    contributor_id text        NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_contrib_dev_cid ON contributor_devices (contributor_id);
+CREATE TABLE IF NOT EXISTS contributor_reviews (
+    contributor_id text NOT NULL,
+    mesa_id        text NOT NULL,
+    PRIMARY KEY (contributor_id, mesa_id)            -- one credit per (contributor, mesa)
+);
