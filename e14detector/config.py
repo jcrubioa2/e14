@@ -198,6 +198,15 @@ TURNSTILE_ENABLED = os.environ.get("E14_TURNSTILE_ENABLED", "").lower() in ("1",
 # (404) unless this token is set; access requires ?key=<token>.
 ADMIN_TOKEN = os.environ.get("E14_ADMIN_TOKEN", "")
 
+# Acta-deck selection: when on (default), the review deck is biased toward the LEAST-reviewed
+# actas (weight ~ 1/(reviews+1)) so scrutiny spreads across the whole corpus and the historical
+# coverage backlog drains, instead of leaving 96%+ of actas unwatched. Still randomized and
+# non-starving (every acta keeps a non-zero chance); with no review history it reduces exactly
+# to uniform. Set to 0 to revert to plain uniform selection.
+ACTA_DECK_COVERAGE_WEIGHTED = os.environ.get(
+    "E14_ACTA_DECK_COVERAGE_WEIGHTED", "1"
+) not in ("0", "false", "False", "")
+
 # --- Web hardening -------------------------------------------------------------------------
 # Origins permitted to cast votes (comma-separated, e.g. "https://e14-poll.fly.dev,https://
 # midomain.org"). When set, /api/vote rejects a request whose Origin header is present but not

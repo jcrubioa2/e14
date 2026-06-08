@@ -70,11 +70,12 @@
   <main>
     <div class="note">
       <b>Cómo leerlo.</b> Si las primeras bandas (rowid bajo) están más cubiertas que las
-      últimas, eso es el sesgo histórico del selector viejo — esperado. La prueba de
-      <a href="/admin/fairness?key={{ key }}">imparcialidad</a> confirma que de aquí en
-      adelante el reparto ya es uniforme, así que esta desigualdad debería <b>aplanarse con
-      el tiempo</b> a medida que llegan revisiones nuevas (no se borra de golpe: las actas
-      ya sobre-revisadas conservan su ventaja).
+      últimas, eso es el sesgo histórico del selector viejo — esperado. El selector ahora
+      <b>prioriza las actas menos revisadas</b>, así que dirige las revisiones nuevas justo a
+      las bandas más bajas de esta tabla; mira la pestaña de
+      <a href="/admin/fairness?key={{ key }}">imparcialidad</a> para verlo en vivo. Esta
+      desigualdad debería <b>cerrarse</b> a medida que llegan revisiones (no de golpe: las
+      actas ya sobre-revisadas conservan su ventaja, pero dejan de acumularla).
     </div>
 
     <div class="stats">

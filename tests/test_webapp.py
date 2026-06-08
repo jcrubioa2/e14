@@ -1777,3 +1777,121 @@ def test_admin_coverage_joins_votes_and_index(tmp_path: Path) -> None:
     assert ok == 200
     assert "Cobertura hist" in body
     assert "50.0%" in body  # 5 of 10 reviewable actas have >= 1 review
+
+
+def test_acta_deck_steers_to_least_reviewed(tmp_path: Path) -> None:
+    """With coverage weighting on (default), the selector biases toward the LEAST-reviewed
+    actas, and /admin/fairness reports it as steering. See _pick_review_doc / _selector_probe."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    n_actas = 20
+    for d in range(n_actas):
+        doc_id = f"doc-{d:02d}"
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf"))
+        for i in range(5):
+            store.insert_vote_field(VoteField(
+                document_id=doc_id, page_number=1, row_type="candidate", row_number=i + 1,
+                candidate_name=f"C{i}", raw_crop_path=str(crop),
+            ))
+    store.commit()
+    store.close()
+
+    # Historical skew: the low-rowid half is heavily reviewed; the high-rowid half untouched.
+    cs = CommunityStore(community_db)
+    for d in range(10):
+        fk = field_key_of(f"doc-{d:02d}", 1, 1, "")
+        for v in range(5):
+            cs.record_flag(fk, f"voter-{d}-{v}")
+    cs.close()
+
+    orig_token = config.ADMIN_TOKEN
+
+    async def run():
+        import random as _random
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            config.ADMIN_TOKEN = "s3cret"
+            _random.seed(20250608)
+            ok = await client.get("/admin/fairness?key=s3cret&n=4000")
+            return ok.status_code, ok.text
+
+    try:
+        ok, body = asyncio.run(run())
+    finally:
+        config.ADMIN_TOKEN = orig_token
+
+    assert ok == 200
+    # The selector concentrates new serves on the under-covered (high-rowid) bands.
+    assert "DIRIGIENDO A LAS MENOS REVISADAS" in body
+
+
+def test_acta_deck_weighting_off_is_uniform(tmp_path: Path) -> None:
+    """With weighting disabled, the selector reverts to plain uniform selection even when a
+    review history exists — the rollback switch works. See ACTA_DECK_COVERAGE_WEIGHTED."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    community_db = tmp_path / "community.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    for d in range(2):
+        doc_id = f"doc-{d}"
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf"))
+        for i in range(5):
+            store.insert_vote_field(VoteField(
+                document_id=doc_id, page_number=1, row_type="candidate", row_number=i + 1,
+                candidate_name=f"C{i}", raw_crop_path=str(crop),
+            ))
+    store.commit()
+    store.close()
+
+    cs = CommunityStore(community_db)
+    for v in range(8):  # doc-0 heavily reviewed; doc-1 untouched
+        cs.record_flag(field_key_of("doc-0", 1, 1, ""), f"voter-{v}")
+    cs.close()
+
+    orig_flag = config.ACTA_DECK_COVERAGE_WEIGHTED
+    orig_bucket, orig_refill = config.FEED_RATE_BUCKET, config.FEED_RATE_REFILL_PER_MIN
+
+    async def run(weighted: bool):
+        import random as _random
+        from collections import Counter
+        from e14detector.community import crop_id, field_key_of as fk_of
+        config.ACTA_DECK_COVERAGE_WEIGHTED = weighted
+        config.FEED_RATE_BUCKET = 2000.0
+        config.FEED_RATE_REFILL_PER_MIN = 1.0e6
+        app = create_app(results_db=db, output_dir=output_dir, community_db=community_db)
+        # cid -> doc map to deanonymize the served deck
+        store2 = DetectorStore(db)
+        cid_to_doc = {}
+        for row in store2.conn.execute(
+            "SELECT document_id, page_number, row_number, section FROM vote_fields "
+            "WHERE row_type='candidate' AND raw_crop_path IS NOT NULL"
+        ):
+            fkey = fk_of(row["document_id"], row["page_number"], row["row_number"], row["section"])
+            cid_to_doc[crop_id(config.FORM_TOKEN_SECRET, fkey)] = row["document_id"]
+        store2.close()
+        counts = Counter()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            _random.seed(99)
+            for _ in range(600):
+                items = (await client.get("/api/acta-deck")).json()["items"]
+                counts[cid_to_doc[items[0]["cid"]]] += 1
+        return counts
+
+    try:
+        weighted = asyncio.run(run(True))
+        uniform = asyncio.run(run(False))
+    finally:
+        config.ACTA_DECK_COVERAGE_WEIGHTED = orig_flag
+        config.FEED_RATE_BUCKET, config.FEED_RATE_REFILL_PER_MIN = orig_bucket, orig_refill
+
+    # Weighted: the untouched doc-1 dominates. Uniform (flag off): roughly 50/50 despite history.
+    assert weighted["doc-1"] > 3 * weighted["doc-0"], f"weighting should favour the unreviewed acta: {weighted}"
+    assert 0.5 < uniform["doc-0"] / max(uniform["doc-1"], 1) < 2.0, f"flag off should be ~uniform: {uniform}"
