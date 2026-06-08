@@ -109,72 +109,120 @@
                     transition:width .55s cubic-bezier(.2,.7,.3,1), background .35s; }
     .rank.bump { animation:rankPulse .7s cubic-bezier(.2,.7,.3,1); }
     @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
-    .rank.tap { cursor:pointer; -webkit-tap-highlight-color:transparent; }
-    .rank.tap:hover { border-color:var(--line-strong); }
+    .rank.tap { cursor:pointer; }
+    .rank.tap:hover { border-color:var(--line-strong); transform:translateY(-1px); }
 
-    /* One-time, dismissible banner: shown ONCE after the Nth review to offer saving progress
-       with a nickname. "No, gracias" silences it forever — we never ask again. */
+    /* One-time, dismissible banner — an official margin notice pinned to the ballot: a red seal
+       rule down the left edge, the name set in the display serif, calm actions. "No" silences
+       it forever. */
     .id-banner { position:fixed; left:12px; right:12px; top:calc(env(safe-area-inset-top) + 10px); z-index:55;
-                 max-width:440px; margin:0 auto; background:var(--card); border:1.5px solid var(--line);
-                 border-radius:14px; box-shadow:0 14px 36px -14px rgba(28,26,21,.42); padding:13px 14px;
-                 transform:translateY(-135%); opacity:0;
-                 transition:transform .32s cubic-bezier(.2,.7,.3,1), opacity .32s; }
+                 max-width:452px; margin:0 auto; background:var(--card); border:1px solid var(--line);
+                 border-left:3px solid var(--red); border-radius:4px 13px 13px 4px;
+                 box-shadow:0 16px 40px -16px rgba(28,26,21,.45); padding:13px 15px;
+                 transform:translateY(-140%); opacity:0;
+                 transition:transform .34s cubic-bezier(.2,.7,.3,1), opacity .34s; }
     .id-banner.show { transform:none; opacity:1; }
-    .id-banner p { margin:0 0 10px; font-size:13px; line-height:1.45; color:var(--ink); }
-    .id-banner p b { font-weight:800; }
+    .id-banner .eyebrow-sm { font-size:10px; font-weight:800; letter-spacing:.16em; text-transform:uppercase;
+                             color:var(--red-deep); margin:0 0 5px; }
+    .id-banner p { margin:0 0 11px; font-size:13px; line-height:1.5; color:var(--ink); }
+    .id-banner p b { font-family:"Fraunces", Georgia, serif; font-weight:600; font-style:italic; letter-spacing:0; }
     .id-banner .row { display:flex; gap:8px; }
-    .id-banner .row button { flex:1; border-radius:10px; padding:9px; font:inherit; font-weight:800;
-                             font-size:13px; cursor:pointer; border:none; transition:filter .14s; }
-    .id-banner .row .yes { background:var(--link); color:#fff; } .id-banner .row .yes:hover { filter:brightness(1.06); }
-    .id-banner .row .no { background:transparent; color:var(--ink-faint); font-weight:700; flex:0 0 auto; padding:9px 12px; }
+    .id-banner .row button { border-radius:9px; padding:9px 12px; font:inherit; font-weight:800;
+                             font-size:13px; cursor:pointer; border:none; transition:filter .14s, background .14s, color .14s; }
+    .id-banner .row .yes { flex:1; background:var(--accent); color:#fff; }
+    .id-banner .row .yes:hover { filter:brightness(1.18); }
+    .id-banner .row .no { background:transparent; color:var(--ink-faint); }
+    .id-banner .row .no:hover { color:var(--ink); }
 
-    /* --- Identity sheet (opt-in named contributor) ----------------------------------- */
-    .id-ov { position:fixed; inset:0; z-index:60; background:rgba(28,26,21,.46); backdrop-filter:blur(2px);
+    /* --- Identity sheet — a ballot-paper drawer: dot-grid texture, serif headers, tally cells --- */
+    .id-ov { position:fixed; inset:0; z-index:60; background:rgba(28,26,21,.5); backdrop-filter:blur(3px);
              display:flex; align-items:flex-end; justify-content:center; opacity:0; pointer-events:none;
-             transition:opacity .2s; }
+             transition:opacity .22s; }
     .id-ov.show { opacity:1; pointer-events:auto; }
-    .id-sheet { width:100%; max-width:460px; background:var(--card); border:1.5px solid var(--line);
-                border-bottom:none; border-radius:18px 18px 0 0; box-shadow:0 -18px 50px -20px rgba(28,26,21,.4);
-                padding:18px 18px calc(18px + env(safe-area-inset-bottom)); transform:translateY(14px);
-                transition:transform .24s cubic-bezier(.2,.7,.3,1); max-height:88vh; overflow:auto; }
+    .id-sheet { position:relative; width:100%; max-width:464px; background:var(--card); border:1px solid var(--line);
+                border-bottom:none; border-radius:20px 20px 0 0; box-shadow:0 -20px 60px -22px rgba(28,26,21,.45);
+                padding:22px 18px calc(20px + env(safe-area-inset-bottom)); transform:translateY(16px);
+                transition:transform .26s cubic-bezier(.2,.7,.3,1); max-height:90vh; overflow:auto;
+                background-image:radial-gradient(circle at 1px 1px, rgba(28,26,21,.04) 1px, transparent 0);
+                background-size:20px 20px; }
     .id-ov.show .id-sheet { transform:none; }
-    @media (min-width:560px){ .id-ov{ align-items:center; } .id-sheet{ border-bottom:1.5px solid var(--line);
-                border-radius:18px; } }
-    .id-head { display:flex; align-items:center; gap:10px; margin:0 0 12px; }
-    .id-head h2 { font-size:16px; font-weight:850; margin:0; letter-spacing:-.01em; flex:1; }
-    .id-x { border:none; background:var(--bg-soft,#f1efe9); width:30px; height:30px; border-radius:9px;
-            font-size:17px; line-height:1; cursor:pointer; color:var(--ink-faint); flex:0 0 auto; }
-    .id-sub { font-size:12.5px; color:var(--ink-faint); line-height:1.5; margin:0 0 14px; }
-    .id-field { display:flex; flex-direction:column; gap:5px; margin:0 0 12px; }
-    .id-field label { font-size:11.5px; font-weight:700; color:var(--ink-faint); }
-    .id-field input { font:inherit; font-size:15px; padding:11px 12px; border:1.5px solid var(--line);
-                      border-radius:11px; background:var(--card); color:var(--ink); width:100%; }
-    .id-field input:focus { outline:none; border-color:var(--ink); box-shadow:0 0 0 3px rgba(28,26,21,.1); }
-    .id-field input.pin { letter-spacing:.5em; text-align:center; font-weight:800; font-variant-numeric:tabular-nums; }
+    .id-sheet::before { content:""; position:absolute; top:9px; left:50%; transform:translateX(-50%);
+                        width:38px; height:4px; border-radius:99px; background:var(--line-strong); }
+    @media (min-width:560px){ .id-ov{ align-items:center; } .id-sheet{ border:1px solid var(--line); border-radius:18px; }
+                .id-sheet::before{ display:none; } }
+    .id-eyebrow { font-size:10.5px; font-weight:800; letter-spacing:.16em; text-transform:uppercase;
+                  color:var(--red-deep); display:flex; align-items:center; gap:7px; margin:2px 0 7px; }
+    .id-eyebrow .tick { width:6px; height:6px; border-radius:2px; background:var(--red); transform:rotate(45deg); flex:0 0 auto; }
+    .id-head { display:flex; align-items:flex-start; gap:10px; margin:0 0 15px; }
+    .id-head h2 { font-family:"Fraunces", Georgia, serif; font-size:25px; font-weight:600; margin:0;
+                  letter-spacing:-.015em; line-height:1.06; flex:1; word-break:break-word; }
+    .id-x { border:none; background:var(--paper-2); width:32px; height:32px; border-radius:9px; margin-top:-2px;
+            font-size:18px; line-height:1; cursor:pointer; color:var(--ink-soft); flex:0 0 auto;
+            transition:background .12s, color .12s; }
+    .id-x:hover { background:var(--line); color:var(--ink); }
+    .id-sub { font-size:12.5px; color:var(--ink-soft); line-height:1.55; margin:0 0 14px; }
+    .id-field { display:flex; flex-direction:column; gap:6px; margin:0 0 12px; }
+    .id-field label { font-size:11px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-faint); }
+    .id-field .row2 { display:flex; gap:8px; align-items:stretch; }
+    .id-field input { font:inherit; font-size:15px; padding:12px 13px; border:1.5px solid var(--line);
+                      border-radius:11px; background:var(--paper); color:var(--ink); width:100%;
+                      transition:border-color .14s, box-shadow .14s, background .14s; }
+    .id-field input:focus { outline:none; border-color:var(--link); background:var(--card); box-shadow:0 0 0 3px rgba(14,110,100,.13); }
+    .id-field input.pin { letter-spacing:.42em; text-align:center; font-weight:600; font-size:20px;
+                          font-family:"Fraunces", Georgia, serif; font-variant-numeric:tabular-nums; }
     .id-btn { width:100%; border:none; border-radius:12px; padding:13px; font:inherit; font-weight:800;
-              font-size:14.5px; cursor:pointer; background:var(--link); color:#fff; transition:filter .14s, opacity .14s; }
-    .id-btn:hover { filter:brightness(1.06); } .id-btn:disabled { opacity:.55; cursor:default; }
-    .id-btn.ghost { background:transparent; color:var(--ink-faint); font-weight:700; font-size:13px; padding:9px; }
-    .id-err { font-size:12.5px; color:var(--red,#c0392b); font-weight:600; min-height:1.1em; margin:2px 0 10px; }
-    .id-pinbox { text-align:center; padding:16px; border:1.5px dashed var(--gold,#b8860b); border-radius:14px;
-                 background:rgba(184,134,11,.07); margin:4px 0 12px; }
-    .id-pinbox .lab { font-size:11.5px; font-weight:700; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.06em; }
-    .id-pinbox .pin { font-size:38px; font-weight:850; letter-spacing:.18em; font-variant-numeric:tabular-nums;
-                      color:var(--ink); margin:4px 0 2px; }
-    .id-pinbox .warn { font-size:11.5px; color:var(--ink-faint); line-height:1.45; }
-    .id-stat { display:flex; gap:10px; margin:0 0 14px; }
-    .id-stat .box { flex:1; text-align:center; border:1.5px solid var(--line); border-radius:12px; padding:10px 6px; }
-    .id-stat .box .v { font-size:22px; font-weight:850; font-variant-numeric:tabular-nums; }
-    .id-stat .box .k { font-size:10.5px; font-weight:700; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.05em; }
-    .id-lb { list-style:none; margin:6px 0 0; padding:0; }
-    .id-lb li { display:flex; align-items:center; gap:9px; padding:7px 2px; border-bottom:1px solid var(--line); font-size:13.5px; }
+              font-size:14.5px; cursor:pointer; background:var(--accent); color:#fff; margin-bottom:9px;
+              transition:filter .14s, opacity .14s, transform .1s; }
+    .id-btn:hover { filter:brightness(1.16); } .id-btn:active { transform:translateY(1px); }
+    .id-btn:disabled { opacity:.5; cursor:default; }
+    .id-btn.secure { background:var(--link); }            /* the positive "asegurar" action — brand teal */
+    .id-btn.ghost { background:transparent; color:var(--ink-soft); font-weight:700; font-size:13px; padding:10px; }
+    .id-btn.ghost:hover { filter:none; color:var(--ink); background:var(--paper-2); }
+    .id-btn.dice { width:auto; flex:0 0 auto; padding:0 15px; font-size:19px; margin-bottom:0;
+                   background:var(--paper-2); color:var(--ink); }
+    .id-btn.dice:hover { filter:none; background:var(--line); }
+    .id-err { font-size:12.5px; color:var(--red-deep); font-weight:700; min-height:1.1em; margin:-2px 0 10px; }
+
+    /* The PIN is presented like an OFFICIAL SEAL stamped on the acta: red ink on a tinted card with a
+       notched "sello" corner, the code itself set in the display serif. The one ceremonial moment. */
+    .id-pinbox { position:relative; text-align:center; padding:21px 16px 17px; border:1.5px solid var(--red-line);
+                 border-radius:14px; background:var(--red-tint); margin:6px 0 14px; overflow:hidden; }
+    .id-pinbox::before { content:"SELLO"; position:absolute; top:10px; right:-27px; transform:rotate(45deg);
+                         background:var(--red-deep); color:#fff; font-size:9px; font-weight:800; letter-spacing:.14em;
+                         padding:3px 30px; opacity:.92; }
+    .id-pinbox .lab { font-size:10.5px; font-weight:800; color:var(--red-deep); text-transform:uppercase; letter-spacing:.14em; }
+    .id-pinbox .pin { font-family:"Fraunces", Georgia, serif; font-size:46px; font-weight:600; letter-spacing:.16em;
+                      font-variant-numeric:tabular-nums; color:var(--ink); margin:7px 0 5px; line-height:1; }
+    .id-pinbox .warn { font-size:11.5px; color:var(--ink-soft); line-height:1.5; max-width:36ch; margin:0 auto; }
+
+    /* Stats as an acta tally: three counted cells, serif figures, the rank cell stamped red. */
+    .id-stat { display:flex; gap:9px; margin:2px 0 16px; }
+    .id-stat .box { flex:1; text-align:center; border:1px solid var(--line); border-radius:12px;
+                    padding:11px 6px 9px; background:var(--paper); }
+    .id-stat .box.rank { background:var(--red-tint); border-color:var(--red-line); }
+    .id-stat .box .v { font-family:"Fraunces", Georgia, serif; font-size:27px; font-weight:600; line-height:1;
+                       font-variant-numeric:tabular-nums; letter-spacing:-.01em; }
+    .id-stat .box.rank .v { color:var(--red-deep); }
+    .id-stat .box .k { font-size:10px; font-weight:800; color:var(--ink-faint); text-transform:uppercase;
+                       letter-spacing:.07em; margin-top:5px; }
+
+    /* Leaderboard — an editorial ranking. Serif positions, metallic podium, a tinted "tú" band. */
+    .id-lb { list-style:none; margin:8px -6px 0; padding:0; }
+    .id-lb li { display:flex; align-items:center; gap:11px; padding:9px 8px; border-radius:8px;
+                border-bottom:1px solid var(--line); font-size:14px; }
     .id-lb li:last-child { border-bottom:none; }
-    .id-lb li.me { font-weight:800; }
-    .id-lb .pos { width:24px; text-align:right; color:var(--ink-faint); font-weight:700; font-variant-numeric:tabular-nums; }
-    .id-lb .who { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .id-lb .cnt { color:var(--ink-faint); font-variant-numeric:tabular-nums; }
-    .id-tag { display:inline-block; font-size:11px; font-weight:700; color:var(--ink-faint); margin-left:6px; }
-    .id-divider { border:none; border-top:1px solid var(--line); margin:16px 0; }
+    .id-lb li.me { background:var(--red-tint); border-bottom-color:transparent; box-shadow:inset 2px 0 0 var(--red); }
+    .id-lb .pos { width:26px; text-align:center; font-family:"Fraunces", Georgia, serif; font-size:17px;
+                  font-weight:600; color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+    .id-lb li.p1 .pos { color:var(--gold); } .id-lb li.p2 .pos { color:#8A8F98; } .id-lb li.p3 .pos { color:#9C6B3F; }
+    .id-lb .who { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+    .id-lb li.me .who { font-weight:800; }
+    .id-lb .cnt { font-family:"Fraunces", Georgia, serif; font-weight:600; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+    .id-tag { display:inline-block; font-size:10px; font-weight:800; letter-spacing:.06em; text-transform:uppercase;
+              color:var(--ink-faint); margin-left:7px; vertical-align:middle; }
+    .id-lb .id-tag { background:var(--red); color:#fff; border-radius:5px; padding:1px 6px; }
+    .id-tag.prov { color:var(--gold); border:1px solid var(--gold); border-radius:5px; padding:1px 6px; }
+    .id-divider { border:none; border-top:1px solid var(--line); margin:18px -2px 14px; }
 
     .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
 
@@ -396,6 +444,7 @@
   <!-- One-time opt-in banner: shown ONCE after the Nth review (idMaybePrompt); "No, gracias"
        silences it permanently. Hidden by default; JS reveals it only when earned. -->
   <div class="id-banner" id="idbanner" role="status" hidden>
+    <div class="eyebrow-sm">Veeduría · tu nombre</div>
     <p id="idbanner-txt"></p>
     <div class="row">
       <button type="button" class="no" data-act="id-dismiss">No, gracias</button>
@@ -620,16 +669,19 @@
     function idRender() {
       const close = '<button class="id-x" type="button" data-act="close" aria-label="Cerrar">×</button>';
       let html;
+      const eb = function (label) { return '<div class="id-eyebrow"><span class="tick"></span>' + label + '</div>'; };
       if (idView === 'pin' && lastPin) {
         html =
+          eb('Veeduría · sello') +
           '<div class="id-head"><h2>Nombre asegurado</h2>' + close + '</div>' +
           '<p class="id-sub">Guarda este código. Lo necesitas para usar tu nombre en <b>otro dispositivo</b> (hasta 3) o si borras los datos del navegador. No lo compartas.</p>' +
-          '<div class="id-pinbox"><div class="lab">Tu código de recuperación</div>' +
+          '<div class="id-pinbox"><div class="lab">Código de recuperación</div>' +
           '<div class="pin">' + esc(lastPin) + '</div>' +
           '<div class="warn">Anótalo: no se vuelve a mostrar en un dispositivo nuevo.</div></div>' +
           '<button class="id-btn" type="button" data-act="done">Entendido, guardé mi código</button>';
       } else if (idView === 'link') {
         html =
+          eb('Veeduría · otro dispositivo') +
           '<div class="id-head"><h2>Usar mi nombre aquí</h2>' + close + '</div>' +
           '<p class="id-sub">¿Ya tienes un nombre con código en otro dispositivo? Escríbelo con su código de 4 dígitos para usarlo también en este (hasta 3 dispositivos).</p>' +
           '<div class="id-field"><label for="id-lnick">Tu nombre</label>' +
@@ -637,47 +689,49 @@
           '<div class="id-field"><label for="id-lpin">Código (4 dígitos)</label>' +
           '<input id="id-lpin" class="pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••"></div>' +
           '<div class="id-err" id="id-err"></div>' +
-          '<button class="id-btn" type="button" data-act="link">Usar este nombre</button>' +
+          '<button class="id-btn secure" type="button" data-act="link">Usar este nombre</button>' +
           '<button class="id-btn ghost" type="button" data-act="back-auto">Volver</button>';
       } else if (!contributor) {
         html =
+          eb('Veeduría') +
           '<div class="id-head"><h2>Tu nombre</h2>' + close + '</div>' +
           '<p class="id-sub">Revisa una mesa y tendrás un nombre en la tabla de veeduría.</p>' +
           '<button class="id-btn" type="button" data-act="close">Entendido</button>';
       } else {
         const c = contributor, pin = (c.pin || lsGet('e14_pin'));
         let body =
-          '<div class="id-head"><h2>' + esc(c.display_name) + (c.locked ? '' : ' <span class="id-tag">provisional</span>') + '</h2>' + close + '</div>' +
+          eb(c.locked ? 'Tu veeduría' : 'Tu veeduría · nombre provisional') +
+          '<div class="id-head"><h2>' + esc(c.display_name) + (c.locked ? '' : ' <span class="id-tag prov">provisional</span>') + '</h2>' + close + '</div>' +
           '<div class="id-stat">' +
             '<div class="box"><div class="v">' + (c.reviews || 0) + '</div><div class="k">mesas</div></div>' +
-            '<div class="box"><div class="v">#' + (c.rank || '—') + '</div><div class="k">puesto</div></div>' +
+            '<div class="box rank"><div class="v">#' + (c.rank || '—') + '</div><div class="k">puesto</div></div>' +
             '<div class="box"><div class="v">' + (c.devices || 1) + '/3</div><div class="k">dispositivos</div></div>' +
           '</div>';
         if (!c.locked) {
           body +=
             '<p class="id-sub">Este es tu nombre público. Puedes dejarlo, cambiarlo o pedir otro al azar. Cuando lo guardes o lo asegures con un código, queda fijo.</p>' +
             '<div class="id-field"><label for="id-rename">Tu nombre</label>' +
-            '<div style="display:flex; gap:8px; align-items:stretch">' +
-              '<input id="id-rename" type="text" maxlength="20" autocomplete="off" value="' + esc(c.display_name) + '" style="flex:1">' +
-              '<button class="id-btn" type="button" data-act="reroll" title="Otro nombre al azar" style="width:auto; flex:0 0 auto; padding:0 14px; font-size:18px">🎲</button>' +
+            '<div class="row2">' +
+              '<input id="id-rename" type="text" maxlength="20" autocomplete="off" value="' + esc(c.display_name) + '">' +
+              '<button class="id-btn dice" type="button" data-act="reroll" title="Otro nombre al azar" aria-label="Otro nombre al azar">🎲</button>' +
             '</div></div>' +
             '<div class="id-err" id="id-err"></div>' +
             '<button class="id-btn" type="button" data-act="rename">Guardar nombre</button>' +
-            '<button class="id-btn ghost" type="button" data-act="setpin">Asegurar con un código (para no perderlo)</button>' +
+            '<button class="id-btn secure" type="button" data-act="setpin">Asegurar con un código (para no perderlo)</button>' +
             '<p class="id-sub" style="margin-top:8px">Sin código, tu nombre se pierde si cambias de dispositivo o borras los datos del navegador.</p>';
         } else if (pin) {
           body +=
-            '<div class="id-pinbox" id="id-pinwrap" hidden><div class="lab">Tu código</div><div class="pin">' + esc(pin) + '</div>' +
+            '<div class="id-pinbox" id="id-pinwrap" hidden><div class="lab">Código de recuperación</div><div class="pin">' + esc(pin) + '</div>' +
               '<div class="warn">Para usarlo en otro dispositivo: abre esta página allí → “Usar mi nombre aquí” → escribe tu nombre y este código.</div></div>' +
             '<button class="id-btn ghost" type="button" data-act="showpin">Ver mi código de recuperación</button>';
         } else {
           body +=
             '<div class="id-err" id="id-err"></div>' +
-            '<button class="id-btn ghost" type="button" data-act="setpin">Asegurar con un código (recuperación + otros dispositivos)</button>';
+            '<button class="id-btn secure" type="button" data-act="setpin">Asegurar con un código (recuperación + otros dispositivos)</button>';
         }
         body +=
           '<button class="id-btn ghost" type="button" data-act="link-view">Usar mi nombre de otro dispositivo</button>' +
-          '<hr class="id-divider"><div class="id-head" style="margin-bottom:8px"><h2 style="font-size:14px">Tabla de veeduría</h2></div>' +
+          '<hr class="id-divider">' + eb('Tabla de veeduría') +
           '<ul class="id-lb" id="id-lb"><li><span class="pos"></span><span class="who" style="color:var(--ink-faint)">Cargando…</span></li></ul>';
         html = body;
       }
@@ -706,7 +760,8 @@
       const items = lastBoard.items || [], me = lastBoard.me;
       let rows = items.map(function (it, i) {
         const mine = me && me.rank === i + 1 && me.display_name === it.display_name;
-        return '<li' + (mine ? ' class="me"' : '') + '><span class="pos">' + (i + 1) + '</span>' +
+        const cls = [i < 3 ? 'p' + (i + 1) : '', mine ? 'me' : ''].filter(Boolean).join(' ');
+        return '<li' + (cls ? ' class="' + cls + '"' : '') + '><span class="pos">' + (i + 1) + '</span>' +
           '<span class="who">' + esc(it.display_name) + (mine ? ' <span class="id-tag">tú</span>' : '') +
           '</span><span class="cnt">' + it.reviews + '</span></li>';
       }).join('');
