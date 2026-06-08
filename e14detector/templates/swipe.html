@@ -572,12 +572,17 @@
     function idMaybePrompt() {
       if (idBannerShown || lsGet('e14_id_dismissed') === '1') return;
       if (!contributor || contributor.has_pin) return;       // nothing to secure / already secured
-      if ((contributor.reviews || reviewed) < ID_PROMPT_AT) return;
+      // Gate on the HIGHER of the server count and the locally-stored lifetime count, so a reviewer
+      // who already had >15 mesas before this feature shipped is offered on their very next mesa —
+      // not made to earn a fresh 15. The local count only TIMES the nudge, never the leaderboard
+      // (the public count stays server-authoritative; legacy anonymous mesas can't be back-filled).
+      const n = Math.max(contributor.reviews || 0, reviewed);
+      if (n < ID_PROMPT_AT) return;
       idBannerShown = true;
+      const rankTxt = contributor.reviews > 0 ? ' (#' + (contributor.rank || '—') + ')' : '';
       document.getElementById('idbanner-txt').innerHTML =
-        'Eres <b>' + esc(contributor.display_name) + '</b> (#' + (contributor.rank || '—') + ') con ' +
-        (contributor.reviews || reviewed) + ' mesas. Asegura tu nombre con un código para no perderlo ' +
-        'si cambias de dispositivo.';
+        'Eres <b>' + esc(contributor.display_name) + '</b>' + rankTxt + ' con ' + n + ' mesas. ' +
+        'Asegura tu nombre con un código para no perderlo si cambias de dispositivo.';
       idbanner.hidden = false;
       requestAnimationFrame(function () { idbanner.classList.add('show'); });
     }
