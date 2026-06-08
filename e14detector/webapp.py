@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import alerts, config
+from .transparency_log import TRANSPARENCY_LOG
 from .community import (
     PollConfig,
     make_store,
@@ -1570,6 +1571,83 @@ def create_app(
             set_db_lock, want, reason="admin console toggle", n_docs=n_docs, by="admin")
         return JSONResponse({"ok": True, "lock": lock})
 
+    def _chi2_critical_001(df: int) -> float:
+        """Upper-tail chi-square critical value at alpha=0.001 via Wilson-Hilferty (no scipy
+        dependency). Accurate to ~1% — plenty for a PASS/FAIL with margin (df=19 -> ~43.96 vs
+        the exact 43.82). 3.0902 is the upper-tail z for alpha=0.001."""
+        if df <= 0:
+            return 0.0
+        t = 1.0 - 2.0 / (9.0 * df) + 3.0902323 * math.sqrt(2.0 / (9.0 * df))
+        return df * t * t * t
+
+    def _fairness_probe(n: int, buckets: int = 20) -> dict:
+        """Draw ``n`` picks from the LIVE acta-deck selector (``_pick_review_doc``) and
+        chi-square them, binned by document ``rowid``, against the uniform expectation — each
+        band's expected mass is proportional to how many reviewable actas (``n_candidates>0``)
+        fall in that rowid range. The pre-fix selector (crop-weighted / lowest-rowid) piles
+        into the low bands and blows past the critical value; the uniform pick sits near df.
+        Read-only."""
+        with conn() as db:
+            maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
+            eligible = [0] * buckets
+            if maxrow:
+                for r in db.execute(
+                    f"SELECT (rowid - 1) * {buckets} / {maxrow} AS b, COUNT(*) AS c "
+                    f"FROM documents WHERE n_candidates > 0 GROUP BY b"
+                ):
+                    eligible[min(int(r["b"]), buckets - 1)] += r["c"]
+            observed = [0] * buckets
+            misses = 0
+            for _ in range(n):
+                row = _pick_review_doc(db, set(), maxrow)
+                if row is None:
+                    misses += 1
+                    continue
+                observed[min((int(row["rowid"]) - 1) * buckets // maxrow, buckets - 1)] += 1
+        total_obs = sum(observed)
+        total_elig = sum(eligible)
+        bars: list[dict] = []
+        chi2 = 0.0
+        nonempty = 0
+        for b in range(buckets):
+            exp = total_obs * eligible[b] / total_elig if total_elig else 0.0
+            if exp > 0:
+                chi2 += (observed[b] - exp) ** 2 / exp
+                nonempty += 1
+            bars.append({
+                "band": b + 1,
+                "lo": int(b * maxrow / buckets) + 1,
+                "hi": int((b + 1) * maxrow / buckets),
+                "eligible": eligible[b],
+                "observed": observed[b],
+                "expected": round(exp, 1),
+                "obs_pct": (100.0 * observed[b] / total_obs) if total_obs else 0.0,
+                "exp_pct": (100.0 * eligible[b] / total_elig) if total_elig else 0.0,
+            })
+        df = max(nonempty - 1, 1)
+        crit = _chi2_critical_001(df)
+        return {
+            "bars": bars, "buckets": buckets, "samples": total_obs, "misses": misses,
+            "total_eligible": total_elig, "max_rowid": maxrow,
+            "chi2": round(chi2, 2), "df": df, "critical": round(crit, 2),
+            "reduced_chi2": round(chi2 / df, 3) if df else 0.0,
+            "uniform": chi2 < crit,
+        }
+
+    @app.get("/admin/fairness")
+    async def admin_fairness(request: Request, key: str = "", n: int = 2000):
+        """Forward-fairness viz for the acta-deck selector: a LIVE chi-square showing the
+        contributor-facing pick is uniform across actas (no low-rowid / crop-count skew).
+        Flat bars + a sub-critical chi-square is the production proof the fix holds — not a
+        synthetic test fixture but the real served ``documents`` table. Read-only; refreshable."""
+        _require_admin(request, key)
+        n = max(200, min(int(n or 2000), 20000))
+        result = await asyncio.to_thread(_fairness_probe, n)
+        return templates.TemplateResponse(
+            request, "admin_fairness.html",
+            {"active": "admin", "key": key, "requested_n": n, **result},
+        )
+
     @app.get("/manifest.webmanifest")
     async def manifest():
         """Web app manifest — installability metadata. Served from a stable root path with the
@@ -1861,6 +1939,7 @@ def create_app(
                 "total": board["total"],
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
+                "fixes_log": TRANSPARENCY_LOG,
                 "active": "reportes",
                 "site_url": config.SITE_URL,
                 "canonical": config.SITE_URL + "/reportes",
@@ -2169,6 +2248,31 @@ def create_app(
         skip = {c for c in exclude.split(",") if c}
         return {"items": _feed_payload(n, skip)}
 
+    def _pick_review_doc(db: sqlite3.Connection, exclude_docs: set[str], maxrow: int):
+        """Uniformly pick ONE reviewable acta's row (``rowid`` + ``document_id``) from
+        ``documents``. Shared by the public acta-deck and the admin fairness probe so both
+        exercise the exact same selection. Random-rowid sampling over the dense ``documents``
+        rowid (a handful of index seeks, not a full ``ORDER BY RANDOM()`` scan); ``n_candidates
+        > 0`` keeps to actas that have crops to review. We ``shuffle`` each batch because SQLite
+        returns ``IN`` results in rowid order — without it, "take the first hit" would always
+        favour the lowest rowid (the earliest-inserted actas). Returns ``None`` if nothing
+        eligible turns up within the attempt budget."""
+        attempts = 0
+        while maxrow and attempts < 12:
+            attempts += 1
+            rowids = [random.randint(1, maxrow) for _ in range(8)]
+            placeholders = ",".join("?" * len(rowids))
+            rows = db.execute(
+                f"SELECT rowid, document_id FROM documents WHERE rowid IN ({placeholders}) "
+                f"AND n_candidates > 0",
+                rowids,
+            ).fetchall()
+            random.shuffle(rows)  # IN returns rowid order; don't favour the lowest rowid
+            for r in rows:
+                if r["document_id"] not in exclude_docs:
+                    return r
+        return None
+
     def _acta_deck_payload(exclude_docs: set[str] | None = None) -> list[dict]:
         """All candidate crops of ONE uniformly-picked acta, shuffled and anonymized.
 
@@ -2179,37 +2283,18 @@ def create_app(
         can resolve them. ``exclude_docs`` lets a caller steer away from a just-served acta.
 
         Fairness: every reviewable acta is equally likely. We pick the ``document_id``
-        DIRECTLY from ``documents`` (one acta = one row), so selection does NOT depend on
-        how many crops an acta has — sampling a crop instead would weight actas by their
-        candidate count. Efficiency: random-rowid sampling (a handful of index seeks on the
-        small, dense ``documents`` rowid), not ``ORDER BY RANDOM()`` (a full scan). We
-        ``shuffle`` each rowid batch before taking a match because SQLite returns ``IN``
-        results in rowid order — without the shuffle "take the first hit" would always
-        favour the lowest rowid, i.e. the earliest-inserted actas. ``n_candidates > 0``
-        keeps to actas that actually have crops to review (it is the count of candidate
-        rows with a crop, maintained alongside the rows).
+        DIRECTLY from ``documents`` (one acta = one row, via ``_pick_review_doc``), so
+        selection does NOT depend on how many crops an acta has — sampling a crop instead
+        would weight actas by their candidate count. The admin ``/admin/fairness`` probe
+        chi-squares this same pick so the uniformity is observable, not just asserted.
         """
         exclude_docs = exclude_docs or set()
         with conn() as db:
             maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
-            document_id = None
-            attempts = 0
-            while document_id is None and maxrow and attempts < 12:
-                attempts += 1
-                rowids = [random.randint(1, maxrow) for _ in range(8)]
-                placeholders = ",".join("?" * len(rowids))
-                rows = db.execute(
-                    f"SELECT document_id FROM documents WHERE rowid IN ({placeholders}) "
-                    f"AND n_candidates > 0",
-                    rowids,
-                ).fetchall()
-                random.shuffle(rows)  # IN returns rowid order; don't favour the lowest rowid
-                for r in rows:
-                    if r["document_id"] not in exclude_docs:
-                        document_id = r["document_id"]
-                        break
-            if document_id is None:
+            row = _pick_review_doc(db, exclude_docs, maxrow)
+            if row is None:
                 return []
+            document_id = row["document_id"]
             frows = db.execute(
                 "SELECT page_number, row_number, section, raw_crop_path FROM vote_fields "
                 "WHERE document_id=? AND row_type='candidate' AND raw_crop_path IS NOT NULL "

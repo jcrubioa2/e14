@@ -1641,3 +1641,80 @@ def test_form_token_is_bound_to_client_ip(tmp_path: Path, monkeypatch) -> None:
     n = cs.counts_among([fk])[fk]["strange"]
     cs.close()
     assert n == 1  # only the same-IP vote landed
+
+
+def test_admin_fairness_probe_is_gated_and_uniform(tmp_path: Path) -> None:
+    """/admin/fairness is operator-gated (404 off, 403 on wrong key) and, with a valid
+    key, reports the LIVE acta-deck selector as uniform — the production proof behind the
+    selection-skew fix. See _fairness_probe / _pick_review_doc."""
+    import random as _random
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+
+    store = DetectorStore(db)
+    for d in range(20):  # 20 actas in rowid order -> 20 single-rowid bands, df=19
+        doc_id = f"doc-{d:02d}"
+        store.upsert_document(DocumentMetadata(document_id=doc_id, source_path=f"{doc_id}.pdf"))
+        for i in range(13):
+            store.insert_vote_field(VoteField(
+                document_id=doc_id, page_number=1, row_type="candidate", row_number=i + 1,
+                candidate_name=f"C{i}", raw_crop_path=str(crop),
+            ))
+    store.commit()
+    store.close()
+
+    orig_token = config.ADMIN_TOKEN
+
+    async def run():
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            config.ADMIN_TOKEN = ""                                  # feature off
+            off = await client.get("/admin/fairness")
+            config.ADMIN_TOKEN = "s3cret"                            # feature on
+            bad = await client.get("/admin/fairness?key=nope")       # wrong key
+            _random.seed(20250608)                                   # deterministic probe
+            ok = await client.get("/admin/fairness?key=s3cret&n=4000")
+            return off.status_code, bad.status_code, ok.status_code, ok.text
+
+    try:
+        off, bad, ok, body = asyncio.run(run())
+    finally:
+        config.ADMIN_TOKEN = orig_token
+
+    assert off == 404, "no token configured -> route hidden"
+    assert bad == 403, "token configured, wrong key -> forbidden"
+    assert ok == 200
+    # Seeded uniform draw passes the chi-square verdict the page renders.
+    assert "UNIFORME" in body and "SESGO DETECTADO" not in body
+
+
+def test_reportes_renders_public_fixes_log(tmp_path: Path) -> None:
+    """The public reports page renders the version-controlled fairness/fixes log so the
+    veeduría shows its work. See e14detector/transparency_log.py."""
+    from e14detector.transparency_log import TRANSPARENCY_LOG
+
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-1", source_path="doc-1.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc-1", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="C", raw_crop_path="",
+    ))
+    store.commit()
+    store.close()
+
+    async def run():
+        transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            return await client.get("/reportes")
+
+    resp = asyncio.run(run())
+    assert resp.status_code == 200
+    assert "hemos corregido" in resp.text  # the "Qué hemos corregido" heading
+    assert TRANSPARENCY_LOG[0]["title"] in resp.text
+    # The status (fixed/ongoing) is shown in plain language, not left ambiguous.
+    assert "Corregido" in resp.text

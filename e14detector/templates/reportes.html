@@ -156,6 +156,24 @@
     .map-legend-ends > span:last-child { text-align:right; }
     .map-foot { color:var(--ink-faint); font-size:12px; line-height:1.5; margin-top:8px; }
 
+    /* Registro de correcciones — the public fairness/fixes log under the stats. */
+    .fixlog-h { font-family:"Fraunces", serif; font-size:20px; margin:0 0 4px; }
+    .fixlog-note { color:var(--ink-soft); font-size:13px; line-height:1.55; margin:0 0 14px; max-width:62ch; }
+    .fixlog-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:14px; }
+    .fixlog-item { border-left:3px solid var(--line); padding:2px 0 2px 14px; }
+    .fixlog-item.is-fixed { border-left-color:#1a7f37; }
+    .fixlog-item.is-ongoing { border-left-color:#b88200; }
+    .fixlog-meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; color:var(--ink-faint); }
+    .fixlog-meta time { font-variant-numeric:tabular-nums; }
+    .fixlog-status { border-radius:99px; padding:2px 10px; font-size:11.5px; font-weight:800; letter-spacing:.01em; }
+    .fixlog-status.fixed { background:#eaf6ec; color:#1a7f37; }
+    .fixlog-status.ongoing { background:#fff8e6; color:#9a6c00; }
+    .fixlog-tag { background:var(--paper-2); color:var(--ink-soft); border-radius:99px; padding:1px 9px; font-size:11px; font-weight:700; letter-spacing:.02em; }
+    .fixlog-title { font-size:15.5px; margin:4px 0 4px; line-height:1.35; }
+    .fixlog-body { color:var(--ink-soft); font-size:13.5px; line-height:1.6; margin:0; max-width:64ch; }
+    .fixlog-link { display:inline-block; margin-top:7px; font-size:13px; font-weight:700; color:var(--red); text-decoration:none; }
+    .fixlog-link:hover { text-decoration:underline; }
+
     .empty { text-align:center; color:var(--ink-soft); padding:48px 18px; font-size:15px; }
     .empty .big { font-family:"Fraunces", serif; font-size:21px; color:var(--ink); display:block; margin-bottom:6px; }
 
@@ -238,6 +256,38 @@
         </div>
       </div>
     </section>
+
+    {% if fixes_log %}
+    <!-- Public, version-controlled fairness/fixes log (e14detector/transparency_log.py). Shown
+         below the stats so the veeduría shows its work: bugs that could bias what people see get
+         declared here, with a link to verify the change. Static + code-reviewed on purpose. -->
+    <section class="surface fixlog" aria-label="Registro de correcciones">
+      <div class="rblock">
+        <h2 class="fixlog-h">Qu&eacute; hemos corregido</h2>
+        <p class="fixlog-note">Aqu&iacute; te contamos, en palabras sencillas, los problemas que
+          hemos encontrado y c&oacute;mo los resolvimos. Cada uno dice claramente si <b>ya est&aacute;
+          corregido</b> o si <b>todav&iacute;a estamos trabajando en &eacute;l</b>. Queremos que puedas
+          comprobar que el proceso es justo, no solo pedirte que conf&iacute;es.</p>
+        <ol class="fixlog-list">
+          {% for e in fixes_log %}
+          {% set is_fixed = (e.status != 'ongoing') %}
+          <li class="fixlog-item {{ 'is-fixed' if is_fixed else 'is-ongoing' }}">
+            <div class="fixlog-meta">
+              <span class="fixlog-status {{ 'fixed' if is_fixed else 'ongoing' }}">
+                {{ '&#10003; Corregido'|safe if is_fixed else '&#9679; En proceso'|safe }}
+              </span>
+              {% if e.tag %}<span class="fixlog-tag">{{ e.tag }}</span>{% endif %}
+              <time datetime="{{ e.date }}">{{ e.date }}</time>
+            </div>
+            <h3 class="fixlog-title">{{ e.title }}</h3>
+            <p class="fixlog-body">{{ e.body }}</p>
+            {% if e.link %}<a class="fixlog-link" href="{{ e.link }}" rel="noopener" target="_blank">{{ e.link_label or "Ver el cambio" }} &rarr;</a>{% endif %}
+          </li>
+          {% endfor %}
+        </ol>
+      </div>
+    </section>
+    {% endif %}
   </main>
 
   {% include "_footer.html" %}
