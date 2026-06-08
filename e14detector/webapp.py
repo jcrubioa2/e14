@@ -1097,9 +1097,25 @@ def _require_admin(request: Request, key: str) -> None:
     convenience). Compared in constant time to avoid leaking it via response timing."""
     if not config.ADMIN_TOKEN:
         raise HTTPException(status_code=404, detail="not found")
-    supplied = request.headers.get("x-admin-token") or key or ""
+    # Accept the token from the header (API/curl), the ?key= query (first sign-in), or the
+    # httpOnly cookie an admin page sets on that first sign-in (so later navigation — including
+    # bouncing out to the public site and back — needs no token in the URL).
+    supplied = (request.headers.get("x-admin-token") or key
+                or request.cookies.get("e14_admin") or "")
     if not hmac.compare_digest(supplied, config.ADMIN_TOKEN):
         raise HTTPException(status_code=403, detail="forbidden")
+
+
+def _set_admin_cookies(resp: Response, key: str) -> None:
+    """On an explicit ?key= sign-in, persist the operator token as a secure httpOnly cookie so
+    admin works across navigation without the token in later URLs (better hygiene than ?key=),
+    plus a non-secret ``e14_op`` flag cookie the public footer reads CLIENT-SIDE to reveal the
+    discreet 'Operador' link only for the operator (cache-safe — the HTML is identical for all)."""
+    if not key:
+        return  # header/cookie auth or anonymous — nothing to (re)persist
+    common = dict(max_age=12 * 3600, secure=True, samesite="lax", path="/")
+    resp.set_cookie("e14_admin", key, httponly=True, **common)
+    resp.set_cookie("e14_op", "1", httponly=False, **common)
 
 
 def create_app(
@@ -1527,11 +1543,21 @@ def create_app(
         # Off the event loop: _admin_health and the lock read do blocking network probes.
         health = await asyncio.to_thread(_admin_health, votes_ok, pipeline)
         lock = await asyncio.to_thread(read_db_lock)
-        return templates.TemplateResponse(
+        resp = templates.TemplateResponse(
             request,
             "admin.html",
             {"key": key, "pipeline": pipeline, "health": health, "lock": lock},
         )
+        _set_admin_cookies(resp, key)
+        return resp
+
+    @app.get("/admin/logout")
+    async def admin_logout():
+        """Clear the operator cookies and bounce to the public site."""
+        resp = RedirectResponse("/", status_code=303)
+        resp.delete_cookie("e14_admin", path="/")
+        resp.delete_cookie("e14_op", path="/")
+        return resp
 
     @app.get("/admin/gap")
     async def admin_gap(request: Request, key: str = ""):
@@ -1748,9 +1774,11 @@ def create_app(
         _require_admin(request, key)
         n = max(200, min(int(n or 2000), 20000))
         result = await asyncio.to_thread(_selector_board, n)
-        return templates.TemplateResponse(
+        resp = templates.TemplateResponse(
             request, "admin_board.html", {"active": "admin", "key": key, "requested_n": n, **result},
         )
+        _set_admin_cookies(resp, key)
+        return resp
 
     @app.get("/manifest.webmanifest")
     async def manifest():
