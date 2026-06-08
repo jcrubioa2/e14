@@ -18,6 +18,8 @@
     .adminnav a { padding:6px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; font-weight:600; color:var(--muted); background:#fff; }
     .adminnav a:hover { border-color:var(--accent); color:var(--accent); }
     .adminnav a.is-on { background:var(--accent); border-color:var(--accent); color:#fff; }
+    .adminnav a.adminnav-alt { border-color:transparent; background:transparent; }
+    .adminnav a.adminnav-alt:hover { border-color:var(--line); }
     .verdict { margin: 14px 0; padding: 12px 16px; border-radius: 10px; font-size: 14px; line-height:1.5; border: 1px solid var(--line); }
     .verdict.pass { background:#eaf6ec; border-color:#aedcb8; color:var(--ok); }
     .verdict.info { background:#eef4fb; border-color:#bcd6f5; color:#0a4a91; }
@@ -70,6 +72,8 @@
     <nav class="adminnav" aria-label="Secciones del panel">
       <a href="/admin/poll?key={{ key }}">Estado &amp; publicaci&oacute;n</a>
       <a href="/admin/coverage?key={{ key }}" class="is-on">Cobertura y reparto</a>
+      <a href="/" class="adminnav-alt" style="margin-left:auto">Ver sitio &rarr;</a>
+      <a href="/admin/logout" class="adminnav-alt">Cerrar sesi&oacute;n</a>
     </nav>
   </header>
   <main>

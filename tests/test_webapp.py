@@ -1897,3 +1897,49 @@ def test_acta_deck_weighting_off_is_uniform(tmp_path: Path) -> None:
     # Weighted: the untouched doc-1 dominates. Uniform (flag off): roughly 50/50 despite history.
     assert weighted["doc-1"] > 3 * weighted["doc-0"], f"weighting should favour the unreviewed acta: {weighted}"
     assert 0.5 < uniform["doc-0"] / max(uniform["doc-1"], 1) < 2.0, f"flag off should be ~uniform: {uniform}"
+
+
+def test_admin_cookie_sign_in_and_logout(tmp_path: Path) -> None:
+    """Signing in once with ?key= sets an httpOnly token cookie + the non-secret e14_op flag, so
+    later admin requests authenticate via cookie alone (no token in the URL); logout clears it.
+    See _require_admin / _set_admin_cookies / admin_logout."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-1", source_path="doc-1.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc-1", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="C", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    orig_token = config.ADMIN_TOKEN
+
+    async def run():
+        app = create_app(results_db=db, output_dir=output_dir)
+        transport = httpx.ASGITransport(app=app)
+        # https base_url so the client returns the Secure admin cookie on later requests.
+        async with httpx.AsyncClient(transport=transport, base_url="https://t") as client:
+            config.ADMIN_TOKEN = "s3cret"
+            no_auth = await client.get("/admin/coverage")             # no key, no cookie
+            signin = await client.get("/admin/coverage?key=s3cret")   # signs in, sets cookies
+            set_cookie = "; ".join(signin.headers.get_list("set-cookie"))
+            cookie_only = await client.get("/admin/coverage")         # cookie in jar -> authed
+            await client.get("/admin/logout")                         # clears the cookies
+            after = await client.get("/admin/coverage")               # cookie gone -> blocked
+            return (no_auth.status_code, signin.status_code, cookie_only.status_code,
+                    after.status_code, set_cookie)
+
+    try:
+        no_auth, signin, cookie_only, after, set_cookie = asyncio.run(run())
+    finally:
+        config.ADMIN_TOKEN = orig_token
+
+    assert no_auth == 403           # no key and no cookie -> forbidden
+    assert signin == 200            # ?key= sign-in works
+    assert "e14_admin=" in set_cookie and "HttpOnly" in set_cookie  # token persisted, httpOnly
+    assert "e14_op=1" in set_cookie                                 # non-secret UI flag
+    assert cookie_only == 200       # authenticated by the cookie alone, no key in URL
+    assert after == 403             # logout cleared the cookie
