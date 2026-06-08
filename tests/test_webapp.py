@@ -1988,3 +1988,46 @@ def test_admin_login_form_sets_cookie(tmp_path: Path) -> None:
     assert ok == 200                        # correct token accepted
     assert "e14_admin=" in set_cookie and "HttpOnly" in set_cookie
     assert after == 200                     # the cookie now authenticates admin pages
+
+
+def test_admin_magic_link_signs_in_and_strips_token(tmp_path: Path) -> None:
+    """A bookmarkable /admin/login?key=TOKEN validates, sets the cookie, and 303-redirects to a
+    token-free /admin/poll; later pages authenticate via the cookie. A wrong key falls to the
+    form (no redirect, no cookie). See admin_login_page."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-1", source_path="doc-1.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc-1", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="C", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    orig_token = config.ADMIN_TOKEN
+
+    async def run():
+        app = create_app(results_db=db, output_dir=output_dir)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://t",
+                                     follow_redirects=False) as client:
+            config.ADMIN_TOKEN = "s3cret"
+            bad = await client.get("/admin/login?key=nope")     # wrong key -> form, no redirect
+            magic = await client.get("/admin/login?key=s3cret")  # right key -> 303 + cookie
+            set_cookie = "; ".join(magic.headers.get_list("set-cookie"))
+            loc = magic.headers.get("location", "")
+            authed = await client.get("/admin/coverage")        # cookie in jar authenticates
+            return (bad.status_code, "Token" in bad.text, magic.status_code, loc,
+                    set_cookie, authed.status_code)
+
+    try:
+        bad_code, bad_is_form, magic_code, loc, set_cookie, authed = asyncio.run(run())
+    finally:
+        config.ADMIN_TOKEN = orig_token
+
+    assert bad_code == 200 and bad_is_form          # wrong key shows the form, doesn't sign in
+    assert magic_code == 303 and loc == "/admin/poll"   # magic link redirects to a token-free URL
+    assert "e14_admin=" in set_cookie and "HttpOnly" in set_cookie
+    assert authed == 200                             # signed in by the cookie alone
