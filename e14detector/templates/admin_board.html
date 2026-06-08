@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Cobertura y reparto (operador)</title>
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ok:#1a7f37; --warn:#9a6c00; --ink:#202124; --accent:#0969da; --purple:#7a3fc4; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); }
+    header, main { max-width: 1040px; margin: 0 auto; padding: 16px 20px; }
+    header { background: var(--bg); border-bottom: 1px solid var(--line); }
+    h1 { margin: 0 0 6px; font-size: 20px; }
+    h2 { font-size: 15px; margin: 22px 0 8px; }
+    p.lede { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 6px 0 0; max-width: 78ch; }
+    a { color: var(--accent); text-decoration: none; }
+    .adminnav { display:flex; flex-wrap:wrap; gap:6px; margin-top:14px; }
+    .adminnav a { padding:6px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; font-weight:600; color:var(--muted); background:#fff; }
+    .adminnav a:hover { border-color:var(--accent); color:var(--accent); }
+    .adminnav a.is-on { background:var(--accent); border-color:var(--accent); color:#fff; }
+    .verdict { margin: 14px 0; padding: 12px 16px; border-radius: 10px; font-size: 14px; line-height:1.5; border: 1px solid var(--line); }
+    .verdict.pass { background:#eaf6ec; border-color:#aedcb8; color:var(--ok); }
+    .verdict.info { background:#eef4fb; border-color:#bcd6f5; color:#0a4a91; }
+    .verdict.warn { background:#fff8e6; border-color:#e6c34a; color:var(--warn); }
+    .verdict.bad { background:#fdeceb; border-color:var(--bad); color:var(--bad); }
+    .verdict b { font-size: 16px; }
+    .stats { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+    .card { border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:12px; color:var(--muted); min-width:116px; }
+    .card b { display:block; font-size:18px; color:var(--ink); margin-top:2px; font-variant-numeric: tabular-nums; }
+    .card.accent { border-left:4px solid var(--accent); }
+    .card.warn { border-left:4px solid var(--warn); }
+    .card.purple { border-left:4px solid var(--purple); }
+    .gini { display:inline-block; padding:1px 8px; border-radius:99px; font-weight:800; }
+    .gini.lo { background:#eaf6ec; color:var(--ok); } .gini.mid { background:#fff8e6; color:var(--warn); } .gini.hi { background:#fdeceb; color:var(--bad); }
+    table { width:100%; border-collapse: collapse; font-size:12.5px; margin-top:6px; }
+    th, td { padding:4px 8px; text-align:right; vertical-align:middle; }
+    th { color:var(--muted); font-weight:600; border-bottom:1px solid var(--line); }
+    td.bar { width:24%; text-align:left; }
+    .track { position:relative; height:14px; background:var(--bg); border-radius:3px; overflow:hidden; }
+    .track .fill { position:absolute; left:0; top:0; height:14px; border-radius:3px; }
+    .fill.cov { background:var(--accent); opacity:.8; }
+    .fill.srv { background:var(--purple); opacity:.82; }
+    .val { font-variant-numeric: tabular-nums; }
+    .legend { font-size:12px; color:var(--muted); margin-top:8px; }
+    .legend .sw { display:inline-block; width:11px; height:11px; border-radius:2px; vertical-align:middle; margin:0 3px 0 12px; }
+    .legend .sw.cov { background:var(--accent); opacity:.8; } .legend .sw.srv { background:var(--purple); opacity:.82; }
+    .hist { display:flex; align-items:flex-end; gap:10px; height:140px; margin:14px 0 4px; }
+    .hbar { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; }
+    .hbar .col { width:100%; max-width:70px; background:var(--accent); opacity:.85; border-radius:4px 4px 0 0; min-height:2px; }
+    .hbar .col.zero { background:var(--muted); opacity:.55; }
+    .hbar .n { font-size:12px; font-variant-numeric:tabular-nums; margin-bottom:4px; }
+    .hbar .lab { font-size:12px; color:var(--muted); margin-top:6px; }
+    .controls { margin: 12px 0; font-size: 13px; }
+    .controls span.lbl { color:var(--muted); margin-right:4px; }
+    .controls a { display:inline-block; padding:5px 10px; border:1px solid var(--line); border-radius:7px; margin-right:6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Cobertura y reparto de revisión</h1>
+    <p class="lede">
+      Una sola vista de dos cosas sobre el mismo eje (banda de rowid de las actas): en
+      <b style="color:var(--accent)">azul</b>, cuánto se ha revisado el corpus hasta ahora (el
+      rezago histórico); en <b style="color:var(--purple)">morado</b>, hacia dónde está mandando
+      revisiones <b>nuevas</b> el selector ahora mismo ({{ "{:,}".format(samples) }} muestras en
+      vivo). El selector prioriza las actas menos revisadas, así que el morado debe inclinarse
+      hacia donde el azul es bajo. Guiado solo por cuántas veces se revisó cada acta, nunca por su
+      contenido. Solo lectura.
+    </p>
+    <nav class="adminnav" aria-label="Secciones del panel">
+      <a href="/admin/poll?key={{ key }}">Estado &amp; publicaci&oacute;n</a>
+      <a href="/admin/coverage?key={{ key }}" class="is-on">Cobertura y reparto</a>
+    </nav>
+  </header>
+  <main>
+    {% if verdict == 'malfunction' %}
+    <div class="verdict bad"><b>FALLA — reparto concentrado ✗</b><br>
+      El selector amontonó las revisiones en pocas bandas (χ² reducido = {{ reduced_chi2 }}, debería
+      rondar 1) y NO hacia el rezago. Es un atasco como el del error original. Revísalo.</div>
+    {% elif verdict == 'steering' %}
+    <div class="verdict pass"><b>SANO — dirigiendo a las menos revisadas ✓</b><br>
+      {% if flat %}El reparto es <b>casi plano</b> (χ² reducido = {{ reduced_chi2 }}){% else %}El
+      reparto se inclina con fuerza hacia el rezago (χ² reducido = {{ reduced_chi2 }}){% endif %}
+      y corre al revés de la cobertura (r = {{ steer_r }}); el <b>{{ least_half_capture }}%</b> de
+      las revisiones nuevas cae en la mitad menos cubierta. El rezago se cierra.</div>
+    {% elif verdict == 'baseline' %}
+    <div class="verdict pass"><b>SANO — uniforme, sin rezago que corregir aún ✓</b><br>
+      Reparto plano (χ² reducido = {{ reduced_chi2 }}) y todavía sin diferencias de cobertura entre
+      bandas (spread {{ cov_spread }}%). Cuando se acumule historial desigual, dirigirá hacia las
+      menos revisadas.</div>
+    {% elif verdict == 'uniform' %}
+    <div class="verdict info"><b>UNIFORME — ponderación por cobertura desactivada</b><br>
+      Reparto plano (χ² reducido = {{ reduced_chi2 }}); reparte por igual
+      (<code>ACTA_DECK_COVERAGE_WEIGHTED=0</code>). Actívala para dirigir las revisiones al rezago.</div>
+    {% else %}
+    <div class="verdict warn"><b>DIRECCIÓN DÉBIL</b><br>
+      Reparto plano (χ² reducido = {{ reduced_chi2 }}) pero se esperaba más inclinación hacia las
+      menos cubiertas (r = {{ steer_r }}, {{ least_half_capture }}% a la mitad menos cubierta).</div>
+    {% endif %}
+
+    <h2>Estado del corpus (azul)</h2>
+    <div class="stats">
+      <div class="card accent">Cobertura global<b class="val">{{ "%.1f"|format(overall_coverage) }}%</b></div>
+      <div class="card">Actas revisables<b class="val">{{ "{:,}".format(total_eligible) }}</b></div>
+      <div class="card">Revisadas (&ge;1)<b class="val">{{ "{:,}".format(total_reviewed) }}</b></div>
+      <div class="card warn">Sin revisar<b class="val">{{ "{:,}".format(never_reviewed) }}</b></div>
+      <div class="card">Revisiones totales<b class="val">{{ "{:,}".format(total_reviews) }}</b></div>
+      <div class="card">Prom. por acta revisada<b class="val">{{ "%.2f"|format(avg_reviews_reviewed) }}</b></div>
+      <div class="card">Desigualdad (Gini)<b>{% set g = gini %}<span class="gini {{ 'lo' if g < 0.3 else ('mid' if g < 0.5 else 'hi') }}">{{ "%.3f"|format(g) }}</span></b></div>
+    </div>
+
+    <h2>Reparto del selector (morado)</h2>
+    <div class="stats">
+      <div class="card">Modo<b>{{ 'Ponderado' if mode == 'weighted' else 'Uniforme' }}</b></div>
+      <div class="card purple">% a la mitad menos cubierta<b class="val">{{ least_half_capture }}%</b></div>
+      <div class="card">Correlación cob.↔reparto<b class="val">{{ steer_r if steer_r is not none else '—' }}</b></div>
+      <div class="card">Planitud (χ² red., ≈1 sano)<b class="val">{{ reduced_chi2 }}</b></div>
+      {% if misses %}<div class="card">Muestras sin acta<b class="val">{{ misses }}</b></div>{% endif %}
+    </div>
+
+    <h2>Por banda de rowid: cobertura vs. reparto</h2>
+    <table>
+      <thead>
+        <tr><th>Banda rowid</th><th>Actas</th><th>Cobertura</th><th class="bar">% cubierto</th><th>Reparto</th><th class="bar">% de revisiones nuevas</th></tr>
+      </thead>
+      <tbody>
+      {% for r in bands %}
+        <tr>
+          <td class="val">{{ "{:,}".format(r.lo) }}–{{ "{:,}".format(r.hi) }}</td>
+          <td class="val">{{ "{:,}".format(r.eligible) }}</td>
+          <td class="val">{{ "%.1f"|format(r.coverage) }}%</td>
+          <td class="bar"><div class="track"><div class="fill cov" style="width: {{ (100.0 * r.coverage / (max_coverage or 1))|round(1) }}%"></div></div></td>
+          <td class="val">{{ "%.1f"|format(r.serve_pct) }}%</td>
+          <td class="bar"><div class="track"><div class="fill srv" style="width: {{ (100.0 * r.serve_pct / (max_serve_pct or 1))|round(1) }}%"></div></div></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="legend">
+      <span class="sw cov"></span> cobertura actual de la banda (revisadas / actas)
+      <span class="sw srv"></span> parte de las revisiones nuevas que el selector le manda.
+      Morado alto donde el azul es bajo = está cerrando el rezago.
+    </p>
+
+    <h2>¿Cuántas veces se ha revisado cada acta?</h2>
+    <div class="hist">
+      {% for h in hist %}
+      <div class="hbar">
+        <div class="n">{{ "{:,}".format(h.actas) }}</div>
+        <div class="col {{ 'zero' if h.label == '0' }}" style="height: {{ (100.0 * h.actas / (max_hist or 1))|round(1) }}%"></div>
+        <div class="lab">{{ h.label }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="legend" style="margin-left:0">Número de actas por cantidad de revisiones recibidas (0, 1, 2, 3, 4, 5 o más). Una cola larga en “0” es el trabajo pendiente.</p>
+
+    <div class="controls">
+      <span class="lbl">Volver a muestrear:</span>
+      <a href="/admin/coverage?key={{ key }}&amp;n=2000">2&nbsp;000</a>
+      <a href="/admin/coverage?key={{ key }}&amp;n=8000">8&nbsp;000</a>
+      <a href="/admin/coverage?key={{ key }}&amp;n=20000">20&nbsp;000</a>
+    </div>
+  </main>
+</body>
+</html>

@@ -1593,27 +1593,32 @@ def create_app(
         sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
         return sxy / math.sqrt(sxx * syy)
 
-    def _selector_probe(n: int, buckets: int = 20) -> dict:
-        """Draw ``n`` picks from the LIVE acta-deck selector and show WHERE review effort is
-        being steered, by document ``rowid`` band. For each band we report current coverage
-        (reviewed/eligible) and the selector's serving share. Under coverage weighting the
-        serving share should run INVERSELY to coverage — the least-covered bands get the most
-        new serves — so the historical skew flattens instead of persisting. The coverage column
-        always reflects real review history; the serving reflects the active mode (weighted by
-        default, uniform if disabled). Read-only."""
+    def _selector_board(n: int, buckets: int = 20) -> dict:
+        """Unified coverage + serving board. One pass over the eligible actas builds the historical
+        coverage per rowid band (reviewed/eligible — the backlog) and the per-acta review spread
+        (Gini, histogram); then we sample the LIVE selector to show where NEW reviews are being
+        sent on the SAME axis, with a flatness sanity check and the steering direction. Joins the
+        vote backend (reviews per acta) with the SQLite acta index (rowid). Read-only."""
         disp_counts = _agg_cached("review_counts", community.review_counts, ttl=120.0)
         sel_counts = disp_counts if config.ACTA_DECK_COVERAGE_WEIGHTED else None
         with conn() as db:
             maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
             eligible = [0] * buckets
             reviewed = [0] * buckets
+            reviews_sum = [0] * buckets
+            hist = [0] * 6           # actas with 0,1,2,3,4,5+ reviews
+            per_acta: list[int] = []
             if maxrow:
                 for r in db.execute(
                     "SELECT rowid, document_id FROM documents WHERE n_candidates > 0"
                 ):
                     b = min((int(r["rowid"]) - 1) * buckets // maxrow, buckets - 1)
+                    c = int(disp_counts.get(r["document_id"], 0))
                     eligible[b] += 1
-                    if disp_counts.get(r["document_id"], 0) > 0:
+                    reviews_sum[b] += c
+                    per_acta.append(c)
+                    hist[min(c, 5)] += 1
+                    if c > 0:
                         reviewed[b] += 1
             served = [0] * buckets
             misses = 0
@@ -1625,8 +1630,9 @@ def create_app(
                 served[min((int(row["rowid"]) - 1) * buckets // maxrow, buckets - 1)] += 1
 
         total_served = sum(served)
-        total_elig = sum(eligible)
+        total_elig = len(per_acta)
         total_reviewed = sum(reviewed)
+        total_reviews = sum(reviews_sum)
         bands: list[dict] = []
         cov_xs: list[float] = []
         serve_ys: list[float] = []
@@ -1640,6 +1646,7 @@ def create_app(
                 "hi": int((b + 1) * maxrow / buckets),
                 "eligible": e, "reviewed": reviewed[b],
                 "coverage": cov, "served": served[b], "serve_pct": sp,
+                "avg_reviews": (reviews_sum[b] / e) if e else 0.0,
             })
             if e:
                 cov_xs.append(cov)
@@ -1691,12 +1698,17 @@ def create_app(
             verdict = "uniform"
         else:
             verdict = "weak"
+        hist_rows = [{"label": (str(k) if k < 5 else "5+"), "actas": hist[k]} for k in range(6)]
         return {
             "mode": mode, "verdict": verdict, "buckets": buckets,
-            "samples": total_served, "misses": misses,
+            "samples": total_served, "misses": misses, "max_rowid": maxrow, "bands": bands,
             "total_eligible": total_elig, "total_reviewed": total_reviewed,
+            "never_reviewed": total_elig - total_reviewed,
             "overall_coverage": (100.0 * total_reviewed / total_elig) if total_elig else 0.0,
-            "max_rowid": maxrow, "bands": bands,
+            "total_reviews": total_reviews,
+            "avg_reviews_all": (total_reviews / total_elig) if total_elig else 0.0,
+            "avg_reviews_reviewed": (total_reviews / total_reviewed) if total_reviewed else 0.0,
+            "gini": _gini(per_acta), "hist": hist_rows,
             "steer_r": (round(steer_r, 3) if steer_r is not None else None),
             "least_half_capture": round(least_half_capture, 1),
             "cov_spread": round(cov_spread, 1),
@@ -1704,20 +1716,14 @@ def create_app(
             "reduced_chi2": round(reduced_chi2, 2), "flat": flat, "concentrated": concentrated,
             "max_serve_pct": max((b["serve_pct"] for b in bands), default=0.0),
             "max_coverage": max((b["coverage"] for b in bands), default=0.0),
+            "max_band_avg": max((b["avg_reviews"] for b in bands), default=0.0),
+            "max_hist": max(hist, default=0),
         }
 
     @app.get("/admin/fairness")
     async def admin_fairness(request: Request, key: str = "", n: int = 2000):
-        """Selector-steering viz: sample the LIVE acta-deck pick and show it is steering review
-        effort toward the least-covered actas (coverage weighting), driven only by review count
-        and never by acta content. The 'after' to the coverage board's 'before'. Read-only."""
-        _require_admin(request, key)
-        n = max(200, min(int(n or 2000), 20000))
-        result = await asyncio.to_thread(_selector_probe, n)
-        return templates.TemplateResponse(
-            request, "admin_fairness.html",
-            {"active": "admin", "key": key, "requested_n": n, **result},
-        )
+        # Back-compat alias for the merged board (old bookmarks/links keep working).
+        return await admin_board(request, key, n)
 
     def _gini(values: list[int]) -> float:
         """Gini coefficient of review coverage across eligible actas: 0 = everyone reviewed
@@ -1733,80 +1739,17 @@ def create_app(
         weighted = sum((i + 1) * x for i, x in enumerate(s))  # i: 0-based -> rank i+1
         return (2.0 * weighted) / (n * total) - (n + 1.0) / n
 
-    def _coverage_stats(buckets: int = 20) -> dict:
-        """Historical review coverage — the 'before the fix' picture. Joins the vote backend
-        (reviews per acta, from Aurora/community) with the SQLite acta index (rowid +
-        n_candidates), bins by the SAME rowid bands as the fairness probe, and reports how
-        evenly the corpus has actually been reviewed so far. Under the old crop-weighted /
-        lowest-rowid selector, the early (low-rowid) bands are over-covered; uniform serving
-        flattens this over time but does not erase the accumulated head start. Read-only."""
-        counts = _agg_cached("review_counts", community.review_counts)  # doc_id -> reviewers
-        with conn() as db:
-            maxrow = db.execute("SELECT max(rowid) AS m FROM documents").fetchone()["m"] or 0
-            elig = db.execute(
-                "SELECT rowid, document_id FROM documents WHERE n_candidates > 0"
-            ).fetchall()
-
-        bands = [{"eligible": 0, "reviewed": 0, "reviews": 0} for _ in range(buckets)]
-        hist = [0] * 6  # actas with 0,1,2,3,4,5+ reviews
-        per_acta: list[int] = []
-        total_reviewed = 0
-        total_reviews = 0
-        for r in elig:
-            b = min((int(r["rowid"]) - 1) * buckets // maxrow, buckets - 1) if maxrow else 0
-            c = int(counts.get(r["document_id"], 0))
-            bd = bands[b]
-            bd["eligible"] += 1
-            bd["reviews"] += c
-            per_acta.append(c)
-            hist[min(c, 5)] += 1
-            if c > 0:
-                bd["reviewed"] += 1
-                total_reviewed += 1
-                total_reviews += c
-
-        band_rows = []
-        for i, bd in enumerate(bands):
-            e = bd["eligible"]
-            band_rows.append({
-                "band": i + 1,
-                "lo": int(i * maxrow / buckets) + 1,
-                "hi": int((i + 1) * maxrow / buckets),
-                "eligible": e,
-                "reviewed": bd["reviewed"],
-                "coverage": (100.0 * bd["reviewed"] / e) if e else 0.0,
-                "avg_reviews": (bd["reviews"] / e) if e else 0.0,
-            })
-        total_elig = len(elig)
-        hist_rows = [{"label": (str(k) if k < 5 else "5+"), "actas": hist[k]} for k in range(6)]
-        return {
-            "buckets": buckets, "max_rowid": maxrow,
-            "total_eligible": total_elig,
-            "total_reviewed": total_reviewed,
-            "never_reviewed": total_elig - total_reviewed,
-            "overall_coverage": (100.0 * total_reviewed / total_elig) if total_elig else 0.0,
-            "total_reviews": total_reviews,
-            "avg_reviews_all": (total_reviews / total_elig) if total_elig else 0.0,
-            "avg_reviews_reviewed": (total_reviews / total_reviewed) if total_reviewed else 0.0,
-            "gini": _gini(per_acta),
-            "bands": band_rows,
-            "hist": hist_rows,
-            "max_band_cov": max((b["coverage"] for b in band_rows), default=0.0),
-            "max_band_avg": max((b["avg_reviews"] for b in band_rows), default=0.0),
-            "max_hist": max(hist, default=0),
-        }
-
     @app.get("/admin/coverage")
-    async def admin_coverage(request: Request, key: str = ""):
-        """Historical-coverage viz: how evenly the corpus has ACTUALLY been reviewed so far,
-        binned by the same rowid bands as /admin/fairness. This is the 'before' picture —
-        the accumulated skew from the old selector — next to the fairness probe's 'after'.
-        Reads vote intensity from the community backend + rowids from the SQLite index;
-        operator-gated, read-only."""
+    async def admin_board(request: Request, key: str = "", n: int = 2000):
+        """Merged coverage + reparto board: the historical review backlog (coverage per rowid
+        band, Gini, histogram) AND where the live selector is sending new reviews on the same
+        axis, with a flatness sanity check + steering verdict. Reads votes from the community
+        backend and rowids from the SQLite index. Operator-gated, read-only."""
         _require_admin(request, key)
-        result = await asyncio.to_thread(_coverage_stats)
+        n = max(200, min(int(n or 2000), 20000))
+        result = await asyncio.to_thread(_selector_board, n)
         return templates.TemplateResponse(
-            request, "admin_coverage.html", {"key": key, **result},
+            request, "admin_board.html", {"active": "admin", "key": key, "requested_n": n, **result},
         )
 
     @app.get("/manifest.webmanifest")
