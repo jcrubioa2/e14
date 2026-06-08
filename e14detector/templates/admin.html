@@ -61,12 +61,20 @@
     .btn.warn { background:#b88200; border-color:#b88200; color:#fff; }
     .btn:disabled { opacity:.6; cursor:default; }
     .dbmeta { display:flex; flex-wrap:wrap; gap:10px; margin-top:14px; }
+    .adminnav { display:flex; flex-wrap:wrap; gap:6px; margin-top:14px; }
+    .adminnav a { padding:6px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px; font-weight:600; color:var(--muted); background:#fff; text-decoration:none; }
+    .adminnav a:hover { border-color:var(--accent); color:var(--accent); }
+    .adminnav a.is-on { background:var(--accent); border-color:var(--accent); color:#fff; }
   </style>
 </head>
 <body>
   <header>
     <h1>Panel de votación &mdash; operador</h1>
     <div class="muted">Gestión de la base de datos servida y estado de publicación. No indexado.</div>
+    <nav class="adminnav" aria-label="Secciones del panel">
+      <a href="/admin/poll?key={{ key }}" class="is-on">Estado &amp; publicaci&oacute;n</a>
+      <a href="/admin/fairness?key={{ key }}">Imparcialidad del selector</a>
+    </nav>
     {% if pipeline %}
     <div class="pipeline {{ 'warn' if pipeline.pointer_stale and not pipeline.complete else 'ok' }}">
       <span class="dot"></span>
