@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Operador</title>
+  <style>
+    :root { color-scheme: light; --line:#d8dee4; --muted:#57606a; --bg:#f6f8fa; --bad:#b42318; --ink:#202124; --accent:#0969da; }
+    body { margin:0; min-height:100dvh; display:flex; align-items:center; justify-content:center;
+           font-family: system-ui, -apple-system, Segoe UI, sans-serif; color: var(--ink); background: var(--bg); }
+    form { background:#fff; border:1px solid var(--line); border-radius:14px; padding:24px; width:min(360px, 92vw);
+           box-shadow:0 1px 3px rgba(0,0,0,.06); display:flex; flex-direction:column; gap:12px; }
+    h1 { margin:0 0 2px; font-size:18px; }
+    p.sub { margin:0 0 6px; font-size:13px; color:var(--muted); }
+    input { padding:11px 12px; border:1px solid var(--line); border-radius:9px; font:inherit; }
+    button { padding:11px 12px; border:0; border-radius:9px; background:var(--accent); color:#fff; font:inherit; font-weight:700; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:default; }
+    .err { color:var(--bad); font-size:13px; margin:0; }
+    a.back { color:var(--muted); font-size:12.5px; text-align:center; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <form id="f" autocomplete="off">
+    <h1>Acceso de operador</h1>
+    <p class="sub">Ingresa el token para administrar la veedur&iacute;a.</p>
+    <input type="password" id="t" name="token" placeholder="Token de operador" autocomplete="current-password" autofocus>
+    <button id="b" type="submit">Entrar</button>
+    <p class="err" id="err" hidden>Token incorrecto.</p>
+    <a class="back" href="/">&larr; Volver al sitio</a>
+  </form>
+  <script>
+    var f = document.getElementById('f'), t = document.getElementById('t'),
+        b = document.getElementById('b'), err = document.getElementById('err');
+    f.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      err.hidden = true; b.disabled = true;
+      try {
+        // Token travels in a header, never the URL — so it stays out of history/logs/Referer.
+        var r = await fetch('/admin/login', { method: 'POST', headers: { 'X-Admin-Token': t.value } });
+        if (r.ok) { location.href = '/admin/poll'; return; }
+      } catch (_) {}
+      err.hidden = false; b.disabled = false; t.value = ''; t.focus();
+    });
+  </script>
+</body>
+</html>

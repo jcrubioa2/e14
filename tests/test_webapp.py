@@ -1943,3 +1943,48 @@ def test_admin_cookie_sign_in_and_logout(tmp_path: Path) -> None:
     assert "e14_op=1" in set_cookie                                 # non-secret UI flag
     assert cookie_only == 200       # authenticated by the cookie alone, no key in URL
     assert after == 403             # logout cleared the cookie
+
+
+def test_admin_login_form_sets_cookie(tmp_path: Path) -> None:
+    """The /admin/login form authenticates via the X-Admin-Token header (no token in the URL,
+    so it works inside the standalone PWA) and sets the operator cookie. See admin_login."""
+    output_dir = tmp_path / "out"
+    db = output_dir / "results" / "results.sqlite"
+    crop = _crop(output_dir / "crops" / "c.png")
+    store = DetectorStore(db)
+    store.upsert_document(DocumentMetadata(document_id="doc-1", source_path="doc-1.pdf"))
+    store.insert_vote_field(VoteField(
+        document_id="doc-1", page_number=1, row_type="candidate", row_number=1,
+        candidate_name="C", raw_crop_path=str(crop),
+    ))
+    store.commit()
+    store.close()
+
+    orig_token = config.ADMIN_TOKEN
+
+    async def run():
+        app = create_app(results_db=db, output_dir=output_dir)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="https://t") as client:
+            config.ADMIN_TOKEN = ""
+            off = await client.get("/admin/login")                 # feature off -> hidden
+            config.ADMIN_TOKEN = "s3cret"
+            page = await client.get("/admin/login")                # form is viewable
+            bad = await client.post("/admin/login", headers={"X-Admin-Token": "nope"})
+            ok = await client.post("/admin/login", headers={"X-Admin-Token": "s3cret"})
+            set_cookie = "; ".join(ok.headers.get_list("set-cookie"))
+            after = await client.get("/admin/coverage")            # authed by the fresh cookie
+            return (off.status_code, page.status_code, bad.status_code, ok.status_code,
+                    after.status_code, set_cookie)
+
+    try:
+        off, page, bad, ok, after, set_cookie = asyncio.run(run())
+    finally:
+        config.ADMIN_TOKEN = orig_token
+
+    assert off == 404                       # no token configured -> login hidden too
+    assert page == 200                      # form is publicly viewable (just a password gate)
+    assert bad == 403                       # wrong token rejected
+    assert ok == 200                        # correct token accepted
+    assert "e14_admin=" in set_cookie and "HttpOnly" in set_cookie
+    assert after == 200                     # the cookie now authenticates admin pages

@@ -1559,6 +1559,27 @@ def create_app(
         resp.delete_cookie("e14_op", path="/")
         return resp
 
+    @app.get("/admin/login")
+    async def admin_login_page(request: Request):
+        """Operator sign-in form: a token field instead of a ?key= URL, so it works inside the
+        installed PWA (standalone, no address bar). 404 when the admin feature is off."""
+        if not config.ADMIN_TOKEN:
+            raise HTTPException(status_code=404, detail="not found")
+        return templates.TemplateResponse(request, "admin_login.html", {})
+
+    @app.post("/admin/login")
+    async def admin_login(request: Request):
+        """Validate the token from the ``X-Admin-Token`` header (kept out of the URL/history) and
+        set the operator cookies. JSON result; the page navigates to the panel on success."""
+        if not config.ADMIN_TOKEN:
+            raise HTTPException(status_code=404, detail="not found")
+        supplied = request.headers.get("x-admin-token") or ""
+        if not hmac.compare_digest(supplied, config.ADMIN_TOKEN):
+            return JSONResponse({"ok": False}, status_code=403)
+        resp = JSONResponse({"ok": True})
+        _set_admin_cookies(resp, supplied)
+        return resp
+
     @app.get("/admin/gap")
     async def admin_gap(request: Request, key: str = ""):
         """The ingesta backlog: mesas the Registraduría reports as informed but that we are not

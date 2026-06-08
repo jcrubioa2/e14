@@ -264,3 +264,18 @@
     });
   })();
 </script>
+<script>
+  /* Covert operator entry that works even on the PWA start page (/votar has no footer, only this
+     appbar): tap the small community-review tick 5x to open the token sign-in form. Not advertised
+     in the markup; the form itself is just a password gate, so auth is unaffected. */
+  (function () {
+    var tick = document.querySelector('.appbar-reviews-tick');
+    if (!tick) return;
+    var n = 0, timer = null;
+    tick.addEventListener('click', function (e) {
+      e.preventDefault(); e.stopPropagation();   // don't follow the progress strip's /transparencia link
+      n++; clearTimeout(timer); timer = setTimeout(function () { n = 0; }, 1500);
+      if (n >= 5) { n = 0; location.href = '/admin/login'; }
+    });
+  })();
+</script>
