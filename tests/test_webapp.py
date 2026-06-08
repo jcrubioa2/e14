@@ -424,12 +424,22 @@ def test_acta_deck_returns_one_actas_crops_anonymized(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def _acta_deck_doc_counts(db: Path, output_dir: Path, runs: int) -> dict[str, int]:
+def _chi_square(counts: dict[str, int], expected: dict[str, float]) -> float:
+    """Pearson goodness-of-fit statistic ``Σ (O-E)²/E`` of the observed acta-draw
+    counts against the expected (uniform) counts. Near ``df`` for a uniform sampler;
+    blows far past the critical value under any real skew."""
+    return sum((counts.get(k, 0) - e) ** 2 / e for k, e in expected.items())
+
+
+def _acta_deck_doc_counts(db: Path, output_dir: Path, runs: int, seed: int) -> dict[str, int]:
     """Hit /api/acta-deck ``runs`` times and tally which acta each draw came from.
 
     Maps the returned (anonymized) cids back to their document via crop_id/field_key_of,
     the same way the anonymization test does, since the payload never names the acta.
+    ``random`` is seeded so the whole run is DETERMINISTIC: the uniformity assertions are
+    reproducible and never flake, yet still measure the real selection distribution.
     """
+    import random
     from collections import Counter
     from e14detector.community import crop_id, field_key_of
 
@@ -439,6 +449,7 @@ def _acta_deck_doc_counts(db: Path, output_dir: Path, runs: int) -> dict[str, in
     async def run() -> None:
         transport = httpx.ASGITransport(app=create_app(results_db=db, output_dir=output_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            random.seed(seed)  # fix the draw sequence after app construction
             for _ in range(runs):
                 items = (await client.get("/api/acta-deck")).json()["items"]
                 # Every crop in one response is from a single acta; identify it via any cid.
@@ -491,14 +502,16 @@ def test_acta_deck_uniform_over_actas(tmp_path: Path) -> None:
     store.close()
 
     runs = 1200
-    counts = _acta_deck_doc_counts(db, output_dir, runs)
+    counts = _acta_deck_doc_counts(db, output_dir, runs, seed=20250608)
 
-    # Every acta shows up, and no acta is wildly over/under-served. Expected share is
-    # runs/n_actas (=60); a generous band catches a low-rowid bias without flaking.
+    # Deterministic (seeded) chi-square goodness-of-fit against a uniform draw over the
+    # 20 actas. A uniform sampler sits near df=19; the old low-rowid pick is wildly skewed.
+    # 43.82 is the upper-tail critical value at alpha=0.001 (df=19): the seeded uniform
+    # sampler passes, any real bias fails. Every acta must also appear at least once.
     assert len(counts) == n_actas, f"only {len(counts)}/{n_actas} actas ever served"
-    expected = runs / n_actas
-    for doc_id, c in counts.items():
-        assert 0.4 * expected <= c <= 1.6 * expected, f"{doc_id} served {c}x (expected ~{expected})"
+    expected = {f"doc-{d:02d}": runs / n_actas for d in range(n_actas)}
+    chi2 = _chi_square(counts, expected)
+    assert chi2 < 43.82, f"acta selection not uniform: chi2={chi2:.1f} over df=19 (counts={counts})"
 
 
 def test_acta_deck_uniform_with_uneven_crop_counts(tmp_path: Path) -> None:
@@ -521,13 +534,15 @@ def test_acta_deck_uniform_with_uneven_crop_counts(tmp_path: Path) -> None:
     store.close()
 
     runs = 800
-    counts = _acta_deck_doc_counts(db, output_dir, runs)
+    counts = _acta_deck_doc_counts(db, output_dir, runs, seed=20250608)
 
-    # ~50/50, NOT ~13:3 (which crop-weighted sampling would give). Both within a band
-    # around runs/2; the key assertion is the ratio stays near 1, far from 13/3≈4.3.
+    # Deterministic (seeded) chi-square against a uniform 50/50 split — NOT the ~13:3 a
+    # crop-weighted sampler would give. 10.83 is the upper-tail critical value at
+    # alpha=0.001 (df=1); a uniform sampler sits near 1, the crop-weighted one near 800.
     assert set(counts) == set(specs)
-    big, small = counts["doc-big"], counts["doc-small"]
-    assert 0.7 <= big / small <= 1.43, f"doc-big:doc-small = {big}:{small} (want ~1:1, not 13:3)"
+    expected = {k: runs / 2 for k in specs}
+    chi2 = _chi_square(counts, expected)
+    assert chi2 < 10.83, f"selection weighted by crop count: chi2={chi2:.1f} (counts={counts})"
 
 
 def test_vote_batch_records_strange_and_good(tmp_path: Path) -> None:
