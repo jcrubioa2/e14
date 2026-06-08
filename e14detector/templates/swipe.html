@@ -399,7 +399,7 @@
     <p id="idbanner-txt"></p>
     <div class="row">
       <button type="button" class="no" data-act="id-dismiss">No, gracias</button>
-      <button type="button" class="yes" data-act="id-accept">Crear apodo</button>
+      <button type="button" class="yes" data-act="id-accept">Crear nickname</button>
     </div>
   </div>
 
@@ -574,7 +574,7 @@
       if (reviewed < ID_PROMPT_AT) return;
       idBannerShown = true;
       document.getElementById('idbanner-txt').innerHTML =
-        'Llevas <b>' + reviewed + ' mesas</b> revisadas. ¿Quieres guardar tu progreso con un apodo y ' +
+        'Llevas <b>' + reviewed + ' mesas</b> revisadas. ¿Quieres guardar tu progreso con un nickname y ' +
         'aparecer en la tabla de veeduría? Es opcional y anónimo.';
       idbanner.hidden = false;
       requestAnimationFrame(function () { idbanner.classList.add('show'); });
@@ -603,8 +603,8 @@
       let html;
       if (idView === 'pin' && lastClaimPin) {
         html =
-          '<div class="id-head"><h2>¡Apodo creado!</h2>' + close + '</div>' +
-          '<p class="id-sub">Guarda este código. Lo necesitas para sumar este apodo en <b>otro dispositivo</b> (hasta 3). No lo compartas: es lo único que protege tu apodo.</p>' +
+          '<div class="id-head"><h2>¡Nickname creado!</h2>' + close + '</div>' +
+          '<p class="id-sub">Guarda este código. Lo necesitas para sumar este nickname en <b>otro dispositivo</b> (hasta 3). No lo compartas: es lo único que protege tu nickname.</p>' +
           '<div class="id-pinbox"><div class="lab">Tu código de recuperación</div>' +
           '<div class="pin">' + esc(lastClaimPin) + '</div>' +
           '<div class="warn">No te lo volveremos a mostrar en un dispositivo nuevo.</div></div>' +
@@ -612,23 +612,23 @@
       } else if (idView === 'link') {
         html =
           '<div class="id-head"><h2>Vincular este dispositivo</h2>' + close + '</div>' +
-          '<p class="id-sub">Escribe tu apodo y tu código de 4 dígitos para sumar este dispositivo a tu apodo (hasta 3 dispositivos).</p>' +
-          '<div class="id-field"><label for="id-lnick">Apodo</label>' +
+          '<p class="id-sub">Escribe tu nickname y tu código de 4 dígitos para sumar este dispositivo a tu nickname (hasta 3 dispositivos).</p>' +
+          '<div class="id-field"><label for="id-lnick">Nickname</label>' +
           '<input id="id-lnick" type="text" maxlength="20" autocomplete="off" value="' + esc(lsGet('e14_nick')) + '"></div>' +
           '<div class="id-field"><label for="id-lpin">Código (4 dígitos)</label>' +
           '<input id="id-lpin" class="pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••"></div>' +
           '<div class="id-err" id="id-err"></div>' +
           '<button class="id-btn" type="button" data-act="link">Vincular</button>' +
-          '<button class="id-btn ghost" type="button" data-act="claim-view">Crear un apodo nuevo</button>';
+          '<button class="id-btn ghost" type="button" data-act="claim-view">Crear un nickname nuevo</button>';
       } else if (idView === 'claim' || !contributor) {
         html =
-          '<div class="id-head"><h2>Crear un apodo</h2>' + close + '</div>' +
-          '<p class="id-sub">Opcional. Elige un apodo público para que tus revisiones se sumen y aparezcas en la tabla de veeduría. No uses tu nombre real ni datos personales.</p>' +
-          '<div class="id-field"><label for="id-nick">Apodo (público)</label>' +
+          '<div class="id-head"><h2>Crear un nickname</h2>' + close + '</div>' +
+          '<p class="id-sub">Opcional. Elige un nickname público para que tus revisiones se sumen y aparezcas en la tabla de veeduría. No uses tu nombre real ni datos personales.</p>' +
+          '<div class="id-field"><label for="id-nick">Nickname (público)</label>' +
           '<input id="id-nick" type="text" maxlength="20" autocomplete="off" placeholder="Ej. AguilaDelValle"></div>' +
           '<div class="id-err" id="id-err"></div>' +
-          '<button class="id-btn" type="button" data-act="claim">Crear mi apodo</button>' +
-          '<button class="id-btn ghost" type="button" data-act="link-view">Ya tengo un apodo — vincular este dispositivo</button>';
+          '<button class="id-btn" type="button" data-act="claim">Crear mi nickname</button>' +
+          '<button class="id-btn ghost" type="button" data-act="link-view">Ya tengo un nickname — vincular este dispositivo</button>';
       } else {
         const c = contributor, pin = lsGet('e14_pin');
         html =
@@ -640,9 +640,9 @@
           '</div>' +
           (pin
             ? '<div class="id-pinbox" id="id-pinwrap" hidden><div class="lab">Tu código</div><div class="pin">' + esc(pin) + '</div>' +
-              '<div class="warn">Para vincular otro dispositivo: abre esta página allí → “Ya tengo un apodo” → escribe tu apodo y este código.</div></div>' +
+              '<div class="warn">Para vincular otro dispositivo: abre esta página allí → “Ya tengo un nickname” → escribe tu nickname y este código.</div></div>' +
               '<button class="id-btn ghost" type="button" data-act="showpin">Ver mi código de recuperación</button>'
-            : '<p class="id-sub">Para vincular otro dispositivo necesitas tu código de 4 dígitos (se mostró al crear el apodo).</p>') +
+            : '<p class="id-sub">Para vincular otro dispositivo necesitas tu código de 4 dígitos (se mostró al crear el nickname).</p>') +
           '<hr class="id-divider"><div class="id-head" style="margin-bottom:8px"><h2 style="font-size:14px">Tabla de veeduría</h2></div>' +
           '<ul class="id-lb" id="id-lb"><li><span class="pos"></span><span class="who" style="color:var(--ink-faint)">Cargando…</span></li></ul>';
       }
@@ -694,19 +694,19 @@
       if (act === 'link') return idDoLink();
     });
 
-    const CLAIM_ERR = { taken: 'Ese apodo ya está tomado. Prueba otro.',
-      invalid: 'Apodo inválido: usa letras, números y espacios.', too_short: 'Muy corto (mínimo 2).',
-      too_long: 'Muy largo (máximo 20).', blocked: 'Ese apodo no está permitido.',
-      already_linked: 'Este dispositivo ya tiene un apodo.', invalid_request: 'No se pudo verificar. Recarga la página.' };
-    const LINK_ERR = { not_found: 'No encontramos ese apodo.', bad_pin: 'Código incorrecto.',
-      device_limit: 'Ese apodo ya tiene 3 dispositivos.', rate_limited: 'Demasiados intentos. Espera un momento.',
+    const CLAIM_ERR = { taken: 'Ese nickname ya está tomado. Prueba otro.',
+      invalid: 'Nickname inválido: usa letras, números y espacios.', too_short: 'Muy corto (mínimo 2).',
+      too_long: 'Muy largo (máximo 20).', blocked: 'Ese nickname no está permitido.',
+      already_linked: 'Este dispositivo ya tiene un nickname.', invalid_request: 'No se pudo verificar. Recarga la página.' };
+    const LINK_ERR = { not_found: 'No encontramos ese nickname.', bad_pin: 'Código incorrecto.',
+      device_limit: 'Ese nickname ya tiene 3 dispositivos.', rate_limited: 'Demasiados intentos. Espera un momento.',
       invalid_request: 'No se pudo verificar. Recarga la página.' };
 
     async function idDoClaim() {
       if (idBusy) return;
       const inp = idsheet.querySelector('#id-nick'), errEl = idsheet.querySelector('#id-err');
       const name = ((inp && inp.value) || '').trim();
-      if (name.length < 2) { if (errEl) errEl.textContent = 'Elige un apodo de al menos 2 caracteres.'; return; }
+      if (name.length < 2) { if (errEl) errEl.textContent = 'Elige un nickname de al menos 2 caracteres.'; return; }
       idBusy = true; const btn = idsheet.querySelector('[data-act="claim"]');
       if (btn) { btn.disabled = true; btn.textContent = 'Creando…'; }
       try {
@@ -721,14 +721,14 @@
           idView = 'pin'; idRender();
         } else if (errEl) { errEl.textContent = CLAIM_ERR[data && data.error] || 'No se pudo crear. Prueba de nuevo.'; }
       } catch (e) { if (errEl) errEl.textContent = 'No se pudo crear. Prueba de nuevo.'; }
-      finally { idBusy = false; const b = idsheet.querySelector('[data-act="claim"]'); if (b) { b.disabled = false; b.textContent = 'Crear mi apodo'; } }
+      finally { idBusy = false; const b = idsheet.querySelector('[data-act="claim"]'); if (b) { b.disabled = false; b.textContent = 'Crear mi nickname'; } }
     }
 
     async function idDoLink() {
       if (idBusy) return;
       const n = idsheet.querySelector('#id-lnick'), p = idsheet.querySelector('#id-lpin'), errEl = idsheet.querySelector('#id-err');
       const name = ((n && n.value) || '').trim(), pin = ((p && p.value) || '').trim();
-      if (name.length < 2 || !/^\d{4}$/.test(pin)) { if (errEl) errEl.textContent = 'Escribe tu apodo y un código de 4 dígitos.'; return; }
+      if (name.length < 2 || !/^\d{4}$/.test(pin)) { if (errEl) errEl.textContent = 'Escribe tu nickname y un código de 4 dígitos.'; return; }
       idBusy = true; const btn = idsheet.querySelector('[data-act="link"]');
       if (btn) { btn.disabled = true; btn.textContent = 'Vinculando…'; }
       try {
@@ -746,7 +746,7 @@
     }
 
     reviewedEl.addEventListener('click', function () { idOpen('auto'); });
-    renderReviewed();   // show the chip immediately (a "Crear apodo" CTA while anonymous)
+    renderReviewed();   // render the chip now (hidden until there's progress; never an up-front ask)
     idFetchMe();        // then reconcile with any server identity already linked to this device
 
     // --- Turnstile session gate ---------------------------------------------------------
