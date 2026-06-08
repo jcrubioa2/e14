@@ -2060,9 +2060,9 @@ def create_app(
 
     @app.get("/votar")
     async def votar(request: Request):
-        # The headline product: an anonymized, mobile-first swipe feed. The page ships a
-        # signed form token (in-app bot check); the deck itself is loaded from /api/feed
-        # and votes go to /api/vote.
+        # The headline product: an anonymized, mobile-first grid reviewer. The page ships a
+        # signed form token (in-app bot check); the deck (one whole acta) is loaded from
+        # /api/acta-deck and votes go to /api/vote-batch.
         sid = request.cookies.get("sid") or uuid.uuid4().hex
         # When Turnstile is on, withhold the form token from the raw page load: the client must
         # solve the challenge and exchange it at /api/session for a token. That gates *starting*
