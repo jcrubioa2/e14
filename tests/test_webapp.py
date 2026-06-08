@@ -1714,5 +1714,7 @@ def test_reportes_renders_public_fixes_log(tmp_path: Path) -> None:
 
     resp = asyncio.run(run())
     assert resp.status_code == 200
-    assert "Registro de correcciones" in resp.text
+    assert "hemos corregido" in resp.text  # the "Qué hemos corregido" heading
     assert TRANSPARENCY_LOG[0]["title"] in resp.text
+    # The status (fixed/ongoing) is shown in plain language, not left ambiguous.
+    assert "Corregido" in resp.text
