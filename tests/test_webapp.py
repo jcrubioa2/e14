@@ -1723,7 +1723,7 @@ def test_reportes_renders_public_fixes_log(tmp_path: Path) -> None:
 def test_admin_coverage_joins_votes_and_index(tmp_path: Path) -> None:
     """/admin/coverage is operator-gated and reports historical review coverage, joining
     per-acta review counts (community/vote backend) with the SQLite acta index (rowid +
-    n_candidates). See _coverage_stats / CommunityStore.review_counts."""
+    n_candidates). See _selector_board / CommunityStore.review_counts."""
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     community_db = tmp_path / "community.sqlite"
@@ -1775,13 +1775,13 @@ def test_admin_coverage_joins_votes_and_index(tmp_path: Path) -> None:
     assert off == 404, "no token configured -> route hidden"
     assert bad == 403, "token configured, wrong key -> forbidden"
     assert ok == 200
-    assert "Cobertura hist" in body
-    assert "50.0%" in body  # 5 of 10 reviewable actas have >= 1 review
+    assert "Cobertura y reparto" in body            # the merged board
+    assert "50.0%" in body  # 5 of 10 reviewable actas have >= 1 review (global coverage)
 
 
 def test_acta_deck_steers_to_least_reviewed(tmp_path: Path) -> None:
     """With coverage weighting on (default), the selector biases toward the LEAST-reviewed
-    actas, and /admin/fairness reports it as steering. See _pick_review_doc / _selector_probe."""
+    actas, and /admin/fairness reports it as steering. See _pick_review_doc / _selector_board."""
     output_dir = tmp_path / "out"
     db = output_dir / "results" / "results.sqlite"
     community_db = tmp_path / "community.sqlite"
