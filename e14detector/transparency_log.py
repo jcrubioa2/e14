@@ -25,6 +25,24 @@ TRANSPARENCY_LOG: list[dict] = [
         "date": "2026-06-08",
         "status": "fixed",
         "tag": "Cobertura",
+        "title": "Recuperamos actas que se habían subido como foto o escaneo no estándar",
+        "body": (
+            "Algunas mesas subieron su acta como foto (a veces de lado o con fondo) o en un "
+            "formato de escaneo distinto, y nuestro lector automático no lograba recortar bien "
+            "las casillas. Vimos que la Registraduría había vuelto a publicar muchas de esas "
+            "actas como un escaneo limpio bajo el mismo enlace, así que descargamos de nuevo las "
+            "versiones frescas y recuperamos los números de la gran mayoría, que ya vuelven a "
+            "estar disponibles para revisión. Las pocas que siguen siendo solo una foto difícil "
+            "de leer se muestran igual, pero con la votación desactivada y explicadas en "
+            "Transparencia. Guardamos además una copia de las versiones anteriores."
+        ),
+        "link": "https://github.com/jcrubioa2/e14/pull/47",
+        "link_label": "Ver el cambio",
+    },
+    {
+        "date": "2026-06-08",
+        "status": "fixed",
+        "tag": "Cobertura",
         "title": "Priorizamos las actas que menos se han revisado",
         "body": (
             "Repartir cada acta por igual era justo, pero dejaba a la gran mayoría sin revisar "

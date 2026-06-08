@@ -54,6 +54,11 @@
          line-height:1.05; letter-spacing:-.012em; }
     .acta-meta { color:var(--ink-soft); font-size:13px; line-height:1.6; margin-top:7px; }
     .acta-meta a { font-weight:700; }
+    .quarantine-note { margin:0 0 18px; padding:14px 16px; border:1px solid var(--red-line);
+      background:var(--red-tint); border-radius:var(--r); color:var(--red-deep); font-size:14px;
+      line-height:1.55; }
+    .quarantine-note b { display:block; margin-bottom:4px; font-size:15px; }
+    .quarantine-note span { color:var(--ink-soft); }
 
     /* Share affordance: this app exists to spread, and an installed PWA hides the browser's own
        share button — so give the acta its own. Uses the native share sheet (WhatsApp/Telegram/…)
@@ -136,6 +141,15 @@
     </div>
   </header>
   <main>
+    {% if quarantined %}
+    <div class="quarantine-note" role="note">
+      <b>No fue posible escanear esta acta autom&aacute;ticamente.</b>
+      <span>El formato del escaneo o la foto de esta acta no es el est&aacute;ndar, as&iacute; que
+      nuestro sistema no pudo recortar las casillas de forma confiable. Los recortes que ves abajo
+      pueden estar incompletos o ilegibles, por eso la votaci&oacute;n comunitaria est&aacute;
+      desactivada para esta acta. Te invitamos a revisar el documento oficial de la Registradur&iacute;a.</span>
+    </div>
+    {% endif %}
     {% if doc.official_lookup_url %}
     <a class="official-cta" href="{{ doc.official_lookup_url }}" target="_blank" rel="noopener">
       <span class="official-ic" aria-hidden="true">

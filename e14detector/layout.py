@@ -292,6 +292,49 @@ LAYOUT: dict[str, RoundLayout] = {
 }
 
 
+# --- Alternate scan-geometry anchors -----------------------------------------
+# Most actas are the canonical narrow scan (aspect ~0.33) the coordinates above are
+# calibrated for. A minority are clean, axis-aligned re-scans at a WIDER page aspect where the
+# SAME printed form sits inside a sub-rectangle of the page (margins around it). For those we
+# don't re-measure every cell: we anchor the existing normalized coordinates to the form's
+# sub-rectangle (the form's position is fixed within each geometry, so one box per format
+# suffices). Calibrated as the median ink bounding box over a sample of each cluster; see
+# scripts/acta_format_census.py. Photo captures (rotated/perspective, ~9:16) are NOT covered
+# here — they get no anchor and stay quarantined.
+FORMAT_ANCHORS: dict[str, NormalizedBox] = {
+    # y fitted (least-squares) against the printed candidate-cell boundaries detected in the
+    # votación column over a sample of each cluster, so the r1 row bands land on the digits;
+    # x from the form's ink extent. See scripts/calibrate_format_anchors.py.
+    "wide": NormalizedBox(0.2395, -0.0341, 0.7544, 0.9666),   # ~1700x2800, aspect ~0.61
+    "other": NormalizedBox(0.2403, -0.0140, 0.7655, 1.1440),  # ~1654x2338, aspect ~0.71
+}
+
+
+def geometry_anchor(width: int, height: int) -> NormalizedBox | None:
+    """Form-position anchor for a page's scan geometry, or None for the canonical/uncovered ones.
+
+    None means "use the page directly" — both the normal scan (anchor == full page) and the
+    photo/long-tail geometries we don't auto-crop (those are quarantined elsewhere). Bands are
+    deliberately narrow so the 9:16 (~0.5625) photo cluster is excluded.
+    """
+    ar = (width / height) if height else 0.0
+    if 0.575 <= ar < 0.645:
+        return FORMAT_ANCHORS["wide"]
+    if 0.645 <= ar < 0.745:
+        return FORMAT_ANCHORS["other"]
+    return None
+
+
+def _anchor_box(box: NormalizedBox, anchor: NormalizedBox) -> NormalizedBox:
+    """Map a form-relative normalized box into page-normalized coords via the anchor rect."""
+    aw = anchor.x1 - anchor.x0
+    ah = anchor.y1 - anchor.y0
+    return NormalizedBox(
+        anchor.x0 + box.x0 * aw, anchor.y0 + box.y0 * ah,
+        anchor.x0 + box.x1 * aw, anchor.y0 + box.y1 * ah,
+    )
+
+
 def _resolve_round(round: str | None) -> str:
     return (round or config.ELECTION_ROUND or "r1").strip().lower()
 
@@ -331,14 +374,19 @@ def vote_column_box(page_number: int, width: int, height: int, round: str | None
 
 
 def field_layouts_for_page(
-    page_number: int, width: int, height: int, round: str | None = None
+    page_number: int, width: int, height: int, round: str | None = None,
+    anchor: NormalizedBox | None = None,
 ) -> list[FieldLayout]:
+    """Pixel field/slot boxes for a page. ``anchor`` (an alternate scan geometry's form
+    rectangle, from ``geometry_anchor``) remaps the coordinates into the form's sub-rectangle;
+    None keeps the canonical full-page coords (byte-identical to the calibrated normal path)."""
     r = _resolve_round(round)
     lay = layout_for(r)
     _require_ready(lay, r)
     layouts: list[FieldLayout] = []
     for row in lay.rows_by_page.get(page_number, ()):
-        field_box = row.box.to_pixels(width, height)
+        box = _anchor_box(row.box, anchor) if anchor is not None else row.box
+        field_box = box.to_pixels(width, height)
         slots = tuple(
             slot.inset(lay.slot_inset_x, lay.slot_inset_y)
             for slot in field_box.split_columns(lay.n_slots)

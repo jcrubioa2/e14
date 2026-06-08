@@ -192,6 +192,31 @@
       <a href="/buscar">el buscador</a>.
     </div>
     {% endif %}
+
+    {% if quarantined_count %}
+    <h2>Actas que no pudimos leer automáticamente</h2>
+    <div class="note">
+      Algunas mesas subieron su acta como <b>foto o en un formato de escaneo no estándar</b>
+      (por ejemplo, fotografiada de lado o con fondo). Nuestro lector automático no logra recortar
+      de forma confiable las casillas de votación de esas imágenes, así que
+      <b>{{ quarantined_count }}</b> acta{{ 's' if quarantined_count != 1 else '' }} se muestra{{ 'n' if quarantined_count != 1 else '' }}
+      en la plataforma <b>pero con la votación comunitaria desactivada</b>: preferimos no pedirte que
+      revises números que no pudimos extraer bien. Puedes verlas igual y compararlas con el documento
+      oficial de la Registraduría. No las ocultamos: aquí van algunos ejemplos.
+    </div>
+    {% if quarantined_sample %}
+    <div class="backlog" style="margin-top:12px;">
+      <table>
+        <thead><tr><th>Acta</th><th>Ubicación</th></tr></thead>
+        <tbody>
+          {% for q in quarantined_sample %}
+          <tr><td><a href="/acta/{{ q.document_id }}">ver acta</a></td><td>{{ q.loc }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% endif %}
   </main>
 
   {% include "_footer.html" %}

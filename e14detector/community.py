@@ -286,6 +286,30 @@ class CommunityStore:
             self.conn.commit()
             return cur.rowcount > 0
 
+    def delete_document(self, document_id: str) -> dict[str, int]:
+        """Erase all community state for one acta — votes on it are meaningless.
+
+        Used when an acta's crops change or it is quarantined (its existing crops were
+        unreadable, so any flags/appeals on them must not survive). Deletes flags, appeals,
+        adjudication ``field_state`` and the ``cid_index`` rows. Field keys are
+        ``document_id:page:row:section``; the LIKE escapes ``_``/``%`` (document ids contain
+        ``_``) so one acta never erases another. Returns per-table delete counts.
+        """
+        pattern = document_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ":%"
+        out: dict[str, int] = {}
+        with self._lock:
+            for tbl in ("flags", "appeals", "field_state"):
+                cur = self.conn.execute(
+                    f"DELETE FROM {tbl} WHERE field_key LIKE ? ESCAPE '\\'", (pattern,)
+                )
+                out[tbl] = cur.rowcount
+            cur = self.conn.execute(
+                "DELETE FROM cid_index WHERE document_id=?", (document_id,)
+            )
+            out["cid_index"] = cur.rowcount
+            self.conn.commit()
+        return out
+
     def _distinct_appeals(self, field_key: str) -> int:
         return self.conn.execute(
             "SELECT COUNT(DISTINCT voter_token) c FROM appeals WHERE field_key=?",

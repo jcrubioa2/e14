@@ -116,6 +116,40 @@ def ensure_n_candidates(db_path: Path) -> bool:
         con.close()
 
 
+def ensure_quarantine_column(db_path: Path) -> bool:
+    """Guarantee the served ``documents`` table carries the ``quarantined`` column.
+
+    Quarantined actas (non-standard scan geometry; unreliable crops) are pulled from the
+    voting feed and reject votes (see ``_quarantined_docs``). A snapshot built before the
+    column existed would 500 those reads, so add it ONCE at load (default 0). Idempotent and
+    best-effort: a read-only serve volume just logs and returns False. The flag itself is set
+    by ``scripts/quarantine_nonnormal.py`` on the build DB before publish, so it ships in the
+    snapshot; this healer only backfills the column on older DBs.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(db_path, timeout=60.0)
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_quarantine_column: open failed: {exc}", flush=True)
+        return False
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(documents)")}
+        if not cols:
+            return False
+        if "quarantined" in cols:
+            return True
+        con.execute("ALTER TABLE documents ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0")
+        con.commit()
+        print(f"ensure_quarantine_column: added quarantined column on {db_path}", flush=True)
+        return True
+    except sqlite3.Error as exc:  # noqa: BLE001
+        print(f"ensure_quarantine_column: failed (serving read-only?): {exc}", flush=True)
+        return False
+    finally:
+        con.close()
+
+
 def ensure_crop_paths(db_path: Path) -> bool:
     """Self-heal ``candidate`` rows whose ``raw_crop_path`` was dropped by a DB rebuild.
 
@@ -1132,6 +1166,8 @@ def create_app(
     # Backfill the precomputed n_candidates column if this snapshot lacks it, so /browse never
     # 500s on `no such column`. No-op for an up-to-date DB; runs again after each db-sync swap.
     ensure_n_candidates(results_db)
+    # Backfill the quarantined column on older snapshots (default 0), so feed/vote reads never 500.
+    ensure_quarantine_column(results_db)
     # ...then the /browse indexes (raw snapshots ship without them -> full scans/sorts per page).
     ensure_browse_indexes(results_db)
     # Code -> human-name lookup, loaded once into memory. A snapshot that ships codes-only gets
@@ -1264,7 +1300,9 @@ def create_app(
                     # Heal dropped crop paths first so the n_candidates backfill counts them.
                     await asyncio.to_thread(ensure_crop_paths, results_db)
                     await asyncio.to_thread(ensure_n_candidates, results_db)
+                    await asyncio.to_thread(ensure_quarantine_column, results_db)
                     await asyncio.to_thread(ensure_browse_indexes, results_db)
+                    _quarantined_docs.cache_clear()
                 return sha
 
             async def _check_stale() -> None:
@@ -1390,6 +1428,26 @@ def create_app(
         if not results_db.exists():
             raise HTTPException(status_code=500, detail=f"results DB not found: {results_db}")
         return _connect(results_db)
+
+    @functools.lru_cache(maxsize=1)
+    def _quarantined_docs() -> frozenset[str]:
+        """Doc ids whose scan geometry isn't the standard form (unreliable crops).
+
+        Small (~2k of 122k); loaded once and reused as an in-memory filter on the hot voting
+        paths (the feed samples ``vote_fields`` directly, so a per-row SQL join would be a 1.5M-row
+        scan — a set membership check is free). Cleared on every db-sync swap (see ``_pull``).
+        """
+        try:
+            with conn() as db:
+                cols = {r[1] for r in db.execute("PRAGMA table_info(documents)")}
+                if "quarantined" not in cols:
+                    return frozenset()
+                rows = db.execute(
+                    "SELECT document_id FROM documents WHERE quarantined=1"
+                ).fetchall()
+            return frozenset(r["document_id"] for r in rows)
+        except (sqlite3.Error, HTTPException):
+            return frozenset()
 
     def cid_for(field_key: str, crop_rel: str, document_id: str) -> str:
         """Anonymized public id for a crop, registered so /c/{cid} can resolve it later.
@@ -2171,6 +2229,18 @@ def create_app(
         with conn() as db:
             served_total = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
         public = build_public_counts(recon, served_total)
+        # Actas whose scan geometry we couldn't auto-read (photos / non-standard formats): shown
+        # in the platform but not votable. Surfaced here for transparency, with clickable examples.
+        quar = sorted(_quarantined_docs())
+        quarantined_count = len(quar)
+        quarantined_sample = []
+        for did in quar[:12]:
+            p = did.split("_")  # E14 PRE dep muni zona puesto mesa delegados
+            if len(p) >= 7:
+                quarantined_sample.append({
+                    "document_id": did,
+                    "loc": f"depto {p[2]} · mun {p[3]} · zona {p[4]} · puesto {p[5]} · mesa {p[6]}",
+                })
         # Parse the missing-key sample into a readable list (only shown when we have a real ingest
         # backlog — mesas with a published acta we haven't incorporated yet).
         backlog = []
@@ -2185,6 +2255,8 @@ def create_app(
             {
                 "public": public,
                 "backlog": backlog,
+                "quarantined_count": quarantined_count,
+                "quarantined_sample": quarantined_sample,
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
                 "active": "transparencia",
@@ -2287,6 +2359,7 @@ def create_app(
             {
                 "doc": doc,
                 "crops": crops,
+                "quarantined": document_id in _quarantined_docs(),
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
                 "active": "buscar",
@@ -2369,6 +2442,7 @@ def create_app(
         cards. Uniform over the id space — plenty random for an anonymized deck.
         """
         exclude = exclude or set()
+        quar = _quarantined_docs()  # actas with unreliable crops — never served for voting
         out: list[dict] = []
         reg: list[tuple[str, str, str, str]] = []
         seen: set[str] = set(exclude)
@@ -2386,6 +2460,8 @@ def create_app(
                     ids,
                 ).fetchall()
                 for r in rows:
+                    if r["document_id"] in quar:
+                        continue
                     fkey = field_key_of(
                         r["document_id"], r["page_number"], r["row_number"], r["section"]
                     )
@@ -2438,7 +2514,9 @@ def create_app(
                 f"AND n_candidates > 0",
                 rowids,
             ).fetchall()
-            cands = [r for r in rows if r["document_id"] not in exclude_docs]
+            quar = _quarantined_docs()  # never offer a quarantined acta for voting
+            cands = [r for r in rows
+                     if r["document_id"] not in exclude_docs and r["document_id"] not in quar]
             if not cands:
                 continue
             if counts:
@@ -2779,6 +2857,10 @@ def create_app(
         row = await asyncio.to_thread(resolve_cid_cached, cid)  # cache hit => no Data API call
         if not row:
             raise HTTPException(status_code=404, detail="unknown crop")
+        if row["document_id"] in _quarantined_docs():
+            # The crop is unreadable (non-standard scan); voting is disabled for it. A stale cid
+            # from before quarantine lands here — accept-and-drop so the feed just advances.
+            return _flag_response({"ok": True, "good": 0, "strange": 0}, 200, sid, new_sid)
         field_key = row["field_key"]
         if vote_publisher is not None:
             # Durable path: enqueue (never lost) and return an OPTIMISTIC tally
@@ -2852,6 +2934,8 @@ def create_app(
             row = await asyncio.to_thread(resolve_cid_cached, cid)
             if not row:
                 return False
+            if row["document_id"] in _quarantined_docs():
+                return False  # unreadable crop, voting disabled — drop a stale cid silently
             field_key = row["field_key"]
             if vote_publisher is not None:
                 try:

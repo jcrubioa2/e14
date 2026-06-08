@@ -64,6 +64,37 @@ def test_counts_among_batches_both_directions(tmp_path: Path) -> None:
     store.close()
 
 
+def test_delete_document_is_scoped_to_one_acta(tmp_path: Path) -> None:
+    """delete_document erases only the target acta's votes/state/cids; siblings survive.
+
+    Document ids contain ``_`` (a LIKE wildcard); the deletion must not bleed into another
+    acta that differs only where an underscore sits.
+    """
+    store = CommunityStore(tmp_path / "c.sqlite")
+    bad = "E14_PRE_01_160_000_00_014_delegados"
+    keep = "E14_PRE_01_160_000_00_015_delegados"  # sibling, must be untouched
+    for doc in (bad, keep):
+        store.record_flag(field_key_of(doc, 1, 1, "votacion"), "voter-a")
+        store.record_appeal(field_key_of(doc, 2, 8, "votacion"), "voter-b")
+        store.record_verdict(field_key_of(doc, 1, 1, "votacion"), strange=True, votes_at_call=5)
+        store.register_cid(f"cid-{doc}", field_key_of(doc, 1, 1, "votacion"), "crops/x.png", doc)
+
+    counts = store.delete_document(bad)
+    assert counts["flags"] == 1 and counts["appeals"] == 1
+    assert counts["field_state"] == 1 and counts["cid_index"] == 1
+
+    # bad acta fully erased
+    assert store.distinct_votes(field_key_of(bad, 1, 1, "votacion")) == 0
+    assert store.distinct_appeals(field_key_of(bad, 2, 8, "votacion")) == 0
+    assert store.state_of(field_key_of(bad, 1, 1, "votacion")) is None
+    assert store.resolve_cid(f"cid-{bad}") is None
+    # sibling untouched
+    assert store.distinct_votes(field_key_of(keep, 1, 1, "votacion")) == 1
+    assert store.published_among([field_key_of(keep, 1, 1, "votacion")])
+    assert store.resolve_cid(f"cid-{keep}") is not None
+    store.close()
+
+
 def test_cid_register_and_resolve(tmp_path: Path) -> None:
     store = CommunityStore(tmp_path / "c.sqlite")
     assert store.resolve_cid("nope") is None
