@@ -21,6 +21,7 @@
     .verdict.pass { background:#eaf6ec; border-color:#aedcb8; color:var(--ok); }
     .verdict.info { background:#eef4fb; border-color:#bcd6f5; color:#0a4a91; }
     .verdict.warn { background:#fff8e6; border-color:#e6c34a; color:var(--warn); }
+    .verdict.bad { background:#fdeceb; border-color:var(--bad); color:var(--bad); }
     .verdict b { font-size: 16px; }
     .stats { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
     .card { border:1px solid var(--line); border-radius:8px; padding:8px 14px; font-size:12px; color:var(--muted); min-width:118px; }
@@ -49,10 +50,11 @@
     <p class="lede">
       Muestra en vivo de hacia dónde envía revisiones la baraja (<code>/api/acta-deck</code>):
       se toman {{ "{:,}".format(samples) }} elecciones del selector real y se agrupan por banda
-      de rowid (el <b>mismo eje</b> que “Cobertura histórica”). Con la ponderación por cobertura
-      activada, el reparto debe correr <b>al revés de la cobertura</b> — más revisiones nuevas a
-      las bandas menos cubiertas — para cerrar el rezago. Guiado solo por cuántas veces se revisó
-      cada acta, nunca por su contenido. Solo lectura.
+      de rowid (el <b>mismo eje</b> que “Cobertura histórica”). Mientras la cobertura global sea
+      baja, casi todas las actas pesan igual, así que el reparto debe verse <b>casi plano</b> (una
+      prueba χ² de sanidad: un pico en pocas bandas sería una falla) y apenas inclinado <b>al revés
+      de la cobertura</b> — algo más de revisiones a las bandas menos cubiertas — para cerrar el
+      rezago. Guiado solo por cuántas veces se revisó cada acta, nunca por su contenido. Solo lectura.
     </p>
     <nav class="adminnav" aria-label="Secciones del panel">
       <a href="/admin/poll?key={{ key }}">Estado &amp; publicaci&oacute;n</a>
@@ -61,37 +63,47 @@
     </nav>
   </header>
   <main>
-    {% if verdict == 'steering' %}
+    {% if verdict == 'malfunction' %}
+    <div class="verdict bad">
+      <b>FALLA — reparto concentrado ✗</b><br>
+      El selector amontonó las revisiones en pocas bandas (χ² reducido = {{ reduced_chi2 }}, debería
+      rondar 1). Eso no es la dirección suave esperada: es un atasco como el del error original.
+      Revísalo.
+    </div>
+    {% elif verdict == 'steering' %}
     <div class="verdict pass">
-      <b>DIRIGIENDO A LAS MENOS REVISADAS ✓</b><br>
-      El reparto corre al revés de la cobertura (correlación r = {{ steer_r }}); las bandas menos
-      cubiertas reciben más revisiones nuevas. El <b>{{ least_half_capture }}%</b> de las muestras
-      cae en la mitad menos cubierta del corpus. El rezago histórico se está cerrando.
+      <b>SANO — dirigiendo a las menos revisadas ✓</b><br>
+      {% if flat %}El reparto es <b>casi plano</b> (χ² reducido = {{ reduced_chi2 }}){% else %}El
+      reparto se inclina con fuerza hacia el rezago (χ² reducido = {{ reduced_chi2 }}){% endif %}
+      y corre al revés de la cobertura (r = {{ steer_r }}): las bandas menos cubiertas reciben más
+      revisiones nuevas — el <b>{{ least_half_capture }}%</b> cae en la mitad menos cubierta. El
+      rezago se cierra.
     </div>
     {% elif verdict == 'baseline' %}
     <div class="verdict pass">
-      <b>UNIFORME — sin rezago que corregir aún ✓</b><br>
-      Todavía no hay diferencias de cobertura entre bandas (spread {{ cov_spread }}%), así que la
-      ponderación reparte por igual. En cuanto se acumule historial desigual, dirigirá hacia las
-      menos revisadas.
+      <b>SANO — uniforme, sin rezago que corregir aún ✓</b><br>
+      El reparto es plano (χ² reducido = {{ reduced_chi2 }}) y todavía no hay diferencias de
+      cobertura entre bandas (spread {{ cov_spread }}%). En cuanto se acumule historial desigual,
+      dirigirá hacia las menos revisadas.
     </div>
     {% elif verdict == 'uniform' %}
     <div class="verdict info">
       <b>UNIFORME — ponderación por cobertura desactivada</b><br>
-      El selector reparte por igual entre todas las actas (<code>ACTA_DECK_COVERAGE_WEIGHTED=0</code>).
-      Activa la ponderación para dirigir las revisiones hacia el rezago.
+      Reparto plano (χ² reducido = {{ reduced_chi2 }}); el selector reparte por igual
+      (<code>ACTA_DECK_COVERAGE_WEIGHTED=0</code>). Actívala para dirigir las revisiones al rezago.
     </div>
     {% else %}
     <div class="verdict warn">
       <b>DIRECCIÓN DÉBIL</b><br>
-      Se esperaba mayor concentración en las bandas menos cubiertas (r = {{ steer_r }},
-      {{ least_half_capture }}% a la mitad menos cubierta). Revisa la ponderación.
+      El reparto es plano (χ² reducido = {{ reduced_chi2 }}) pero se esperaba más inclinación hacia
+      las menos cubiertas (r = {{ steer_r }}, {{ least_half_capture }}% a la mitad menos cubierta).
     </div>
     {% endif %}
 
     <div class="stats">
       <div class="card">Modo<b>{{ 'Ponderado' if mode == 'weighted' else 'Uniforme' }}</b></div>
       <div class="card">Muestras<b class="val">{{ "{:,}".format(samples) }}</b></div>
+      <div class="card">Planitud (χ² red., ≈1 sano)<b class="val">{{ reduced_chi2 }}</b></div>
       <div class="card">Cobertura global<b class="val">{{ "%.1f"|format(overall_coverage) }}%</b></div>
       <div class="card">Correlación cob.↔reparto<b class="val">{{ steer_r if steer_r is not none else '—' }}</b></div>
       <div class="card">% a la mitad menos cubierta<b class="val">{{ least_half_capture }}%</b></div>
