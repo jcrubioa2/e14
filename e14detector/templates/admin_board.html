@@ -106,12 +106,17 @@
     <div class="stats">
       <div class="card accent">Cobertura global<b class="val">{{ "%.1f"|format(overall_coverage) }}%</b></div>
       <div class="card">Actas revisables<b class="val">{{ "{:,}".format(total_eligible) }}</b></div>
-      <div class="card">Revisadas (&ge;1)<b class="val">{{ "{:,}".format(total_reviewed) }}</b></div>
+      <div class="card">Actas revisadas<b class="val">{{ "{:,}".format(total_reviewed) }}</b></div>
       <div class="card warn">Sin revisar<b class="val">{{ "{:,}".format(never_reviewed) }}</b></div>
-      <div class="card">Revisiones totales<b class="val">{{ "{:,}".format(total_reviews) }}</b></div>
+      <div class="card">Revisiones (total)<b class="val">{{ "{:,}".format(total_reviews) }}</b></div>
       <div class="card">Prom. por acta revisada<b class="val">{{ "%.2f"|format(avg_reviews_reviewed) }}</b></div>
       <div class="card">Desigualdad (Gini)<b>{% set g = gini %}<span class="gini {{ 'lo' if g < 0.3 else ('mid' if g < 0.5 else 'hi') }}">{{ "%.3f"|format(g) }}</span></b></div>
     </div>
+    <p class="legend" style="margin-left:0">
+      <b>Actas revisadas</b> cuenta cu&aacute;ntas actas distintas se han visto al menos una vez (la base de la
+      cobertura). <b>Revisiones (total)</b> cuenta todas las revisiones hechas: una misma acta revisada por 3
+      personas suma 3 aqu&iacute; pero 1 en &laquo;actas revisadas&raquo;. Su cociente es el promedio por acta revisada.
+    </p>
 
     <h2>Reparto del selector (morado)</h2>
     <div class="stats">
