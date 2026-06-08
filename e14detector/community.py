@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import sqlite3
 import threading
 import time
@@ -86,7 +87,44 @@ CREATE TABLE IF NOT EXISTS cid_index (
     crop_rel TEXT NOT NULL,
     document_id TEXT NOT NULL
 );
+
+-- Optional named contributor identity (the swipe feed is anonymous by default; a
+-- contributor may CHOOSE to claim a public nickname so their reviewed-mesa count
+-- accumulates and ranks on the leaderboard). This is deliberately account-LITE:
+--   * ``nickname`` is the durable identity (globally unique, normalized key); the
+--     ``sid`` cookie is just a per-device pointer to it (contributor_devices).
+--   * ``pin`` is a server-assigned 4-digit recovery code, stored readable so any
+--     already-linked device can reveal it. It is NOT a real password: it only
+--     re-links a NEW device to an existing nickname, capped at DEVICE_LIMIT
+--     devices, and the link endpoint is hard rate-limited (the public nickname is
+--     half a credential, so the 4-digit half must not be brute-forceable online).
+--   * ``reviews`` is the contributor's distinct-mesa count; contributor_reviews
+--     dedups it so re-reviewing the same mesa never inflates the leaderboard.
+CREATE TABLE IF NOT EXISTS contributors (
+    nickname     TEXT PRIMARY KEY,          -- normalized (trim/collapse/lower) lookup key
+    display_name TEXT NOT NULL,             -- as-entered casing, shown on the leaderboard
+    pin          TEXT NOT NULL,             -- 4-digit, revealable to a linked device
+    reviews      INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contributor_devices (
+    sid        TEXT PRIMARY KEY,            -- one device -> at most one nickname
+    nickname   TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contrib_dev_nick ON contributor_devices(nickname);
+CREATE TABLE IF NOT EXISTS contributor_reviews (
+    nickname TEXT NOT NULL,
+    mesa_id  TEXT NOT NULL,
+    PRIMARY KEY (nickname, mesa_id)         -- one credit per (contributor, mesa)
+);
 """
+
+# How many devices may link to a single nickname. Small + fixed: a nickname is a
+# handful of trusted devices, never something that hops freely around (link, never
+# "move"), which bounds both abuse and the value of guessing a PIN.
+DEVICE_LIMIT = 3
 
 
 def _now_iso() -> str:
@@ -123,6 +161,56 @@ def voter_token(salt: str, client_ip: str, day: str | None = None) -> str:
     day = day or date.today().isoformat()
     raw = f"{salt}|{day}|{client_ip}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+# A tiny profanity stoplist for public nicknames (substring match on the normalized
+# key). Not exhaustive — just enough to keep the obvious slurs off a public board;
+# the leaderboard is opt-in and operator-moderated for the long tail.
+_NICK_BLOCKLIST = (
+    "puta", "puto", "mierda", "marica", "hijueputa", "gonorrea", "malparid",
+    "verga", "coño", "nazi", "hitler", "fuck", "shit", "nigger",
+)
+# Allowed display characters: letters (incl. Spanish accents/ñ), digits, spaces and
+# a small set of separators. Everything else is rejected so a nickname can't smuggle
+# markup/control chars onto the public board.
+_NICK_ALLOWED = re.compile(r"^[0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ ._\-]+$")
+
+
+def normalize_nickname(display: str) -> str:
+    """Canonical lookup key for a nickname: trimmed, internal whitespace collapsed,
+    lower-cased. Uniqueness and all lookups are on this key (so 'Juan  P' and 'juan p'
+    are the same identity); the original casing is preserved separately for display."""
+    return " ".join((display or "").strip().split()).lower()
+
+
+def clean_nickname(display: str) -> tuple[str, str, str]:
+    """Validate + canonicalize a requested nickname.
+
+    Returns ``(display_clean, key, error)``: ``display_clean`` is the as-entered name
+    with surrounding/duplicate whitespace collapsed (shown on the board), ``key`` is
+    its :func:`normalize_nickname` form (the unique identity), and ``error`` is ''
+    on success or a short machine code ('invalid' | 'too_short' | 'too_long' |
+    'blocked') the API surfaces to the client.
+    """
+    disp = " ".join((display or "").strip().split())
+    key = disp.lower()
+    if not disp or not _NICK_ALLOWED.match(disp):
+        return "", "", "invalid"
+    if len(disp) < 2:
+        return "", "", "too_short"
+    if len(disp) > 20:
+        return "", "", "too_long"
+    if any(bad in key for bad in _NICK_BLOCKLIST):
+        return "", "", "blocked"
+    return disp, key, ""
+
+
+def gen_pin() -> str:
+    """A fresh 4-digit recovery code (server-assigned), e.g. ``'0042'``. Uniform over
+    0000-9999 via the CSPRNG — no human-picked 1234/0000 clumping."""
+    import secrets
+
+    return f"{secrets.randbelow(10000):04d}"
 
 
 def issue_form_token(secret: str, sid: str, ip: str = "", now: float | None = None) -> str:
@@ -663,6 +751,140 @@ class CommunityStore:
             ).fetchall()
         return [{"field_key": r["field_key"], "good": r["good"] or 0,
                  "strange": r["strange"] or 0} for r in rows]
+
+    # -- optional named contributor identity --------------------------------
+    def contributor_me(self, sid: str) -> dict | None:
+        """The identity (if any) this device is linked to, with its live rank.
+
+        Returns ``{display_name, reviews, devices, pin, rank}`` or ``None`` when the
+        device is anonymous. ``pin`` is revealed here because possession of the ``sid``
+        cookie already proves the device is one of the nickname's linked devices."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT c.nickname, c.display_name, c.pin, c.reviews "
+                "FROM contributor_devices d JOIN contributors c ON c.nickname=d.nickname "
+                "WHERE d.sid=?",
+                (sid,),
+            ).fetchone()
+            if not row:
+                return None
+            devices = self.conn.execute(
+                "SELECT COUNT(*) n FROM contributor_devices WHERE nickname=?", (row["nickname"],)
+            ).fetchone()["n"]
+            rank = self.conn.execute(
+                "SELECT COUNT(*)+1 r FROM contributors WHERE reviews > ?", (row["reviews"],)
+            ).fetchone()["r"]
+        return {"display_name": row["display_name"], "reviews": row["reviews"],
+                "devices": devices, "pin": row["pin"], "rank": rank}
+
+    def claim_contributor(self, display_name: str, sid: str) -> dict:
+        """Claim a brand-new unique nickname for this device and assign its PIN.
+
+        ``{ok:True, display_name, pin, reviews, devices}`` on success; otherwise
+        ``{ok:False, error}`` with 'invalid'/'too_short'/'too_long'/'blocked' (bad
+        name), 'taken' (name exists) or 'already_linked' (this device already has an
+        identity — it must use that one, not silently grab a second)."""
+        disp, key, err = clean_nickname(display_name)
+        if err:
+            return {"ok": False, "error": err}
+        with self._lock:
+            if self.conn.execute(
+                "SELECT 1 FROM contributor_devices WHERE sid=?", (sid,)
+            ).fetchone():
+                return {"ok": False, "error": "already_linked"}
+            pin = gen_pin()
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO contributors "
+                "(nickname, display_name, pin, reviews, created_at, updated_at) "
+                "VALUES (?,?,?,0,?,?)",
+                (key, disp, pin, _now_iso(), _now_iso()),
+            )
+            if cur.rowcount == 0:
+                return {"ok": False, "error": "taken"}
+            self.conn.execute(
+                "INSERT OR REPLACE INTO contributor_devices (sid, nickname, created_at) "
+                "VALUES (?,?,?)",
+                (sid, key, _now_iso()),
+            )
+            self.conn.commit()
+        return {"ok": True, "display_name": disp, "pin": pin, "reviews": 0, "devices": 1}
+
+    def link_contributor(self, display_name: str, pin: str, sid: str) -> dict:
+        """Link THIS device to an existing nickname via its PIN (recovery / 2nd device).
+
+        Adds a device — it never moves the nickname away from the others — and is
+        capped at ``DEVICE_LIMIT``. ``{ok:True, display_name, reviews, devices, pin}``
+        on success (the PIN is returned so the now-trusted device can show it later);
+        otherwise ``{ok:False, error}`` with 'not_found' | 'bad_pin' | 'device_limit'."""
+        key = normalize_nickname(display_name)
+        with self._lock:
+            c = self.conn.execute(
+                "SELECT display_name, pin, reviews FROM contributors WHERE nickname=?", (key,)
+            ).fetchone()
+            if not c:
+                return {"ok": False, "error": "not_found"}
+            if not hmac.compare_digest(str(pin or ""), c["pin"]):
+                return {"ok": False, "error": "bad_pin"}
+            already = self.conn.execute(
+                "SELECT 1 FROM contributor_devices WHERE sid=? AND nickname=?", (sid, key)
+            ).fetchone()
+            if not already:
+                others = self.conn.execute(
+                    "SELECT COUNT(*) n FROM contributor_devices WHERE nickname=? AND sid<>?",
+                    (key, sid),
+                ).fetchone()["n"]
+                if others >= DEVICE_LIMIT:
+                    return {"ok": False, "error": "device_limit"}
+            self.conn.execute(
+                "INSERT OR REPLACE INTO contributor_devices (sid, nickname, created_at) "
+                "VALUES (?,?,?)",
+                (sid, key, _now_iso()),
+            )
+            devices = self.conn.execute(
+                "SELECT COUNT(*) n FROM contributor_devices WHERE nickname=?", (key,)
+            ).fetchone()["n"]
+            self.conn.commit()
+        return {"ok": True, "display_name": c["display_name"], "reviews": c["reviews"],
+                "devices": devices, "pin": c["pin"]}
+
+    def credit_review(self, sid: str, mesa_id: str) -> int | None:
+        """Credit this device's contributor (if any) for reviewing ``mesa_id``.
+
+        Idempotent per (contributor, mesa): a repeat review of the same mesa is a
+        no-op. Returns the contributor's new review total, or ``None`` if the device
+        is anonymous (nothing to credit)."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT nickname FROM contributor_devices WHERE sid=?", (sid,)
+            ).fetchone()
+            if not row:
+                return None
+            nick = row["nickname"]
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO contributor_reviews (nickname, mesa_id) VALUES (?,?)",
+                (nick, mesa_id),
+            )
+            if cur.rowcount > 0:
+                self.conn.execute(
+                    "UPDATE contributors SET reviews=reviews+1, updated_at=? WHERE nickname=?",
+                    (_now_iso(), nick),
+                )
+            total = self.conn.execute(
+                "SELECT reviews FROM contributors WHERE nickname=?", (nick,)
+            ).fetchone()["reviews"]
+            self.conn.commit()
+        return total
+
+    def leaderboard(self, limit: int) -> list[dict]:
+        """Top contributors by reviewed-mesa count: ``[{display_name, reviews}]``.
+        Ties break by who reached the count first (earliest ``created_at``)."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT display_name, reviews FROM contributors "
+                "WHERE reviews > 0 ORDER BY reviews DESC, created_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{"display_name": r["display_name"], "reviews": r["reviews"]} for r in rows]
 
 
 def make_store(sqlite_path: str | Path | None = None):

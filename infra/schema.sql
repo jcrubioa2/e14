@@ -64,3 +64,30 @@ CREATE TABLE IF NOT EXISTS cid_index (
     crop_rel    text NOT NULL,
     document_id text NOT NULL
 );
+
+-- Optional named contributor identity (port of the contributors/* DDL in
+-- e14detector/community.py). The swipe feed is anonymous by default; a contributor
+-- may CHOOSE to claim a unique public nickname so their reviewed-mesa count ranks on
+-- the leaderboard. Account-lite: nickname is the durable identity, the sid cookie is
+-- a per-device pointer (contributor_devices, capped at DEVICE_LIMIT=3), and pin is a
+-- server-assigned 4-digit recovery code stored readable (revealable to a linked
+-- device; the link path is hard rate-limited so it can't be brute-forced online).
+CREATE TABLE IF NOT EXISTS contributors (
+    nickname     text        PRIMARY KEY,            -- normalized (trim/collapse/lower) key
+    display_name text        NOT NULL,               -- as-entered casing, shown on the board
+    pin          text        NOT NULL,               -- 4-digit, revealable to a linked device
+    reviews      integer     NOT NULL DEFAULT 0,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS contributor_devices (
+    sid        text        PRIMARY KEY,              -- one device -> at most one nickname
+    nickname   text        NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_contrib_dev_nick ON contributor_devices (nickname);
+CREATE TABLE IF NOT EXISTS contributor_reviews (
+    nickname text NOT NULL,
+    mesa_id  text NOT NULL,
+    PRIMARY KEY (nickname, mesa_id)                  -- one credit per (contributor, mesa)
+);

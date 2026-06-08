@@ -32,6 +32,7 @@ from .community import (
     crop_id,
     field_key_of,
     issue_form_token,
+    normalize_nickname,
     verify_form_token,
     verify_turnstile,
     voter_token,
@@ -2589,9 +2590,92 @@ def create_app(
 
         n_strange = sum([await record(c, "strange") for c in strange])
         n_good = sum([await record(c, "good") for c in good])
+        # Credit a named contributor (if this device claimed a nickname) for reviewing this
+        # mesa. Every cid in a batch belongs to ONE anonymized mesa, so the mesa id is any
+        # resolved cid's document_id. Best-effort + idempotent per (contributor, mesa): never
+        # let a vanity-count write break the actual vote.
+        try:
+            mesa_doc = None
+            for c in (strange + good):
+                r = await asyncio.to_thread(resolve_cid_cached, c)
+                if r:
+                    mesa_doc = r["document_id"]
+                    break
+            if mesa_doc:
+                await asyncio.to_thread(community.credit_review, sid, mesa_doc)
+        except Exception:  # noqa: BLE001 — contributor credit is non-essential
+            pass
         return _flag_response(
             {"ok": True, "strange": n_strange, "good": n_good}, 200, sid, new_sid
         )
+
+    # -- optional named contributor identity (opt-in leaderboard) ------------
+    @app.get("/api/contributor/me")
+    async def api_contributor_me(request: Request):
+        """Identity (if any) this device's sid is linked to: name, reviews, rank, devices, pin.
+        Anonymous devices get ``{ok:True, contributor:null}``. The PIN is included only because
+        holding the sid cookie already proves this device is one of the nickname's linked ones."""
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        if not _feed_allow(_voter_ip(request)):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        me = await asyncio.to_thread(community.contributor_me, sid)
+        return _flag_response({"ok": True, "contributor": me}, 200, sid, new_sid)
+
+    @app.get("/api/contributor/leaderboard")
+    async def api_contributor_leaderboard(request: Request, n: int = Query(10, ge=1, le=50)):
+        """Public board: top-N contributors by reviewed mesas, plus this device's own rank/count
+        when it has an identity (so a mid-table contributor still sees 'vos: #142')."""
+        if not _feed_allow(_voter_ip(request)):
+            raise HTTPException(status_code=429, detail="rate_limited")
+        top = await asyncio.to_thread(
+            _agg_cached, f"leaderboard:{n}", lambda: community.leaderboard(n), 30.0
+        )
+        sid = request.cookies.get("sid")
+        me = await asyncio.to_thread(community.contributor_me, sid) if sid else None
+        mine = ({"display_name": me["display_name"], "reviews": me["reviews"], "rank": me["rank"]}
+                if me else None)
+        return {"items": top, "me": mine}
+
+    @app.post("/api/contributor/claim")
+    async def api_contributor_claim(request: Request, payload: dict = Body(...)):
+        """Claim a unique public nickname for this device; the server assigns a 4-digit PIN and
+        returns it ONCE. Anti-bot gated exactly like a vote (origin + honeypot/form-token)."""
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        if not _origin_allowed(request):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        if bot_check(payload, sid, _voter_ip(request), poll_cfg):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        res = await asyncio.to_thread(
+            community.claim_contributor, str(payload.get("nickname", "")), sid
+        )
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
+
+    @app.post("/api/contributor/link")
+    async def api_contributor_link(request: Request, payload: dict = Body(...)):
+        """Link THIS device to an existing nickname via its PIN (recovery / extra device, capped
+        at 3 — it adds a device, never moves the name off the others). Hard rate-limited per-IP
+        AND per-nickname: the public nickname is half a credential, so the 4-digit half must not
+        be brute-forceable online."""
+        sid = request.cookies.get("sid") or uuid.uuid4().hex
+        new_sid = "sid" not in request.cookies
+        if not _origin_allowed(request):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        if bot_check(payload, sid, _voter_ip(request), poll_cfg):
+            return _flag_response({"ok": False, "error": "invalid_request"}, 403, sid, new_sid)
+        # Brute-force throttle: ~5 tries then a slow drip, on BOTH the IP and the nickname, so
+        # neither one attacker nor a botnet can sweep the 10k PIN space for a given name.
+        ip = _voter_ip(request)
+        nick_key = normalize_nickname(str(payload.get("nickname", "")))
+        if not await asyncio.to_thread(community.allow, f"clink-ip:{ip}", 1.0, 5.0) or \
+           not await asyncio.to_thread(community.allow, f"clink-nk:{nick_key}", 0.5, 5.0):
+            return _flag_response({"ok": False, "error": "rate_limited"}, 429, sid, new_sid)
+        res = await asyncio.to_thread(
+            community.link_contributor,
+            str(payload.get("nickname", "")), str(payload.get("pin", "")), sid,
+        )
+        return _flag_response(res, 200 if res.get("ok") else 409, sid, new_sid)
 
     return app
 

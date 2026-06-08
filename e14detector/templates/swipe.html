@@ -109,6 +109,59 @@
                     transition:width .55s cubic-bezier(.2,.7,.3,1), background .35s; }
     .rank.bump { animation:rankPulse .7s cubic-bezier(.2,.7,.3,1); }
     @keyframes rankPulse { 0%{transform:scale(1)} 32%{transform:scale(1.11)} 100%{transform:scale(1)} }
+    .rank.tap { cursor:pointer; -webkit-tap-highlight-color:transparent; }
+    .rank.tap:hover { border-color:var(--line-strong); }
+    /* The "create a nickname" entry pill shown before a contributor opts in (anonymous). */
+    .rank.cta { background:var(--card); }
+    .rank.cta .name { color:var(--link); }
+
+    /* --- Identity sheet (opt-in named contributor) ----------------------------------- */
+    .id-ov { position:fixed; inset:0; z-index:60; background:rgba(28,26,21,.46); backdrop-filter:blur(2px);
+             display:flex; align-items:flex-end; justify-content:center; opacity:0; pointer-events:none;
+             transition:opacity .2s; }
+    .id-ov.show { opacity:1; pointer-events:auto; }
+    .id-sheet { width:100%; max-width:460px; background:var(--card); border:1.5px solid var(--line);
+                border-bottom:none; border-radius:18px 18px 0 0; box-shadow:0 -18px 50px -20px rgba(28,26,21,.4);
+                padding:18px 18px calc(18px + env(safe-area-inset-bottom)); transform:translateY(14px);
+                transition:transform .24s cubic-bezier(.2,.7,.3,1); max-height:88vh; overflow:auto; }
+    .id-ov.show .id-sheet { transform:none; }
+    @media (min-width:560px){ .id-ov{ align-items:center; } .id-sheet{ border-bottom:1.5px solid var(--line);
+                border-radius:18px; } }
+    .id-head { display:flex; align-items:center; gap:10px; margin:0 0 12px; }
+    .id-head h2 { font-size:16px; font-weight:850; margin:0; letter-spacing:-.01em; flex:1; }
+    .id-x { border:none; background:var(--bg-soft,#f1efe9); width:30px; height:30px; border-radius:9px;
+            font-size:17px; line-height:1; cursor:pointer; color:var(--ink-faint); flex:0 0 auto; }
+    .id-sub { font-size:12.5px; color:var(--ink-faint); line-height:1.5; margin:0 0 14px; }
+    .id-field { display:flex; flex-direction:column; gap:5px; margin:0 0 12px; }
+    .id-field label { font-size:11.5px; font-weight:700; color:var(--ink-faint); }
+    .id-field input { font:inherit; font-size:15px; padding:11px 12px; border:1.5px solid var(--line);
+                      border-radius:11px; background:var(--card); color:var(--ink); width:100%; }
+    .id-field input:focus { outline:none; border-color:var(--ink); box-shadow:0 0 0 3px rgba(28,26,21,.1); }
+    .id-field input.pin { letter-spacing:.5em; text-align:center; font-weight:800; font-variant-numeric:tabular-nums; }
+    .id-btn { width:100%; border:none; border-radius:12px; padding:13px; font:inherit; font-weight:800;
+              font-size:14.5px; cursor:pointer; background:var(--link); color:#fff; transition:filter .14s, opacity .14s; }
+    .id-btn:hover { filter:brightness(1.06); } .id-btn:disabled { opacity:.55; cursor:default; }
+    .id-btn.ghost { background:transparent; color:var(--ink-faint); font-weight:700; font-size:13px; padding:9px; }
+    .id-err { font-size:12.5px; color:var(--red,#c0392b); font-weight:600; min-height:1.1em; margin:2px 0 10px; }
+    .id-pinbox { text-align:center; padding:16px; border:1.5px dashed var(--gold,#b8860b); border-radius:14px;
+                 background:rgba(184,134,11,.07); margin:4px 0 12px; }
+    .id-pinbox .lab { font-size:11.5px; font-weight:700; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.06em; }
+    .id-pinbox .pin { font-size:38px; font-weight:850; letter-spacing:.18em; font-variant-numeric:tabular-nums;
+                      color:var(--ink); margin:4px 0 2px; }
+    .id-pinbox .warn { font-size:11.5px; color:var(--ink-faint); line-height:1.45; }
+    .id-stat { display:flex; gap:10px; margin:0 0 14px; }
+    .id-stat .box { flex:1; text-align:center; border:1.5px solid var(--line); border-radius:12px; padding:10px 6px; }
+    .id-stat .box .v { font-size:22px; font-weight:850; font-variant-numeric:tabular-nums; }
+    .id-stat .box .k { font-size:10.5px; font-weight:700; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.05em; }
+    .id-lb { list-style:none; margin:6px 0 0; padding:0; }
+    .id-lb li { display:flex; align-items:center; gap:9px; padding:7px 2px; border-bottom:1px solid var(--line); font-size:13.5px; }
+    .id-lb li:last-child { border-bottom:none; }
+    .id-lb li.me { font-weight:800; }
+    .id-lb .pos { width:24px; text-align:right; color:var(--ink-faint); font-weight:700; font-variant-numeric:tabular-nums; }
+    .id-lb .who { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .id-lb .cnt { color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+    .id-tag { display:inline-block; font-size:11px; font-weight:700; color:var(--ink-faint); margin-left:6px; }
+    .id-divider { border:none; border-top:1px solid var(--line); margin:16px 0; }
 
     .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(154px, 1fr)); gap:13px; }
 
@@ -327,6 +380,12 @@
     </div>
   </div>
 
+  <!-- Identity sheet: opt-in named contributor (claim a nickname / link a device / leaderboard).
+       Its inner HTML is rendered by JS (idRender) from the current identity state. -->
+  <div class="id-ov" id="idov" aria-hidden="true">
+    <div class="id-sheet" id="idsheet" role="dialog" aria-modal="true" aria-label="Tu identidad de veeduría"></div>
+  </div>
+
   <script>
     // Grid voting: GET /api/acta-deck returns every casilla of ONE anonymized mesa as
     // { cid, img_url } (shuffled, no acta id leaks). The contributor marks the strange ones;
@@ -409,18 +468,35 @@
     let lastRankAt = (rankFor(reviewed) || { at: 0 }).at;   // prime silently so a returning user isn't re-congratulated
 
     function renderReviewed() {
-      if (reviewed <= 0) { reviewedEl.hidden = true; reviewedEl.innerHTML = ''; return; }
+      // The chip is always a tap target into the identity sheet (see idOpen). Three states:
+      //  · named contributor  -> show the public nickname + count + rank colour
+      //  · anonymous, >0 mesas -> show the rank as before, tapping offers to claim a name
+      //  · anonymous, 0 mesas  -> a subtle "Crear apodo" call so opt-in is discoverable
+      reviewedEl.classList.add('tap');
+      if (!contributor && reviewed <= 0) {
+        reviewedEl.classList.add('cta');
+        reviewedEl.style.removeProperty('--rank');
+        reviewedEl.title = 'Crear un apodo para sumar tus revisiones';
+        reviewedEl.innerHTML = '<span class="badge" style="background:var(--link)">✦</span><span class="name">Crear apodo</span>';
+        reviewedEl.hidden = false;
+        return;
+      }
+      reviewedEl.classList.remove('cta');
       const r = rankFor(reviewed) || RANKS[0];
       const nx = nextRank(reviewed);
       let pct = 100;
       if (nx) { const base = r.at; pct = Math.round(((reviewed - base) / (nx.at - base)) * 100); pct = Math.max(7, Math.min(100, pct)); }
       reviewedEl.style.setProperty('--rank', r.color);
-      reviewedEl.title = nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas)') : '¡Nivel máximo alcanzado!';
+      const named = contributor && contributor.display_name;
+      reviewedEl.title = named
+        ? (contributor.display_name + ' · ' + r.name + (nx ? ' (próximo: ' + nx.name + ' a las ' + nx.at + ')' : ''))
+        : (nx ? ('Próximo nivel: ' + nx.name + ' (a las ' + nx.at + ' mesas) · tocá para crear tu apodo') : '¡Nivel máximo alcanzado!');
       reviewedEl.innerHTML =
         '<span class="badge">★</span>' +
-        '<span class="name">' + r.name + '</span>' +
+        '<span class="name">' + (named ? esc(contributor.display_name) : r.name) + '</span>' +
         '<span class="n">' + reviewed + (reviewed === 1 ? ' mesa' : ' mesas') + '</span>' +
-        (nx ? '<span class="next">faltan ' + (nx.at - reviewed) + '</span>' : '') +
+        (named ? '<span class="next">' + r.name + '</span>'
+               : (nx ? '<span class="next">faltan ' + (nx.at - reviewed) + '</span>' : '')) +
         '<span class="prog"><i style="width:' + pct + '%"></i></span>';
       reviewedEl.hidden = false;
     }
@@ -434,6 +510,201 @@
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => { t.classList.remove('show', 'win'); }, 2300);
     }
+
+    // --- Optional named contributor identity -------------------------------------------
+    // Anonymous by default. A contributor MAY claim a unique public nickname so their
+    // reviewed-mesa count accumulates and ranks on the leaderboard. The nickname is the
+    // durable identity; this device is linked to it server-side (by the sid cookie). A
+    // server-assigned 4-digit PIN re-links up to 3 devices — it is NOT a password, just a
+    // low-stakes recovery code (the link endpoint is hard rate-limited on the server).
+    let contributor = null;                 // {display_name, reviews, devices, pin, rank} | null
+    let idView = 'auto';                    // 'auto' | 'claim' | 'link' | 'pin'
+    let idBusy = false, lastClaimPin = '', lastBoard = null;
+    const idov = document.getElementById('idov');
+    const idsheet = document.getElementById('idsheet');
+
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+    function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+    function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+
+    function setContributor(c) {
+      contributor = c;
+      if (c) {
+        lsSet('e14_nick', c.display_name || '');
+        if (c.pin) lsSet('e14_pin', c.pin);
+        if (typeof c.reviews === 'number' && c.reviews > reviewed) { reviewed = c.reviews; persistReviewed(); }
+      }
+      renderReviewed();
+    }
+
+    async function idFetchMe() {
+      try {
+        const res = await fetch('/api/contributor/me', { headers: { 'Accept': 'application/json' } });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok) setContributor(data.contributor || null);
+      } catch (e) {}
+    }
+
+    function idOpen(view) {
+      idView = view || 'auto';
+      idov.classList.add('show'); idov.setAttribute('aria-hidden', 'false');
+      idRender();
+      if (idView === 'auto') { if (contributor) idLoadBoard(); else idFetchMe(); }
+    }
+    function idClose() { idov.classList.remove('show'); idov.setAttribute('aria-hidden', 'true'); lastClaimPin = ''; }
+    idov.addEventListener('click', function (e) { if (e.target === idov) idClose(); });
+
+    function idRender() {
+      const close = '<button class="id-x" type="button" data-act="close" aria-label="Cerrar">×</button>';
+      let html;
+      if (idView === 'pin' && lastClaimPin) {
+        html =
+          '<div class="id-head"><h2>¡Apodo creado!</h2>' + close + '</div>' +
+          '<p class="id-sub">Guardá este código. Lo necesitás para sumar este apodo en <b>otro dispositivo</b> (hasta 3). No lo compartas: es lo único que protege tu apodo.</p>' +
+          '<div class="id-pinbox"><div class="lab">Tu código de recuperación</div>' +
+          '<div class="pin">' + esc(lastClaimPin) + '</div>' +
+          '<div class="warn">No te lo volveremos a mostrar en un dispositivo nuevo.</div></div>' +
+          '<button class="id-btn" type="button" data-act="done">Entendido, guardé mi código</button>';
+      } else if (idView === 'link') {
+        html =
+          '<div class="id-head"><h2>Vincular este dispositivo</h2>' + close + '</div>' +
+          '<p class="id-sub">Escribí tu apodo y tu código de 4 dígitos para sumar este dispositivo a tu apodo (hasta 3 dispositivos).</p>' +
+          '<div class="id-field"><label for="id-lnick">Apodo</label>' +
+          '<input id="id-lnick" type="text" maxlength="20" autocomplete="off" value="' + esc(lsGet('e14_nick')) + '"></div>' +
+          '<div class="id-field"><label for="id-lpin">Código (4 dígitos)</label>' +
+          '<input id="id-lpin" class="pin" type="text" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="••••"></div>' +
+          '<div class="id-err" id="id-err"></div>' +
+          '<button class="id-btn" type="button" data-act="link">Vincular</button>' +
+          '<button class="id-btn ghost" type="button" data-act="claim-view">Crear un apodo nuevo</button>';
+      } else if (idView === 'claim' || !contributor) {
+        html =
+          '<div class="id-head"><h2>Crear un apodo</h2>' + close + '</div>' +
+          '<p class="id-sub">Opcional. Elegí un apodo público para que tus revisiones se sumen y aparezcas en la tabla de veeduría. No uses tu nombre real ni datos personales.</p>' +
+          '<div class="id-field"><label for="id-nick">Apodo (público)</label>' +
+          '<input id="id-nick" type="text" maxlength="20" autocomplete="off" placeholder="Ej. AguilaDelValle"></div>' +
+          '<div class="id-err" id="id-err"></div>' +
+          '<button class="id-btn" type="button" data-act="claim">Crear mi apodo</button>' +
+          '<button class="id-btn ghost" type="button" data-act="link-view">Ya tengo un apodo — vincular este dispositivo</button>';
+      } else {
+        const c = contributor, pin = lsGet('e14_pin');
+        html =
+          '<div class="id-head"><h2>' + esc(c.display_name) + '</h2>' + close + '</div>' +
+          '<div class="id-stat">' +
+            '<div class="box"><div class="v">' + (c.reviews || 0) + '</div><div class="k">mesas</div></div>' +
+            '<div class="box"><div class="v">#' + (c.rank || '—') + '</div><div class="k">puesto</div></div>' +
+            '<div class="box"><div class="v">' + (c.devices || 1) + '/3</div><div class="k">dispositivos</div></div>' +
+          '</div>' +
+          (pin
+            ? '<div class="id-pinbox" id="id-pinwrap" hidden><div class="lab">Tu código</div><div class="pin">' + esc(pin) + '</div>' +
+              '<div class="warn">Para vincular otro dispositivo: abrí esta página allí → “Ya tengo un apodo” → escribí tu apodo y este código.</div></div>' +
+              '<button class="id-btn ghost" type="button" data-act="showpin">Ver mi código de recuperación</button>'
+            : '<p class="id-sub">Para vincular otro dispositivo necesitás tu código de 4 dígitos (se mostró al crear el apodo).</p>') +
+          '<hr class="id-divider"><div class="id-head" style="margin-bottom:8px"><h2 style="font-size:14px">Tabla de veeduría</h2></div>' +
+          '<ul class="id-lb" id="id-lb"><li><span class="pos"></span><span class="who" style="color:var(--ink-faint)">Cargando…</span></li></ul>';
+      }
+      idsheet.innerHTML = html;
+      const nick = idsheet.querySelector('#id-nick'); if (nick) setTimeout(function () { nick.focus(); }, 60);
+      if (idView === 'auto' && contributor) idRenderBoard();
+    }
+
+    async function idLoadBoard() {
+      try {
+        const res = await fetch('/api/contributor/leaderboard?n=10');
+        const data = await res.json().catch(() => ({}));
+        lastBoard = data;
+        if (data && data.me && contributor) {
+          contributor.reviews = data.me.reviews; contributor.rank = data.me.rank;
+          if (data.me.reviews > reviewed) { reviewed = data.me.reviews; persistReviewed(); }
+          renderReviewed();
+          // Patch the stats row in place (don't rebuild the sheet — that would reset a revealed PIN).
+          const boxes = idsheet.querySelectorAll('.id-stat .box .v');
+          if (boxes.length === 3) { boxes[0].textContent = contributor.reviews || 0; boxes[1].textContent = '#' + (contributor.rank || '—'); }
+        }
+        idRenderBoard();
+      } catch (e) {}
+    }
+    function idRenderBoard() {
+      const ul = idsheet.querySelector('#id-lb'); if (!ul || !lastBoard) return;
+      const items = lastBoard.items || [], me = lastBoard.me;
+      let rows = items.map(function (it, i) {
+        const mine = me && me.rank === i + 1 && me.display_name === it.display_name;
+        return '<li' + (mine ? ' class="me"' : '') + '><span class="pos">' + (i + 1) + '</span>' +
+          '<span class="who">' + esc(it.display_name) + (mine ? ' <span class="id-tag">vos</span>' : '') +
+          '</span><span class="cnt">' + it.reviews + '</span></li>';
+      }).join('');
+      if (me && me.rank > items.length) {
+        rows += '<li class="me"><span class="pos">' + me.rank + '</span><span class="who">' +
+          esc(me.display_name) + ' <span class="id-tag">vos</span></span><span class="cnt">' + me.reviews + '</span></li>';
+      }
+      ul.innerHTML = rows || '<li><span class="pos"></span><span class="who" style="color:var(--ink-faint)">Sé el primero en la tabla.</span></li>';
+    }
+
+    idsheet.addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-act]'); if (!btn) return;
+      const act = btn.getAttribute('data-act');
+      if (act === 'close' || act === 'done') return idClose();
+      if (act === 'link-view') { idView = 'link'; return idRender(); }
+      if (act === 'claim-view') { idView = 'claim'; return idRender(); }
+      if (act === 'showpin') { const w = idsheet.querySelector('#id-pinwrap'); if (w) w.hidden = false; btn.hidden = true; return; }
+      if (act === 'claim') return idDoClaim();
+      if (act === 'link') return idDoLink();
+    });
+
+    const CLAIM_ERR = { taken: 'Ese apodo ya está tomado. Probá otro.',
+      invalid: 'Apodo inválido: usá letras, números y espacios.', too_short: 'Muy corto (mínimo 2).',
+      too_long: 'Muy largo (máximo 20).', blocked: 'Ese apodo no está permitido.',
+      already_linked: 'Este dispositivo ya tiene un apodo.', invalid_request: 'No se pudo verificar. Recargá la página.' };
+    const LINK_ERR = { not_found: 'No encontramos ese apodo.', bad_pin: 'Código incorrecto.',
+      device_limit: 'Ese apodo ya tiene 3 dispositivos.', rate_limited: 'Demasiados intentos. Esperá un momento.',
+      invalid_request: 'No se pudo verificar. Recargá la página.' };
+
+    async function idDoClaim() {
+      if (idBusy) return;
+      const inp = idsheet.querySelector('#id-nick'), errEl = idsheet.querySelector('#id-err');
+      const name = ((inp && inp.value) || '').trim();
+      if (name.length < 2) { if (errEl) errEl.textContent = 'Elegí un apodo de al menos 2 caracteres.'; return; }
+      idBusy = true; const btn = idsheet.querySelector('[data-act="claim"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Creando…'; }
+      try {
+        await ensureSession();
+        const hp = document.getElementById('hp-website');
+        const res = await fetch('/api/contributor/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nickname: name, form_token: window.__formToken, website: hp ? hp.value : '' }) });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok) {
+          lastClaimPin = data.pin || '';
+          setContributor({ display_name: data.display_name, reviews: data.reviews || 0, devices: data.devices || 1, pin: data.pin, rank: null });
+          idView = 'pin'; idRender();
+        } else if (errEl) { errEl.textContent = CLAIM_ERR[data && data.error] || 'No se pudo crear. Probá de nuevo.'; }
+      } catch (e) { if (errEl) errEl.textContent = 'No se pudo crear. Probá de nuevo.'; }
+      finally { idBusy = false; const b = idsheet.querySelector('[data-act="claim"]'); if (b) { b.disabled = false; b.textContent = 'Crear mi apodo'; } }
+    }
+
+    async function idDoLink() {
+      if (idBusy) return;
+      const n = idsheet.querySelector('#id-lnick'), p = idsheet.querySelector('#id-lpin'), errEl = idsheet.querySelector('#id-err');
+      const name = ((n && n.value) || '').trim(), pin = ((p && p.value) || '').trim();
+      if (name.length < 2 || !/^\d{4}$/.test(pin)) { if (errEl) errEl.textContent = 'Escribí tu apodo y un código de 4 dígitos.'; return; }
+      idBusy = true; const btn = idsheet.querySelector('[data-act="link"]');
+      if (btn) { btn.disabled = true; btn.textContent = 'Vinculando…'; }
+      try {
+        await ensureSession();
+        const hp = document.getElementById('hp-website');
+        const res = await fetch('/api/contributor/link', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nickname: name, pin: pin, form_token: window.__formToken, website: hp ? hp.value : '' }) });
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok) {
+          setContributor({ display_name: data.display_name, reviews: data.reviews || 0, devices: data.devices || 1, pin: data.pin, rank: null });
+          idView = 'auto'; idRender(); idLoadBoard(); showToast('¡Dispositivo vinculado!');
+        } else if (errEl) { errEl.textContent = LINK_ERR[data && data.error] || 'No se pudo vincular.'; }
+      } catch (e) { if (errEl) errEl.textContent = 'No se pudo vincular. Probá de nuevo.'; }
+      finally { idBusy = false; const b = idsheet.querySelector('[data-act="link"]'); if (b) { b.disabled = false; b.textContent = 'Vincular'; } }
+    }
+
+    reviewedEl.addEventListener('click', function () { idOpen('auto'); });
+    renderReviewed();   // show the chip immediately (a "Crear apodo" CTA while anonymous)
+    idFetchMe();        // then reconcile with any server identity already linked to this device
 
     // --- Turnstile session gate ---------------------------------------------------------
     const turnstileOn = !!window.__turnstileSitekey;
