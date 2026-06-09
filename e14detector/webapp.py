@@ -970,9 +970,20 @@ def build_public_counts(recon: dict | None, served_total: int, quarantined: int 
          "label": "Mesas disponibles en nuestro sistema", "value_label": lab(served_total),
          "sub": ("Puedes consultarlas y compararlas todas con el documento oficial."
                  if quarantined else "Listas para consultar, revisar y comparar."),
-         "highlight": True},
+         "highlight": not quarantined},
     ]
     votable = max(0, served_total - quarantined) if isinstance(served_total, int) else None
+    # When some served actas couldn't be auto-read, the chain doesn't end at "disponibles": the
+    # honest final number is how many are actually open to community review (the rest are shown
+    # but not votable). Make that its own step so the disponibles -> votable drop is in the
+    # funnel, not a footnote. "Cómo leemos cada acta" below explains the gap.
+    if quarantined:
+        funnel.append(
+            {"key": "revisable", "connector": "Y de esas, abiertas a revisión por la comunidad",
+             "label": "Mesas abiertas a revisión por votación", "value_label": lab(votable),
+             "sub": (f"Las otras {lab(quarantined)} no se pudieron escanear: se muestran y se "
+                     "comparan con el documento oficial, pero sin votación (ver abajo)."),
+             "highlight": True})
     cobertura = round(served_total * 100 / inf, 2) if isinstance(inf, int) and inf else None
     return {
         "served_label": lab(served_total),
