@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import alerts, config
-from .transparency_log import TRANSPARENCY_LOG
+from .transparency_log import RECOVERY_FUNNEL, TRANSPARENCY_LOG
 from .community import (
     PollConfig,
     make_store,
@@ -446,12 +446,13 @@ def _flag_level(strange: int, good: int) -> float:
 
 # Crowd-signal filters for /buscar. Each maps to a cheap, already-cached aggregate (see
 # _search_context); "" means no filter (the default directory).
-_BUSCAR_FILTERS = ("reportadas", "muy_reportadas", "revisadas", "sin_revisar")
+_BUSCAR_FILTERS = ("reportadas", "muy_reportadas", "revisadas", "sin_revisar", "no_escaneada")
 _BUSCAR_TITLES = {
     "reportadas": "Actas reportadas por la comunidad — Veeduría ciudadana 2026",
     "muy_reportadas": "Actas muy reportadas por la comunidad — Veeduría ciudadana 2026",
     "revisadas": "Actas revisadas por la comunidad — Veeduría ciudadana 2026",
     "sin_revisar": "Actas sin revisar todavía — Veeduría ciudadana 2026",
+    "no_escaneada": "Actas que no se pudieron escanear — Veeduría ciudadana 2026",
 }
 _BUSCAR_DEFAULT_TITLE = "Busca un acta E-14 — Veeduría ciudadana elecciones Colombia 2026"
 
@@ -2025,6 +2026,10 @@ def create_app(
                 include_ids = _agg_cached("review_popularity", community.reviewed_actas)
             elif filt == "sin_revisar":
                 exclude_ids = _agg_cached("review_popularity", community.reviewed_actas)
+            elif filt == "no_escaneada":
+                # Actas whose scan geometry we couldn't auto-read (photos / non-standard formats):
+                # shown but not votable. This facet lets anyone list exactly that set.
+                include_ids = set(_quarantined_docs())
 
             if include_ids is not None:
                 # Bounded set -> fetch with IN, then order (reporters desc, then region) + paginate
@@ -2104,6 +2109,7 @@ def create_app(
                 db, [r["document_id"] for r in doc_rows if popularity.get(r["document_id"])])
         high_voted_docs = {k.rsplit(":", 3)[0] for k in _agg_cached(
             "high_voted", lambda: community.high_voted_fields(config.HIGH_VOTE_THRESHOLD))}
+        quarantined = _quarantined_docs()  # actas shown-but-not-votable ("No se pudo escanear")
         actas = [
             {
                 # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
@@ -2111,6 +2117,7 @@ def create_app(
                 "n_candidates": r["n_candidates"],
                 "high_voted": r["document_id"] in high_voted_docs,
                 "flag_level": flag_levels.get(r["document_id"], 0.0),
+                "no_escaneada": r["document_id"] in quarantined,
             }
             for r in doc_rows
         ]
@@ -2257,6 +2264,7 @@ def create_app(
                 "backlog": backlog,
                 "quarantined_count": quarantined_count,
                 "quarantined_sample": quarantined_sample,
+                "recovery": RECOVERY_FUNNEL,
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
                 "active": "transparencia",

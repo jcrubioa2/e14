@@ -14,7 +14,7 @@ from .classifier import classify_field, classify_slot
 from .cropper import crop_image, save_field_crops, save_page_debug_overlay
 from .cv_features import extract_slot_features
 from .digit_shape import digit_shape_score, extract_digit_shape_features
-from .layout import field_layouts_for_page, geometry_anchor
+from .layout import field_layouts_for_page, geometry_anchor, geometry_disposition
 from .pdf_render import PdfRenderError, render_pdf_pages
 from .preprocess import preprocess_for_features
 from .schemas import DocumentMetadata, FieldClassification, SlotClass, VoteField
@@ -83,6 +83,9 @@ class PdfComputeResult:
     field_count: int
     fields: list[tuple[VoteField, dict[str, Any]]] = dataclass_field(default_factory=list)
     errors: list[tuple[str | None, str, str, str]] = dataclass_field(default_factory=list)
+    # 1 when page-1 geometry is a non-standard photo/long-tail we can't crop reliably (shown
+    # but not votable); 0 for normal + anchored-recoverable scans. From geometry_disposition.
+    quarantined: int = 0
 
 
 def compute_pdf(
@@ -108,6 +111,7 @@ def compute_pdf(
     fields: list[tuple[VoteField, dict[str, Any]]] = []
     errors: list[tuple[str | None, str, str, str]] = []
     field_count = 0
+    quarantined = 0
 
     try:
         pages = render_pdf_pages(pdf_path, pages=config.DEFAULT_PAGES, dpi=dpi)
@@ -118,6 +122,11 @@ def compute_pdf(
                     page.page_number,
                     Path(output_dir) / "debug" / f"{meta.document_id}_p{page.page_number}_layout.png",
                 )
+            # Page-1 geometry decides the acta's disposition (the canonical census basis):
+            # normal/anchored get cropped; a non-standard photo/long-tail is flagged for
+            # quarantine (still cropped so the broken crop is visible, but not votable).
+            if page.page_number == 1:
+                quarantined = int(geometry_disposition(page.width, page.height) == "quarantine")
             # Alternate clean scan geometries (wide/other) anchor the coords to the form's
             # sub-rectangle; canonical/photo pages get None (unchanged full-page coords).
             anchor = geometry_anchor(page.width, page.height)
@@ -223,7 +232,8 @@ def compute_pdf(
                 )
                 fields.append((field, features_payload))
                 field_count += 1
-        return PdfComputeResult(meta=meta, status="done", field_count=field_count, fields=fields, errors=errors)
+        return PdfComputeResult(meta=meta, status="done", field_count=field_count,
+                                fields=fields, errors=errors, quarantined=quarantined)
     except PdfRenderError as exc:
         errors.append((meta.document_id, str(pdf_path), "PDF_RENDER_FAILED", str(exc)))
     except Exception as exc:
@@ -234,6 +244,9 @@ def compute_pdf(
 def _persist(store: DetectorStore, result: PdfComputeResult) -> None:
     store.clear_document_results(result.meta.document_id)
     store.upsert_document(result.meta)
+    # Reproduce the quarantine flag on every (re)build so a from-scratch DB carries it without a
+    # bolt-on pass. Set explicitly both ways so reprocessing a now-standard scan clears a stale flag.
+    store.set_quarantined([result.meta.document_id], value=result.quarantined)
     for field, features in result.fields:
         store.insert_vote_field(field, features=features)
     for document_id, source_path, code, message in result.errors:

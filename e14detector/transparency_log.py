@@ -20,21 +20,37 @@ Each entry:
 
 from __future__ import annotations
 
+# Corpus-level recovery funnel for non-standard scans (PR #47), as reviewed constants so
+# /transparencia can explain what happens to every acta "down the line" past ingestion. These
+# describe the whole remediation; the served-DB quarantine flag remains the LIVE truth for how
+# many are currently not votable. Update when a recovery batch shifts the split. The from-scratch
+# build reproduces this decision in one pass (layout.geometry_disposition).
+RECOVERY_FUNNEL: dict = {
+    "standard_pct": "98,4",   # % of actas that arrive as the standard scan -> auto-read, votable
+    "nonstandard": 1947,      # non-standard geometry the fixed crop coords don't fit
+    "recovered": 1048,        # recovered: re-fetched fresh + crop anchored to the scan's format
+    "flagged": 899,           # residual shown-but-not-votable (almost all consulado photos)
+    "researching": True,      # we are actively working on reading these too (e.g. OCR alignment)
+}
+
 TRANSPARENCY_LOG: list[dict] = [
     {
         "date": "2026-06-08",
         "status": "fixed",
         "tag": "Cobertura",
-        "title": "Recuperamos actas que se habían subido como foto o escaneo no estándar",
+        "title": "Recuperamos actas subidas como foto o escaneo no estándar",
         "body": (
-            "Algunas mesas subieron su acta como foto (a veces de lado o con fondo) o en un "
-            "formato de escaneo distinto, y nuestro lector automático no lograba recortar bien "
-            "las casillas. Vimos que la Registraduría había vuelto a publicar muchas de esas "
-            "actas como un escaneo limpio bajo el mismo enlace, así que descargamos de nuevo las "
-            "versiones frescas y recuperamos los números de la gran mayoría, que ya vuelven a "
-            "estar disponibles para revisión. Las pocas que siguen siendo solo una foto difícil "
-            "de leer se muestran igual, pero con la votación desactivada y explicadas en "
-            "Transparencia. Guardamos además una copia de las versiones anteriores."
+            "Casi todas las actas (98,4%) llegan como un escaneo estándar que nuestro lector "
+            "recorta bien. Pero unas 1.947 venían en otro formato —escaneadas más anchas, o "
+            "fotografiadas, a veces de lado o con fondo— y el lector no acertaba con las "
+            "casillas. Hicimos dos cosas: volvimos a descargar las versiones frescas (la "
+            "Registraduría suele republicar un escaneo limpio bajo el mismo enlace) y ajustamos "
+            "el recorte al formato de cada escaneo. Con eso recuperamos 1.048 actas, que ya "
+            "vuelven a estar disponibles para revisión. Las 899 restantes son casi todas fotos "
+            "de consulados en el exterior: se muestran igual y se pueden comparar con el "
+            "documento oficial, pero con la votación comunitaria desactivada para no pedirte que "
+            "revises números que no pudimos extraer bien. Seguimos trabajando activamente en "
+            "formas de leer también esas. Guardamos además una copia de las versiones anteriores."
         ),
         "link": "https://github.com/jcrubioa2/e14/pull/47",
         "link_label": "Ver el cambio",

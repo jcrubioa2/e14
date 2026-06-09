@@ -62,10 +62,13 @@ def fixability(pdf_path: Path) -> str:
       'anchored'-> clean wide/other geometry recoverable via a per-format anchor
       'hard'    -> photo / long-tail geometry we can't reliably crop -> quarantine
       'error'   -> unreadable
+
+    Delegates to layout.geometry_disposition so this script and the from-scratch processor
+    apply the SAME recover/flag decision (quarantine -> 'hard' here).
     """
     import fitz
 
-    from e14detector.layout import geometry_anchor
+    from e14detector.layout import geometry_disposition
 
     try:
         d = fitz.open(pdf_path)
@@ -76,11 +79,9 @@ def fixability(pdf_path: Path) -> str:
             d.close()
     except Exception:  # noqa: BLE001
         return "error"
-    if classify(w, h) == "normal":
-        return "normal"
-    if geometry_anchor(int(w), int(h)) is not None:
-        return "anchored"
-    return "hard"
+    return {"normal": "normal", "anchored": "anchored", "quarantine": "hard"}[
+        geometry_disposition(int(w), int(h))
+    ]
 
 
 def main() -> int:

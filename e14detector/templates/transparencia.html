@@ -92,6 +92,24 @@
     .backlog th, .backlog td { padding:7px 14px; border-bottom:1px solid var(--line); text-align:left; }
     .note { background:var(--paper-2); border:1px solid var(--line); border-radius:var(--r); padding:14px 18px; margin-top:12px; font-size:14px; line-height:1.55; color:var(--ink-soft); }
     .note b { color:var(--ink); }
+
+    /* Recovery funnel: what we do with the non-standard scans once they're in the system. */
+    .recov { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+             box-shadow:var(--shadow); padding:18px 20px; margin-top:12px; }
+    .recov .intro { font-size:14.5px; line-height:1.55; color:var(--ink-soft); margin:0 0 14px; }
+    .recov .intro b { color:var(--ink); }
+    .recov-bar { display:flex; height:34px; border-radius:9px; overflow:hidden; border:1px solid var(--line-strong); }
+    .recov-bar .seg { display:flex; align-items:center; justify-content:center; font-size:12.5px;
+                      font-weight:700; color:#fff; white-space:nowrap; min-width:0; }
+    .recov-bar .ok  { background:var(--green); }
+    .recov-bar .hold{ background:#C9821E; }
+    .recov-legend { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px; }
+    @media (max-width:620px){ .recov-legend { grid-template-columns:1fr; } }
+    .recov-legend .item { display:flex; gap:10px; font-size:13.5px; line-height:1.5; color:var(--ink-soft); }
+    .recov-legend .swatch { flex:0 0 12px; height:12px; border-radius:3px; margin-top:4px; }
+    .recov-legend .num { font-family:"Fraunces", Georgia, serif; font-size:21px; color:var(--ink);
+                         line-height:1; font-variant-numeric:tabular-nums; }
+    .recov-legend .item b { color:var(--ink); }
   </style>
 </head>
 <body>
@@ -190,6 +208,33 @@
     <div class="note">
       Estamos preparando estas cifras. Vuelve pronto; mientras tanto, puedes revisar las actas en
       <a href="/buscar">el buscador</a>.
+    </div>
+    {% endif %}
+
+    {% if recovery %}
+    <h2>Cómo leemos cada acta</h2>
+    <div class="recov">
+      <p class="intro">De cada 100 actas, alrededor de <b>{{ recovery.standard_pct }}</b> llegan como un
+        escaneo estándar que nuestro lector recorta y lee automáticamente. Las demás &mdash;unas
+        <b>{{ '{:,}'.format(recovery.nonstandard).replace(',', '.') }}</b>&mdash; vienen en otro formato
+        (escaneadas más anchas o fotografiadas, a veces de lado). Esto es lo que hacemos con ellas:</p>
+      {% set rec_pct = (recovery.recovered * 100 / recovery.nonstandard) %}
+      <div class="recov-bar" role="img"
+           aria-label="{{ recovery.recovered }} recuperadas y {{ recovery.flagged }} en revisión">
+        <span class="seg ok" style="width:{{ rec_pct|round(1) }}%">{{ rec_pct|round|int }}% recuperadas</span>
+        <span class="seg hold" style="width:{{ (100-rec_pct)|round(1) }}%">{{ (100-rec_pct)|round|int }}% en revisión</span>
+      </div>
+      <div class="recov-legend">
+        <div class="item"><span class="swatch" style="background:var(--green)"></span>
+          <div><span class="num">{{ '{:,}'.format(recovery.recovered).replace(',', '.') }}</span> recuperadas<br>
+            Volvimos a descargar la versión fresca (la Registraduría suele republicar un escaneo limpio) y
+            <b>ajustamos el recorte al formato de cada escaneo</b>. Ya están abiertas a revisión.</div></div>
+        <div class="item"><span class="swatch" style="background:#C9821E"></span>
+          <div><span class="num">{{ '{:,}'.format(recovery.flagged).replace(',', '.') }}</span> en revisión<br>
+            Casi todas <b>fotos de consulados</b> en el exterior. Se muestran y se pueden comparar con el
+            documento oficial, pero <b>sin votación</b>.{% if recovery.researching %} Seguimos trabajando
+            activamente en formas de leerlas también.{% endif %}</div></div>
+      </div>
     </div>
     {% endif %}
 
