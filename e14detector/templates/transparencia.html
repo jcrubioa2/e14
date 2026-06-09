@@ -110,6 +110,11 @@
     .recov-legend .num { font-family:"Fraunces", Georgia, serif; font-size:21px; color:var(--ink);
                          line-height:1; font-variant-numeric:tabular-nums; }
     .recov-legend .item b { color:var(--ink); }
+    .recov-split { border-left:3px solid #C9821E; }
+    .recov-cta { display:inline-flex; align-items:center; gap:6px; margin-top:14px; padding:11px 18px;
+                 border-radius:10px; background:var(--ink); color:#fff; font-weight:700; font-size:14px;
+                 text-decoration:none; }
+    .recov-cta:hover { background:#000; }
   </style>
 </head>
 <body>
@@ -153,6 +158,17 @@
       </div>
       {% endfor %}
     </div>
+
+    {% if quarantined_count %}
+    <div class="note recov-split">
+      De esas <b>{{ public.served_label }}</b> disponibles, <b>{{ public.votable_label }}</b> están
+      <b>abiertas a revisión</b> por votación de la comunidad. Las otras
+      <b>{{ public.quarantined_label }}</b> <b>no se pudieron escanear</b> (casi todas fotos de
+      consulados en el exterior): se muestran y puedes compararlas con el documento oficial, pero
+      <b>sin votación</b>. Abajo explicamos por qué &mdash; y
+      <a href="/buscar?filter=no_escaneada">puedes verlas todas aquí</a>.
+    </div>
+    {% endif %}
 
     {% if public.sin_acta or public.pendientes %}
     <h2>Por qué algunas mesas todavía no están</h2>
@@ -220,9 +236,9 @@
         (escaneadas más anchas o fotografiadas, a veces de lado). Esto es lo que hacemos con ellas:</p>
       {% set rec_pct = (recovery.recovered * 100 / recovery.nonstandard) %}
       <div class="recov-bar" role="img"
-           aria-label="{{ recovery.recovered }} recuperadas y {{ recovery.flagged }} en revisión">
+           aria-label="{{ recovery.recovered }} recuperadas y {{ recovery.flagged }} sin poder escanear">
         <span class="seg ok" style="width:{{ rec_pct|round(1) }}%">{{ rec_pct|round|int }}% recuperadas</span>
-        <span class="seg hold" style="width:{{ (100-rec_pct)|round(1) }}%">{{ (100-rec_pct)|round|int }}% en revisión</span>
+        <span class="seg hold" style="width:{{ (100-rec_pct)|round(1) }}%">{{ (100-rec_pct)|round|int }}% sin escanear</span>
       </div>
       <div class="recov-legend">
         <div class="item"><span class="swatch" style="background:var(--green)"></span>
@@ -230,37 +246,25 @@
             Volvimos a descargar la versión fresca (la Registraduría suele republicar un escaneo limpio) y
             <b>ajustamos el recorte al formato de cada escaneo</b>. Ya están abiertas a revisión.</div></div>
         <div class="item"><span class="swatch" style="background:#C9821E"></span>
-          <div><span class="num">{{ '{:,}'.format(recovery.flagged).replace(',', '.') }}</span> en revisión<br>
-            Casi todas <b>fotos de consulados</b> en el exterior. Se muestran y se pueden comparar con el
-            documento oficial, pero <b>sin votación</b>.{% if recovery.researching %} Seguimos trabajando
-            activamente en formas de leerlas también.{% endif %}</div></div>
+          <div><span class="num">{{ '{:,}'.format(recovery.flagged).replace(',', '.') }}</span> &mdash; «No se pudo escanear»<br>
+            Casi todas <b>fotos de consulados</b> en el exterior. <b>Cuentan dentro del total</b>, se
+            muestran y se pueden comparar con el documento oficial, pero <b>la votación está
+            desactivada</b> porque no pudimos extraer bien sus casillas.{% if recovery.researching %}
+            Seguimos trabajando activamente en formas de leerlas también.{% endif %}</div></div>
       </div>
     </div>
     {% endif %}
 
     {% if quarantined_count %}
-    <h2>Actas que no pudimos leer automáticamente</h2>
+    <h2>Actas que no se pudieron escanear</h2>
     <div class="note">
-      Algunas mesas subieron su acta como <b>foto o en un formato de escaneo no estándar</b>
-      (por ejemplo, fotografiada de lado o con fondo). Nuestro lector automático no logra recortar
-      de forma confiable las casillas de votación de esas imágenes, así que
-      <b>{{ quarantined_count }}</b> acta{{ 's' if quarantined_count != 1 else '' }} se muestra{{ 'n' if quarantined_count != 1 else '' }}
-      en la plataforma <b>pero con la votación comunitaria desactivada</b>: preferimos no pedirte que
-      revises números que no pudimos extraer bien. Puedes verlas igual y compararlas con el documento
-      oficial de la Registraduría. No las ocultamos: aquí van algunos ejemplos.
+      Son <b>{{ quarantined_count }}</b> acta{{ 's' if quarantined_count != 1 else '' }} que se
+      muestra{{ 'n' if quarantined_count != 1 else '' }} en la plataforma <b>con la votación
+      desactivada</b>: preferimos no pedirte que revises números que no pudimos extraer bien.
+      Puedes verlas todas y compararlas con el documento oficial de la Registraduría &mdash;
+      no las ocultamos.
     </div>
-    {% if quarantined_sample %}
-    <div class="backlog" style="margin-top:12px;">
-      <table>
-        <thead><tr><th>Acta</th><th>Ubicación</th></tr></thead>
-        <tbody>
-          {% for q in quarantined_sample %}
-          <tr><td><a href="/acta/{{ q.document_id }}">ver acta</a></td><td>{{ q.loc }}</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% endif %}
+    <a class="recov-cta" href="/buscar?filter=no_escaneada">Ver las actas «No se pudo escanear» &rarr;</a>
     {% endif %}
   </main>
 
