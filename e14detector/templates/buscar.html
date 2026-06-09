@@ -123,6 +123,7 @@
     .chip { display:inline-block; border:1px solid var(--line-strong); border-radius:999px; padding:3px 10px;
             font-size:11px; font-weight:600; color:var(--ink-soft); white-space:nowrap; }
     .chip.alta { border-color:var(--red); color:#fff; background:var(--red); }
+    .chip.no-escan { border-color:#C9821E; color:#fff; background:#C9821E; }
     .go { margin-left:auto; font-weight:700; font-size:13px; color:var(--link); }
 
     .pager { display:flex; gap:12px; justify-content:flex-end; margin-top:22px; }
@@ -160,6 +161,7 @@
           <option value="muy_reportadas" {% if filters.filter == 'muy_reportadas' %}selected{% endif %}>Muy reportadas</option>
           <option value="revisadas" {% if filters.filter == 'revisadas' %}selected{% endif %}>Revisadas</option>
           <option value="sin_revisar" {% if filters.filter == 'sin_revisar' %}selected{% endif %}>Sin revisar</option>
+          <option value="no_escaneada" {% if filters.filter == 'no_escaneada' %}selected{% endif %}>No se pudo escanear</option>
         </select>
       </label>
       <label>Departamento
@@ -269,6 +271,7 @@
         <div class="badges">
           <span class="chip">{{ acta.n_candidates }} candidatos</span>
           {% if acta.high_voted %}<span class="chip alta">muy reportada por la comunidad</span>{% endif %}
+          {% if acta.no_escaneada %}<span class="chip no-escan">no se pudo escanear</span>{% endif %}
           <span class="go">Ver &rarr;</span>
         </div>
       </a>

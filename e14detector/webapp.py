@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import alerts, config
-from .transparency_log import TRANSPARENCY_LOG
+from .transparency_log import RECOVERY_FUNNEL, TRANSPARENCY_LOG
 from .community import (
     PollConfig,
     make_store,
@@ -446,12 +446,13 @@ def _flag_level(strange: int, good: int) -> float:
 
 # Crowd-signal filters for /buscar. Each maps to a cheap, already-cached aggregate (see
 # _search_context); "" means no filter (the default directory).
-_BUSCAR_FILTERS = ("reportadas", "muy_reportadas", "revisadas", "sin_revisar")
+_BUSCAR_FILTERS = ("reportadas", "muy_reportadas", "revisadas", "sin_revisar", "no_escaneada")
 _BUSCAR_TITLES = {
     "reportadas": "Actas reportadas por la comunidad — Veeduría ciudadana 2026",
     "muy_reportadas": "Actas muy reportadas por la comunidad — Veeduría ciudadana 2026",
     "revisadas": "Actas revisadas por la comunidad — Veeduría ciudadana 2026",
     "sin_revisar": "Actas sin revisar todavía — Veeduría ciudadana 2026",
+    "no_escaneada": "Actas que no se pudieron escanear — Veeduría ciudadana 2026",
 }
 _BUSCAR_DEFAULT_TITLE = "Busca un acta E-14 — Veeduría ciudadana elecciones Colombia 2026"
 
@@ -930,7 +931,7 @@ def build_count_chain(recon: dict | None, served_total: int) -> dict:
     }
 
 
-def build_public_counts(recon: dict | None, served_total: int) -> dict:
+def build_public_counts(recon: dict | None, served_total: int, quarantined: int = 0) -> dict:
     """The PUBLIC projection of the count model — for citizens, not operators.
 
     The admin chain (build_count_chain) exposes every internal frontier (downloaded, crops,
@@ -939,6 +940,11 @@ def build_public_counts(recon: dict | None, served_total: int) -> dict:
     everyday Spanish. Same source numbers, friendly labels, no jargon. ``mesas_escrutadas`` is
     surfaced as "escaneadas" (the wording the public understands), and the final, highlighted step
     is what the platform genuinely makes accessible (the served count).
+
+    ``quarantined`` is the count of served actas we couldn't auto-read ("No se pudo escanear"):
+    they ARE shown and comparable, but voting is disabled, so the final step must not claim all of
+    them are open to "revisar". We surface the votable split (served − quarantined) for an honest
+    final line.
     """
     recon = recon or {}
     tg = recon.get("total_global")
@@ -962,11 +968,28 @@ def build_public_counts(recon: dict | None, served_total: int) -> dict:
          "sub": "La Registraduría ya publicó el PDF del formulario E-14."},
         {"key": "sistema", "connector": "Todas, disponibles para ti aquí",
          "label": "Mesas disponibles en nuestro sistema", "value_label": lab(served_total),
-         "sub": "Listas para consultar, revisar y comparar.", "highlight": True},
+         "sub": ("Puedes consultarlas y compararlas todas con el documento oficial."
+                 if quarantined else "Listas para consultar, revisar y comparar."),
+         "highlight": not quarantined},
     ]
+    votable = max(0, served_total - quarantined) if isinstance(served_total, int) else None
+    # When some served actas couldn't be auto-read, the chain doesn't end at "disponibles": the
+    # honest final number is how many are actually open to community review (the rest are shown
+    # but not votable). Make that its own step so the disponibles -> votable drop is in the
+    # funnel, not a footnote. "Cómo leemos cada acta" below explains the gap.
+    if quarantined:
+        funnel.append(
+            {"key": "revisable", "connector": "Y de esas, abiertas a revisión por la comunidad",
+             "label": "Mesas abiertas a revisión por votación", "value_label": lab(votable),
+             "sub": (f"Las otras {lab(quarantined)} no se pudieron escanear: se muestran y se "
+                     "comparan con el documento oficial, pero sin votación (ver abajo)."),
+             "highlight": True})
     cobertura = round(served_total * 100 / inf, 2) if isinstance(inf, int) and inf else None
     return {
         "served_label": lab(served_total),
+        "quarantined": quarantined,
+        "quarantined_label": lab(quarantined),
+        "votable_label": lab(votable),
         "cobertura_label": (f"{cobertura:.2f}".replace(".", ",") if cobertura is not None else None),
         "funnel": funnel,
         # Plain-language gaps: mesas escaneadas cuya acta aún no publica la Registraduría, and
@@ -2025,6 +2048,10 @@ def create_app(
                 include_ids = _agg_cached("review_popularity", community.reviewed_actas)
             elif filt == "sin_revisar":
                 exclude_ids = _agg_cached("review_popularity", community.reviewed_actas)
+            elif filt == "no_escaneada":
+                # Actas whose scan geometry we couldn't auto-read (photos / non-standard formats):
+                # shown but not votable. This facet lets anyone list exactly that set.
+                include_ids = set(_quarantined_docs())
 
             if include_ids is not None:
                 # Bounded set -> fetch with IN, then order (reporters desc, then region) + paginate
@@ -2104,6 +2131,7 @@ def create_app(
                 db, [r["document_id"] for r in doc_rows if popularity.get(r["document_id"])])
         high_voted_docs = {k.rsplit(":", 3)[0] for k in _agg_cached(
             "high_voted", lambda: community.high_voted_fields(config.HIGH_VOTE_THRESHOLD))}
+        quarantined = _quarantined_docs()  # actas shown-but-not-votable ("No se pudo escanear")
         actas = [
             {
                 # Resolve any missing geo names from the in-memory lookup (DB stays codes-only).
@@ -2111,6 +2139,7 @@ def create_app(
                 "n_candidates": r["n_candidates"],
                 "high_voted": r["document_id"] in high_voted_docs,
                 "flag_level": flag_levels.get(r["document_id"], 0.0),
+                "no_escaneada": r["document_id"] in quarantined,
             }
             for r in doc_rows
         ]
@@ -2228,19 +2257,11 @@ def create_app(
         recon = _pointer_reconciliation()
         with conn() as db:
             served_total = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        public = build_public_counts(recon, served_total)
         # Actas whose scan geometry we couldn't auto-read (photos / non-standard formats): shown
-        # in the platform but not votable. Surfaced here for transparency, with clickable examples.
-        quar = sorted(_quarantined_docs())
-        quarantined_count = len(quar)
-        quarantined_sample = []
-        for did in quar[:12]:
-            p = did.split("_")  # E14 PRE dep muni zona puesto mesa delegados
-            if len(p) >= 7:
-                quarantined_sample.append({
-                    "document_id": did,
-                    "loc": f"depto {p[2]} · mun {p[3]} · zona {p[4]} · puesto {p[5]} · mesa {p[6]}",
-                })
+        # in the platform but not votable. The funnel needs this so it doesn't claim all served
+        # actas are open to "revisar"; the full list lives at /buscar?filter=no_escaneada.
+        quarantined_count = len(_quarantined_docs())
+        public = build_public_counts(recon, served_total, quarantined=quarantined_count)
         # Parse the missing-key sample into a readable list (only shown when we have a real ingest
         # backlog — mesas with a published acta we haven't incorporated yet).
         backlog = []
@@ -2256,7 +2277,7 @@ def create_app(
                 "public": public,
                 "backlog": backlog,
                 "quarantined_count": quarantined_count,
-                "quarantined_sample": quarantined_sample,
+                "recovery": RECOVERY_FUNNEL,
                 "progress": _progress_ctx(),
                 "total_reviews": _total_reviews(),
                 "active": "transparencia",

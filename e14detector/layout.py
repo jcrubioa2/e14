@@ -325,6 +325,31 @@ def geometry_anchor(width: int, height: int) -> NormalizedBox | None:
     return None
 
 
+# Aspect ratio below which a page is the canonical (tall) scan. Above it the page is a
+# wide/other scan or a photo; whether we can crop it is then decided by geometry_anchor.
+NORMAL_AR_MAX = 0.45
+
+
+def geometry_disposition(width: int, height: int) -> str:
+    """How the crop pipeline handles a page's scan geometry — the single source of truth.
+
+    Returns one of:
+      ``"normal"``     canonical tall scan; full-page normalized coords apply directly.
+      ``"anchored"``   clean wide/other geometry; coords remapped via ``geometry_anchor``
+                       (the aspect-ratio fix that recovered ~1,048 actas).
+      ``"quarantine"`` non-standard photo / long-tail geometry the fixed coords can't crop
+                       reliably (e.g. 9:16 phone photos, skewed/perspective captures) — these
+                       are flagged: shown in the platform but not opened for community voting.
+
+    Used by both the from-scratch processor (to mark quarantine in one pass) and the census, so
+    the recovery + flag decision can never drift between them.
+    """
+    ar = (width / height) if height else 0.0
+    if ar < NORMAL_AR_MAX:
+        return "normal"
+    return "anchored" if geometry_anchor(width, height) is not None else "quarantine"
+
+
 def _anchor_box(box: NormalizedBox, anchor: NormalizedBox) -> NormalizedBox:
     """Map a form-relative normalized box into page-normalized coords via the anchor rect."""
     aw = anchor.x1 - anchor.x0
