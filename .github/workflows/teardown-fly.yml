@@ -1,0 +1,60 @@
+name: Teardown Fly (DESTRUCTIVE)
+
+# Manual only. Drops the Fly footprint to $0: destroys the e14-poll + e14-r1-archive
+# apps (and their volumes + IPs) and the Tigris crops bucket. Backs up the results
+# DB as a workflow artifact first. Irreversible — guarded by a typed confirmation.
+#
+# Needs the FLY_API_TOKEN repo secret. NOTE: a deploy-scoped token may not have
+# permission to DESTROY apps/storage; if a step 403s, create an org token
+# (`fly tokens create org`) and set it as FLY_API_TOKEN, then re-run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY to confirm irreversible teardown of the Fly apps + Tigris bucket'
+        required: true
+        default: ''
+
+concurrency: teardown-fly
+
+jobs:
+  teardown:
+    if: ${{ inputs.confirm == 'DESTROY' }}
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Back up results.sqlite from the e14-poll volume
+        run: |
+          mkdir -p backup
+          # Best-effort: needs the app still running with SSH. Don't fail the run if it can't.
+          flyctl ssh console -a e14-poll -C "cat /data/results.sqlite" > backup/results.sqlite \
+            || echo "::warning::could not pull results.sqlite (app stopped/no SSH) — continuing"
+          ls -la backup || true
+
+      - name: Upload results.sqlite artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: e14-results-sqlite
+          path: backup/results.sqlite
+          if-no-files-found: warn
+
+      - name: Destroy Fly apps (machines + volumes + IPs)
+        run: |
+          flyctl apps destroy e14-poll --yes
+          flyctl apps destroy e14-r1-archive --yes
+
+      - name: Destroy the Tigris crops bucket
+        run: |
+          flyctl storage destroy e14-crops --yes \
+            || flyctl ext storage destroy e14-crops --yes \
+            || echo "::warning::could not destroy 'e14-crops' via flyctl — delete it in the Tigris dashboard"
+
+      - name: Confirm
+        run: |
+          echo "Remaining Fly apps:"
+          flyctl apps list || true
+          echo "Fly + Tigris teardown complete. The public site is now offline."
