@@ -1,0 +1,44 @@
+name: Stop Fly (scale to zero)
+
+# Manual only. Uses the existing deploy-scoped FLY_API_TOKEN (which can scale but
+# NOT destroy) to take e14-poll to 0 machines — stopping the always-on compute,
+# the bulk of the Fly bill. It does NOT remove the volume, the IP, or the Tigris
+# bucket (those need an org token or a local `fly apps/storage destroy`).
+# Reversible: `fly scale count 1 -a e14-poll` brings it back.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type STOP to scale e14-poll to zero machines'
+        required: true
+        default: ''
+
+concurrency: stop-fly
+
+jobs:
+  stop:
+    if: ${{ inputs.confirm == 'STOP' }}
+    runs-on: ubuntu-latest
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Scale e14-poll to zero machines
+        run: |
+          flyctl scale count 0 -a e14-poll --yes || echo "::warning::scale count 0 failed"
+
+      - name: Stop any remaining machines (belt-and-suspenders)
+        run: |
+          ids=$(flyctl machines list -a e14-poll --json 2>/dev/null \
+            | python3 -c "import sys,json; print(' '.join(m.get('id','') for m in json.load(sys.stdin)))" || true)
+          for id in $ids; do
+            [ -n "$id" ] && flyctl machine stop "$id" -a e14-poll || true
+          done
+
+      - name: Status
+        run: |
+          echo "=== e14-poll machines (expect 0 running) ==="
+          flyctl machines list -a e14-poll || true
+          echo "Compute stopped. Volume + IP + Tigris remain (small) — destroy those locally or with an org token."
