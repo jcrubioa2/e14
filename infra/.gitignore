@@ -5,3 +5,6 @@ __pycache__/
 # AWS CLI installer cruft, if extracted here
 awscliv2.zip
 aws/
+
+# Teardown backups — never commit citizen vote data
+backup/
