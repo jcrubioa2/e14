@@ -27,7 +27,11 @@ jobs:
 
       - name: Scale e14-poll to zero machines
         run: |
-          flyctl scale count 0 -a e14-poll --yes || echo "::warning::scale count 0 failed"
+          # The app's process group is `web` (not flyctl's default `app`); count 0 on it
+          # DESTROYS the machine so min_machines_running can't restart it.
+          flyctl scale count web=0 -a e14-poll --yes \
+            || flyctl scale count 0 --process-group web -a e14-poll --yes \
+            || echo "::warning::scale to zero failed — falling back to machine stop"
 
       - name: Stop any remaining machines (belt-and-suspenders)
         run: |
